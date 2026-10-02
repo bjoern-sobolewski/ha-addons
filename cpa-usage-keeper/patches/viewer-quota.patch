@@ -1,0 +1,660 @@
+diff --git a/internal/api/auth.go b/internal/api/auth.go
+index 94003ad..26a0dd2 100644
+--- a/internal/api/auth.go
++++ b/internal/api/auth.go
+@@ -44,6 +44,7 @@ type AuthConfig struct {
+ 	FrameAncestorOrigins            []string
+ 	TrustedProxyCIDRs               []string
+ 	APIKeyViewerLocalRankingEnabled bool
++	APIKeyViewerQuotaEnabled        bool
+ }
+ 
+ type authHandler struct {
+@@ -71,6 +72,7 @@ type sessionAPIKeyResponse struct {
+ 	DisplayKey          string `json:"display_key"`
+ 	Alias               string `json:"alias,omitempty"`
+ 	LocalRankingEnabled bool   `json:"local_ranking_enabled,omitempty"`
++	QuotaEnabled        bool   `json:"quota_enabled,omitempty"`
+ }
+ 
+ type loginResponse struct {
+@@ -265,6 +267,7 @@ func (h *authHandler) getSession(c *gin.Context) {
+ 			DisplayKey:          helper.CPAAPIKeyMaskedDisplayKey(row),
+ 			Alias:               row.KeyAlias,
+ 			LocalRankingEnabled: h.config.APIKeyViewerLocalRankingEnabled,
++			QuotaEnabled:        h.config.APIKeyViewerQuotaEnabled,
+ 		}
+ 	}
+ 	c.JSON(http.StatusOK, response)
+diff --git a/internal/api/key_quota.go b/internal/api/key_quota.go
+new file mode 100644
+index 0000000..5c38d93
+--- /dev/null
++++ b/internal/api/key_quota.go
+@@ -0,0 +1,138 @@
++package api
++
++import (
++	"fmt"
++	"net/http"
++	"sort"
++	"strings"
++	"time"
++
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++	"cpa-usage-keeper/internal/service"
++	"github.com/gin-gonic/gin"
++)
++
++// Deliberately separate DTOs: never serialize identities, raw provider payloads,
++// auth indexes, upstream errors, reset credits or local billing statistics.
++type viewerQuotaRow struct {
++	Label            string   `json:"label"`
++	Metric           string   `json:"metric,omitempty"`
++	Remaining        *float64 `json:"remaining,omitempty"`
++	Limit            *float64 `json:"limit,omitempty"`
++	RemainingPercent *float64 `json:"remaining_percent,omitempty"`
++	ResetAt          string   `json:"reset_at,omitempty"`
++	LimitReached     *bool    `json:"limit_reached,omitempty"`
++}
++type viewerQuotaAccount struct {
++	Label     string           `json:"label"`
++	Provider  string           `json:"provider"`
++	Status    string           `json:"status"`
++	UpdatedAt *time.Time       `json:"updated_at,omitempty"`
++	Rows      []viewerQuotaRow `json:"rows"`
++}
++
++func viewerProviderName(identity entities.UsageIdentity) string {
++	// Do not fall back to user-supplied names, URLs or credential labels.
++	switch strings.ToLower(strings.TrimSpace(identity.Type)) {
++	case "codex":
++		return "Codex"
++	case "claude":
++		return "Claude"
++	case "gemini", "gemini-cli":
++		return "Gemini"
++	case "antigravity":
++		return "Antigravity"
++	case "qwen":
++		return "Qwen"
++	case "iflow":
++		return "iFlow"
++	case "kimi":
++		return "Kimi"
++	case "xai":
++		return "xAI"
++	default:
++		return "Other provider"
++	}
++}
++
++func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityProvider, provider QuotaProvider) {
++	router.GET("/key-quota", func(c *gin.Context) {
++		setNoStoreHeaders(c)
++		if identities == nil || provider == nil {
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Quota data is unavailable"})
++			return
++		}
++		// Account selection is always server-side. Query parameters cannot select
++		// credentials or expand access beyond active, enabled configured accounts.
++		active, err := identities.ListActiveUsageIdentities(c.Request.Context())
++		if err != nil {
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Quota data is unavailable"})
++			return
++		}
++		sort.Slice(active, func(i, j int) bool { return active[i].ID < active[j].ID })
++		selected := make([]entities.UsageIdentity, 0, len(active))
++		indexes := make([]string, 0, len(active))
++		for _, identity := range active {
++			if identity.IsDeleted || (identity.Disabled != nil && *identity.Disabled) {
++				continue
++			}
++			selected = append(selected, identity)
++			if identity.AuthType == entities.UsageIdentityAuthTypeAuthFile && identity.Identity != "" {
++				indexes = append(indexes, identity.Identity)
++			}
++		}
++		cache := quota.CacheResponse{}
++		if len(indexes) > 0 {
++			cache, err = provider.GetCachedQuota(c.Request.Context(), quota.CacheRequest{AuthIndexes: indexes})
++			if err != nil {
++				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Quota data is unavailable"})
++				return
++			}
++		}
++		byIndex := make(map[string]quota.CachedQuotaItem, len(cache.Items))
++		for _, item := range cache.Items {
++			byIndex[item.AuthIndex] = item
++		}
++		accounts := make([]viewerQuotaAccount, 0, len(selected))
++		counts := make(map[string]int)
++		now := time.Now()
++		for _, identity := range selected {
++			name := viewerProviderName(identity)
++			counts[name]++
++			account := viewerQuotaAccount{Label: fmt.Sprintf("%s account %d", name, counts[name]), Provider: name, Status: "unavailable", Rows: []viewerQuotaRow{}}
++			item, ok := byIndex[identity.Identity]
++			if identity.AuthType == entities.UsageIdentityAuthTypeAuthFile && ok && item.Status == quota.RefreshTaskStatusCompleted && item.Quota != nil && len(item.Quota.Quota) > 0 {
++				account.UpdatedAt = item.RefreshedAt
++				account.Status = "available"
++				if item.RefreshedAt == nil || now.Sub(*item.RefreshedAt) > 15*time.Minute {
++					account.Status = "stale"
++				}
++				for _, row := range item.Quota.Quota {
++					// Labels describe normalized quota windows/models, never account identity.
++					label := row.Label
++					if label == "" {
++						label = "Quota window"
++					}
++					safe := viewerQuotaRow{Label: label, Metric: row.Metric, Remaining: row.Remaining, Limit: row.Limit, ResetAt: row.ResetAt, LimitReached: row.LimitReached}
++					if row.RemainingFraction != nil {
++						value := *row.RemainingFraction * 100
++						safe.RemainingPercent = &value
++					} else if row.UsedPercent != nil {
++						value := 100 - *row.UsedPercent
++						safe.RemainingPercent = &value
++					}
++					if safe.ResetAt == "" && row.ResetAfterSeconds != nil && item.RefreshedAt != nil {
++						safe.ResetAt = item.RefreshedAt.Add(time.Duration(*row.ResetAfterSeconds) * time.Second).UTC().Format(time.RFC3339)
++					}
++					if reset, err := time.Parse(time.RFC3339, safe.ResetAt); err == nil && !reset.After(now) {
++						account.Status = "stale"
++					}
++					account.Rows = append(account.Rows, safe)
++				}
++			}
++			accounts = append(accounts, account)
++		}
++		c.JSON(http.StatusOK, gin.H{"accounts": accounts})
++	})
++}
+diff --git a/internal/api/router.go b/internal/api/router.go
+index cf48d2d..cda67b1 100644
+--- a/internal/api/router.go
++++ b/internal/api/router.go
+@@ -157,6 +157,9 @@ func NewRouter(
+ 	keyViewerProtected := apiV1.Group("")
+ 	keyViewerProtected.Use(authHandler.apiKeyViewerMiddleware())
+ 	keyViewerProtected.Use(authHandler.activeAPIKeyViewerMiddleware())
++	if authConfig.APIKeyViewerQuotaEnabled {
++		registerKeyQuotaRoute(keyViewerProtected, usageIdentityProvider, quotaProvider)
++	}
+ 	registerKeyOverviewRoute(keyViewerProtected, usageProvider)
+ 	registerKeyActivityRoute(keyViewerProtected, usageProvider)
+ 	registerKeyUsageAnalysisRoute(keyViewerProtected, usageProvider)
+diff --git a/internal/api/test/key_quota_test.go b/internal/api/test/key_quota_test.go
+new file mode 100644
+index 0000000..bc9bbec
+--- /dev/null
++++ b/internal/api/test/key_quota_test.go
+@@ -0,0 +1,109 @@
++package test
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++)
++
++func TestKeyQuotaPermissionsAndSanitization(t *testing.T) {
++	for _, enabled := range []bool{false, true} {
++		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
++			sessions := auth.NewSessionManager(time.Hour)
++			token, _, _ := sessions.CreateAPIKeyViewer(42)
++			old := time.Now().Add(-time.Hour)
++			filename := "private-email@example.com.json"
++			used := 32.5
++			provider := &quotaProviderStub{cacheResponse: quota.CacheResponse{Items: []quota.CachedQuotaItem{{
++				AuthIndex: "secret-index", FileName: &filename, Status: quota.RefreshTaskStatusCompleted, RefreshedAt: &old, Error: "secret-error",
++				Quota: &quota.CheckResponse{ID: "private-id", Subscription: &quota.SubscriptionInfo{Plan: "private-plan"}, Quota: []quota.QuotaRow{{Label: "Weekly", UsedPercent: &used, ResetAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}},
++			}}}}
++			identities := identityMetadataStub{items: []entities.UsageIdentity{
++				{ID: 1, Identity: "secret-index", Type: "codex", AuthType: entities.UsageIdentityAuthTypeAuthFile, Name: filename, FileName: &filename},
++				{ID: 2, Identity: "disabled-index", Type: "codex", AuthType: entities.UsageIdentityAuthTypeAuthFile, Disabled: new(true)},
++				{ID: 3, Identity: "api-secret", Type: "openai-compatibility", AuthType: entities.UsageIdentityAuthTypeAIProvider},
++			}}
++			config := AuthConfig{Enabled: true, LoginPassword: "test-password", SessionTTL: time.Hour, APIKeyViewerQuotaEnabled: enabled}
++			keys := &keyViewerRankingKeyStub{row: entities.CPAAPIKey{ID: 42, APIKey: "test-client"}}
++			router := NewRouter(nil, nil, nil, nil, config, NewAuthHandler(config, sessions), "", OptionalProviders{Quota: provider, UsageIdentity: identities, CPAAPIKeys: keys})
++			read := func(path, token string) *httptest.ResponseRecorder {
++				r := httptest.NewRecorder()
++				router.ServeHTTP(r, viewerRankingRequest(http.MethodGet, path, token))
++				return r
++			}
++			response := read("/api/v1/key-quota?auth_indexes=disabled-index", token)
++			if !enabled {
++				if response.Code != 404 {
++					t.Fatal(response.Code)
++				}
++				return
++			}
++			if response.Code != 200 {
++				t.Fatal(response.Code, response.Body.String())
++			}
++			body := response.Body.String()
++			for _, secret := range []string{"secret-index", filename, "private-id", "private-plan", "secret-error", "disabled-index", "api-secret"} {
++				if strings.Contains(body, secret) {
++					t.Fatalf("leaked %q", secret)
++				}
++			}
++			if len(provider.cacheRequest.AuthIndexes) != 1 || provider.cacheRequest.AuthIndexes[0] != "secret-index" {
++				t.Fatalf("untrusted account selection: %+v", provider.cacheRequest)
++			}
++			var data struct {
++				Accounts []struct {
++					Status string
++					Rows   []struct {
++						RemainingPercent *float64 `json:"remaining_percent"`
++					}
++				}
++			}
++			if err := json.Unmarshal(response.Body.Bytes(), &data); err != nil {
++				t.Fatal(err)
++			}
++			if len(data.Accounts) != 2 || data.Accounts[0].Status != "stale" || data.Accounts[1].Status != "unavailable" || *data.Accounts[0].Rows[0].RemainingPercent != 67.5 {
++				t.Fatal(body)
++			}
++			if read("/api/v1/key-quota", "").Code != 401 {
++				t.Fatal("anonymous quota allowed")
++			}
++			session := read("/api/v1/auth/session", token)
++			if !strings.Contains(session.Body.String(), `"quota_enabled":true`) {
++				t.Fatal("missing session capability")
++			}
++			for _, path := range []string{"/api/v1/quota/cache", "/api/v1/quota/refresh", "/api/v1/quota/reset"} {
++				req := viewerRankingRequest(http.MethodPost, path, token)
++				req.Header.Set("X-CPA-Usage-Keeper-Request", "fetch")
++				resp := httptest.NewRecorder()
++				router.ServeHTTP(resp, req)
++				if resp.Code != 403 {
++					t.Fatalf("viewer reached %s: %d", path, resp.Code)
++				}
++			}
++			keys.row.ID = 99
++			if read("/api/v1/key-quota", token).Code != 401 {
++				t.Fatal("revoked viewer retained quota access")
++			}
++		})
++	}
++}
++
++func TestKeyQuotaEmptyProviders(t *testing.T) {
++	sessions := auth.NewSessionManager(time.Hour)
++	token, _, _ := sessions.CreateAPIKeyViewer(42)
++	config := AuthConfig{Enabled: true, APIKeyViewerQuotaEnabled: true}
++	router := NewRouter(nil, nil, nil, nil, config, NewAuthHandler(config, sessions), "", OptionalProviders{Quota: &quotaProviderStub{}, UsageIdentity: identityMetadataStub{}, CPAAPIKeys: &keyViewerRankingKeyStub{row: entities.CPAAPIKey{ID: 42}}})
++	resp := httptest.NewRecorder()
++	router.ServeHTTP(resp, viewerRankingRequest(http.MethodGet, "/api/v1/key-quota", token))
++	if resp.Code != 200 || !strings.Contains(resp.Body.String(), `"accounts":[]`) {
++		t.Fatal(resp.Code, resp.Body.String())
++	}
++}
+diff --git a/internal/app/app.go b/internal/app/app.go
+index d489cb7..6ab9413 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -327,6 +327,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+ 		FrameAncestorOrigins:            frameAncestorOrigins(cfg),
+ 		TrustedProxyCIDRs:               cfg.TrustedProxyCIDRs,
+ 		APIKeyViewerLocalRankingEnabled: cfg.APIKeyViewerLocalRankingEnabled,
++		APIKeyViewerQuotaEnabled:        cfg.APIKeyViewerQuotaEnabled,
+ 	}
+ 	authHandler := api.NewAuthHandler(authConfig, sessionManager)
+ 
+diff --git a/internal/config/config.go b/internal/config/config.go
+index 7770fd5..82d318e 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -59,6 +59,7 @@ type Config struct {
+ 	CPARequestLogAccessEnabled bool
+ 	// APIKeyViewerLocalRankingEnabled 控制 API Key Viewer 是否可只读查看本地排行。
+ 	APIKeyViewerLocalRankingEnabled bool
++	APIKeyViewerQuotaEnabled        bool
+ 	// RedisQueueAddr 是 CPA management data stream 的 TCP 地址，空值时按 CPA_BASE_URL 推导。
+ 	RedisQueueAddr string
+ 	// RedisQueueTLS 控制是否使用 TLS 连接 Redis 队列。
+@@ -246,6 +247,11 @@ func Load(options LoadOptions) (*Config, error) {
+ 		return nil, err
+ 	}
+ 
++	apiKeyViewerQuotaEnabled, err := getBool("API_KEY_VIEWER_QUOTA_ENABLED", false)
++	if err != nil {
++		return nil, err
++	}
++
+ 	appBasePath, err := normalizeBasePath(strings.TrimSpace(os.Getenv("APP_BASE_PATH")))
+ 	if err != nil {
+ 		return nil, fmt.Errorf("APP_BASE_PATH is invalid: %w", err)
+@@ -266,6 +272,7 @@ func Load(options LoadOptions) (*Config, error) {
+ 		CPAManagementKey:                strings.TrimSpace(os.Getenv("CPA_MANAGEMENT_KEY")),
+ 		CPARequestLogAccessEnabled:      cpaRequestLogAccessEnabled,
+ 		APIKeyViewerLocalRankingEnabled: apiKeyViewerLocalRankingEnabled,
++		APIKeyViewerQuotaEnabled:        apiKeyViewerQuotaEnabled,
+ 		RedisQueueAddr:                  strings.TrimSpace(os.Getenv("REDIS_QUEUE_ADDR")),
+ 		RedisQueueTLS:                   redisQueueTLS,
+ 		RedisQueueBatchSize:             redisQueueBatchSize,
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index 07ff9f8..814f442 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -9,6 +9,7 @@ import { AppFooter } from './components/AppFooter';
+ import { isKeyViewerPath, type KeyViewerPath } from './features/key-viewer';
+ import { KeyAnalysisPage } from './pages/KeyAnalysisPage';
+ import { KeyOverviewPage } from './pages/KeyOverviewPage';
++import { KeyQuotaPage } from './pages/KeyQuotaPage';
+ import { KeyRankingPage } from './pages/KeyRankingPage';
+ import { LoginPage } from './pages/LoginPage';
+ import { UsagePage } from './pages/UsagePage';
+@@ -173,7 +174,9 @@ function App() {
+   } else if (authState === 'unauthenticated') {
+     page = <LoginPage loading={submitting} adminError={adminLoginError} apiKeyError={apiKeyLoginError} onPasswordSubmit={handlePasswordLogin} onAPIKeySubmit={handleAPIKeyLogin} />;
+   } else if (authRole === 'api_key_viewer') {
+-    page = keyViewerPath === '/key-analysis'
++    page = keyViewerPath === '/key-quota' && sessionAPIKey?.quota_enabled
++      ? <KeyQuotaPage apiKey={sessionAPIKey} onNavigate={handleKeyViewerNavigate} onAuthRequired={clearSession} />
++      : keyViewerPath === '/key-analysis'
+       ? <KeyAnalysisPage apiKey={sessionAPIKey} onNavigate={handleKeyViewerNavigate} onAuthRequired={clearSession} />
+       : keyViewerPath === '/key-ranking'
+         ? <KeyRankingPage apiKey={sessionAPIKey} onNavigate={handleKeyViewerNavigate} onAuthRequired={clearSession} />
+diff --git a/web/src/features/key-viewer/KeyViewerShell.tsx b/web/src/features/key-viewer/KeyViewerShell.tsx
+index 1cc6d7b..8eaead8 100644
+--- a/web/src/features/key-viewer/KeyViewerShell.tsx
++++ b/web/src/features/key-viewer/KeyViewerShell.tsx
+@@ -13,6 +13,7 @@ const KEY_VIEWER_PAGE_LABEL_KEYS: Record<KeyViewerPage, string> = {
+   realtime: 'usage_stats.tab_realtime',
+   analysis: 'usage_stats.tab_analysis',
+   ranking: 'usage_stats.tab_ranking',
++  quota: 'key_quota.tab',
+ };
+ 
+ interface KeyViewerShellProps {
+@@ -72,7 +73,7 @@ export function KeyViewerShell({
+ 
+             <DashboardToolbar
+               activeId={activePage}
+-              items={(Object.keys(KEY_VIEWER_PAGE_PATHS) as KeyViewerPage[]).map((page) => ({ id: page, label: t(KEY_VIEWER_PAGE_LABEL_KEYS[page]), href: appPath(KEY_VIEWER_PAGE_PATHS[page]) }))}
++              items={(Object.keys(KEY_VIEWER_PAGE_PATHS) as KeyViewerPage[]).filter((page) => page !== 'quota' || apiKey?.quota_enabled === true).map((page) => ({ id: page, label: t(KEY_VIEWER_PAGE_LABEL_KEYS[page]), href: appPath(KEY_VIEWER_PAGE_PATHS[page]) }))}
+               onNavigate={(page) => onNavigate(KEY_VIEWER_PAGE_PATHS[page])}
+               filters={filters}
+               onRefresh={onRefresh}
+diff --git a/web/src/features/key-viewer/navigation.ts b/web/src/features/key-viewer/navigation.ts
+index f56e58f..fa46701 100644
+--- a/web/src/features/key-viewer/navigation.ts
++++ b/web/src/features/key-viewer/navigation.ts
+@@ -1,11 +1,12 @@
+-export type KeyViewerPage = 'overview' | 'realtime' | 'analysis' | 'ranking';
+-export type KeyViewerPath = '/key-overview' | '/key-realtime' | '/key-analysis' | '/key-ranking';
++export type KeyViewerPage = 'overview' | 'realtime' | 'analysis' | 'ranking' | 'quota';
++export type KeyViewerPath = '/key-overview' | '/key-realtime' | '/key-analysis' | '/key-ranking' | '/key-quota';
+ 
+ export const KEY_VIEWER_PAGE_PATHS: Record<KeyViewerPage, KeyViewerPath> = {
+   overview: '/key-overview',
+   realtime: '/key-realtime',
+   analysis: '/key-analysis',
+   ranking: '/key-ranking',
++  quota: '/key-quota',
+ };
+ 
+ const KEY_VIEWER_PATHS = new Set<KeyViewerPath>(Object.values(KEY_VIEWER_PAGE_PATHS));
+diff --git a/web/src/features/key-viewer/test/quotaNavigation.test.tsx b/web/src/features/key-viewer/test/quotaNavigation.test.tsx
+new file mode 100644
+index 0000000..efbfc2a
+--- /dev/null
++++ b/web/src/features/key-viewer/test/quotaNavigation.test.tsx
+@@ -0,0 +1,16 @@
++// @vitest-environment happy-dom
++import React, {act} from 'react';
++import {createRoot} from 'react-dom/client';
++import {expect, it} from 'vitest';
++import i18n from '@/i18n';
++import {KeyViewerShell} from '../KeyViewerShell';
++it('only displays the quota navigation when enabled for the session', async () => {
++  globalThis.IS_REACT_ACT_ENVIRONMENT=true;await i18n.changeLanguage('en');
++  const container=document.createElement('div');const root=createRoot(container);
++  try {
++    for (const enabled of [false,true]) {
++      await act(async () => root.render(<KeyViewerShell activePage="overview" apiKey={{display_key:'masked',quota_enabled:enabled}} onNavigate={() => undefined} onRefresh={() => undefined}>Content</KeyViewerShell>));
++      expect(container.textContent?.includes('Provider quota')).toBe(enabled);
++    }
++  } finally {await act(async () => root.unmount());}
++});
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index d26f64d..a8c1332 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -68,6 +68,15 @@ const resources = {
+         api_key_login_failed: 'Unable to open the API Key dashboard right now',
+         session_expired: 'Your session expired. Please sign in again.'
+       },
++      key_quota: {
++        tab: 'Provider quota',
++        shared: 'Shared provider quota across all users. Accounts and windows are shown separately. Reload reads the latest stored observations.',
++        available: 'Available', stale: 'Stale observation - current quota may differ',
++        unavailable: 'Quota unavailable - no supported observation yet',
++        updated: 'Last observed', remaining: 'Remaining', resets: 'Resets',
++        exhausted: 'Limit reached', empty: 'No active providers configured',
++        error: 'Unable to load quota. Previously loaded observations may be out of date.'
++      },
+       key_overview: {
+         eyebrow: 'Key overview',
+         title: 'API Key usage overview',
+@@ -1000,6 +1009,15 @@ const resources = {
+         api_key_login_failed: '当前无法打开 API Key 看板',
+         session_expired: '登录状态已失效，请重新登录。'
+       },
++      key_quota: {
++        tab: 'Provider quota',
++        shared: 'Shared provider quota across all users. Accounts and windows are shown separately. Reload reads the latest stored observations.',
++        available: 'Available', stale: 'Stale observation - current quota may differ',
++        unavailable: 'Quota unavailable - no supported observation yet',
++        updated: 'Last observed', remaining: 'Remaining', resets: 'Resets',
++        exhausted: 'Limit reached', empty: 'No active providers configured',
++        error: 'Unable to load quota. Previously loaded observations may be out of date.'
++      },
+       key_overview: {
+         eyebrow: 'API Key 概览',
+         title: 'API Key 用量概览',
+@@ -1932,6 +1950,15 @@ const resources = {
+         api_key_login_failed: '目前無法開啟 API Key 看板',
+         session_expired: '登入狀態已失效，請重新登入。'
+       },
++      key_quota: {
++        tab: 'Provider quota',
++        shared: 'Shared provider quota across all users. Accounts and windows are shown separately. Reload reads the latest stored observations.',
++        available: 'Available', stale: 'Stale observation - current quota may differ',
++        unavailable: 'Quota unavailable - no supported observation yet',
++        updated: 'Last observed', remaining: 'Remaining', resets: 'Resets',
++        exhausted: 'Limit reached', empty: 'No active providers configured',
++        error: 'Unable to load quota. Previously loaded observations may be out of date.'
++      },
+       key_overview: {
+         eyebrow: 'API Key 總覽',
+         title: 'API Key 用量總覽',
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index f74721a..bf62a55 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -2,6 +2,20 @@ import { type AnalysisLatencyDiagnostics, type AnalysisResponse, type AuthFilesM
+ import { isCPAMCEmbed } from '@/embed/cpamcEmbed'
+ import { resolveUsageRequestRange } from '@/utils/usage/rangeQuery'
+ 
++export interface ViewerQuotaRow {
++  label: string; metric?: string; remaining?: number; limit?: number;
++  remaining_percent?: number; reset_at?: string; limit_reached?: boolean;
++}
++export interface ViewerQuotaAccount {
++  label: string; provider: string; status: 'available' | 'stale' | 'unavailable';
++  updated_at?: string; rows: ViewerQuotaRow[];
++}
++export async function fetchKeyQuota(signal?: AbortSignal): Promise<{accounts: ViewerQuotaAccount[]}> {
++  const response = await apiFetch(apiPath('/key-quota'), {signal});
++  if (!response.ok) return parseApiError(response, 'Unable to load quota');
++  return response.json();
++}
++
+ export class ApiError extends Error {
+   status: number
+ 
+@@ -23,6 +37,7 @@ const EMBED_SESSION_HEADER = 'X-CPA-Usage-Keeper-Embed-Session'
+ declare global {
+   interface Window {
+     __APP_BASE_PATH__?: string
++    __KEEPER_VIEWER_ONLY__?: boolean
+   }
+ }
+ 
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 95cd13e..3bfbfbb 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -4,6 +4,7 @@ export interface AuthSessionAPIKeySummary {
+   display_key: string
+   alias?: string
+   local_ranking_enabled?: boolean
++  quota_enabled?: boolean
+ }
+ 
+ export interface AuthSessionResponse {
+diff --git a/web/src/pages/KeyQuotaPage.module.scss b/web/src/pages/KeyQuotaPage.module.scss
+new file mode 100644
+index 0000000..611a27d
+--- /dev/null
++++ b/web/src/pages/KeyQuotaPage.module.scss
+@@ -0,0 +1,5 @@
++.accounts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 16px; }
++.row { padding: 12px 0; border-top: 1px solid var(--border-color, #8884); }
++.row progress { width: 100%; height: 12px; accent-color: #22a58a; margin-top: 8px; }
++.notice { color: var(--warning-color, #b56a00); }
++.metric { margin-left: 8px; opacity: .7; font-size: .85em; }
+diff --git a/web/src/pages/KeyQuotaPage.tsx b/web/src/pages/KeyQuotaPage.tsx
+new file mode 100644
+index 0000000..6f8cf57
+--- /dev/null
++++ b/web/src/pages/KeyQuotaPage.tsx
+@@ -0,0 +1,61 @@
++import { useCallback, useEffect, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import { KeyViewerShell } from '@/features/key-viewer/KeyViewerShell';
++import type { KeyViewerPath } from '@/features/key-viewer/navigation';
++import type { AuthSessionAPIKeySummary } from '@/lib/types';
++import { ApiError, fetchKeyQuota, type ViewerQuotaAccount, type ViewerQuotaRow } from '@/lib/api';
++import { Card } from '@/components/ui/Card';
++import styles from './KeyQuotaPage.module.scss';
++
++export function quotaRemaining(row: ViewerQuotaRow): string {
++  if (row.remaining_percent != null) return `${Math.max(0, Math.min(100, row.remaining_percent)).toLocaleString(undefined, {maximumFractionDigits: 1})}%`;
++  if (row.remaining != null) return row.remaining.toLocaleString(undefined, {maximumFractionDigits: 2});
++  return '—';
++}
++
++export function KeyQuotaPage({apiKey, onNavigate, onAuthRequired}: {
++  apiKey?: AuthSessionAPIKeySummary; onNavigate: (path: KeyViewerPath) => void; onAuthRequired?: () => void;
++}) {
++  const {t} = useTranslation();
++  const [accounts, setAccounts] = useState<ViewerQuotaAccount[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState(false);
++  const refresh = useCallback(async (signal?: AbortSignal) => {
++    setLoading(true);
++    try {
++      const data = await fetchKeyQuota(signal);
++      if (!signal?.aborted) { setAccounts(data.accounts); setError(false); }
++    } catch (err) {
++      if (!signal?.aborted) {
++        if (err instanceof ApiError && err.status === 401) onAuthRequired?.();
++        setError(true);
++      }
++    } finally { if (!signal?.aborted) setLoading(false); }
++  }, [onAuthRequired]);
++  useEffect(() => {
++    const controller = new AbortController();
++    void refresh(controller.signal);
++    const timer = window.setInterval(() => void refresh(controller.signal), 60000);
++    return () => { controller.abort(); window.clearInterval(timer); };
++  }, [refresh]);
++  return <KeyViewerShell activePage="quota" apiKey={apiKey} onNavigate={onNavigate} onAuthRequired={onAuthRequired}
++    onRefresh={() => void refresh()} refreshing={loading} refreshDisabled={loading}>
++    <p>{t('key_quota.shared')}</p>
++    {error && <p role="alert">{t('key_quota.error')}</p>}
++    {!loading && !error && accounts.length === 0 && <p>{t('key_quota.empty')}</p>}
++    <div className={styles.accounts}>{accounts.map((account) => <Card key={account.label}>
++      <h2>{account.label}</h2>
++      <p className={account.status === 'available' ? undefined : styles.notice}>{t(`key_quota.${account.status}`)}</p>
++      {account.updated_at && <p>{t('key_quota.updated')}: {new Date(account.updated_at).toLocaleString()}</p>}
++      {account.rows.map((row, index) => <div className={styles.row} key={index}>
++        <div><strong>{row.label}</strong>{row.metric && <span className={styles.metric}>{row.metric}</span>}</div>
++        <div>{t('key_quota.remaining')}: <strong>{quotaRemaining(row)}</strong>
++          {row.remaining_percent == null && row.limit != null && ` / ${row.limit.toLocaleString()}`}
++        </div>
++        {row.remaining_percent != null && <progress max={100} value={Math.max(0, Math.min(100, row.remaining_percent))} aria-label={`${row.label}: ${t('key_quota.remaining')}`} />}
++        {row.limit_reached && <p className={styles.notice}>{t('key_quota.exhausted')}</p>}
++        {row.reset_at && <p>{t('key_quota.resets')}: {new Date(row.reset_at).toLocaleString()}</p>}
++      </div>)}
++    </Card>)}</div>
++  </KeyViewerShell>;
++}
+diff --git a/web/src/pages/LoginPage.tsx b/web/src/pages/LoginPage.tsx
+index 39c0710..1fd3365 100644
+--- a/web/src/pages/LoginPage.tsx
++++ b/web/src/pages/LoginPage.tsx
+@@ -36,7 +36,7 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+   const { t } = useTranslation();
+   const theme = useThemeStore((state) => state.theme);
+   const setTheme = useThemeStore((state) => state.setTheme);
+-  const [mode, setMode] = useState<LoginMode>('admin');
++  const [mode, setMode] = useState<LoginMode>(window.__KEEPER_VIEWER_ONLY__ ? 'api_key' : 'admin');
+   const [password, setPassword] = useState('');
+   const [apiKey, setApiKey] = useState('');
+   const activeError = getLoginErrorForMode(mode, { adminError, apiKeyError });
+@@ -95,6 +95,7 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+             <button
+               type="button"
+               role="tab"
++              hidden={window.__KEEPER_VIEWER_ONLY__ === true}
+               aria-selected={mode === 'admin'}
+               className={`${styles.tab} ${mode === 'admin' ? styles.tabActive : ''}`.trim()}
+               onClick={() => setMode('admin')}
+diff --git a/web/src/pages/test/KeyQuotaPage.test.tsx b/web/src/pages/test/KeyQuotaPage.test.tsx
+new file mode 100644
+index 0000000..a124f06
+--- /dev/null
++++ b/web/src/pages/test/KeyQuotaPage.test.tsx
+@@ -0,0 +1,28 @@
++// @vitest-environment happy-dom
++import React, {act} from 'react';
++import {createRoot} from 'react-dom/client';
++import {expect, it, vi} from 'vitest';
++import i18n from '@/i18n';
++const api = vi.hoisted(() => ({fetchKeyQuota: vi.fn()}));
++vi.mock('@/lib/api', async (original) => ({...await original<typeof import('@/lib/api')>(), ...api}));
++import {KeyQuotaPage, quotaRemaining} from '../KeyQuotaPage';
++
++it('preserves unknown and zero quota and renders stale and unavailable accounts', async () => {
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++  await i18n.changeLanguage('en');
++  expect(quotaRemaining({label: 'Weekly'})).toBe('—');
++  expect(quotaRemaining({label: 'Weekly', remaining_percent: 0})).toBe('0%');
++  api.fetchKeyQuota.mockResolvedValue({accounts: [
++    {label:'Codex account 1', status:'stale', rows:[{label:'Weekly',remaining_percent:67.5,reset_at:'2030-01-01T00:00:00Z'}]},
++    {label:'Other provider account 1',status:'unavailable',rows:[]},
++  ]});
++  const container=document.createElement('div');document.body.append(container);const root=createRoot(container);
++  try {
++    await act(async () => root.render(<KeyQuotaPage apiKey={{display_key:'masked',quota_enabled:true}} onNavigate={() => undefined}/>));
++    expect(container.textContent).toContain('67.5%');
++    expect(container.textContent).toContain('Stale observation');
++    expect(container.textContent).toContain('Quota unavailable');
++    expect(container.textContent).toContain('Shared provider quota');
++    expect(container.textContent).toContain('Resets');
++  } finally {await act(async () => root.unmount());container.remove();}
++});

@@ -2,3 +2,7 @@
 !Dockerfile
 !run.sh
 !bootstrap.py
+!nginx.conf
+!viewer-locations.conf
+!patches/
+!patches/viewer-quota.patch

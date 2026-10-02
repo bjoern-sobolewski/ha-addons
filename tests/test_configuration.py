@@ -111,6 +111,24 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(env['WORK_DIR'], '/data')
         self.assertEqual(env['TLS_SKIP_VERIFY'], 'false')
 
+    def test_keeper_quota_requires_explicit_enable(self):
+        options = {'cpa_base_url': 'http://cpa:8317', 'management_key': 'm' * 32, 'login_password': 'p' * 32}
+        for value, expected in ((None, 'false'), (False, 'false'), ('true', 'false'), (True, 'true')):
+            with self.subTest(value=value):
+                env = KEEPER.environment({**options, 'viewer_quota_enabled': value})
+                self.assertEqual(env['API_KEY_VIEWER_QUOTA_ENABLED'], expected)
+
+    def test_keeper_optional_public_gateway_uses_only_api_port(self):
+        self.assertNotIn('proxy_pass', KEEPER.api_gateway_location({}))
+        options = {'cpa_base_url': 'http://cpa:8317', 'viewer_api_gateway_enabled': True}
+        location = KEEPER.api_gateway_location(options)
+        self.assertIn('proxy_pass http://cpa:8080;', location)
+        self.assertNotIn('8317', location)
+        self.assertIn('proxy_set_header Upgrade $http_upgrade;', location)
+        self.assertIn('proxy_buffering off;', location)
+        with self.assertRaises(ValueError):
+            KEEPER.api_gateway_location({'cpa_base_url': 'http://host;directive:8317', 'viewer_api_gateway_enabled': True})
+
     def test_manifests_have_matching_options_and_schema(self):
         for app in ('cliproxyapi', 'cpa-usage-keeper'):
             config = yaml.safe_load((ROOT / app / 'config.yaml').read_text())

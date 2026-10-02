@@ -3,6 +3,7 @@ import http.cookiejar
 import json
 from pathlib import Path
 import secrets
+import socket
 import subprocess
 import tempfile
 import time
@@ -63,7 +64,7 @@ def main():
             docker('create', '--name', names['mock'], '--network', network, '--network-alias', 'mock', '-v', f'{ROOT / "tests"}:/test:ro', '--entrypoint', 'python3', 'ha-keeper-test:local', '/test/mock_provider.py')
             docker('create', '--init', '--name', names['cpa'], '--network', network, '--network-alias', 'cpa', '-v', f'{volumes[0]}:/data', '-v', f'{provider_dir}:/config:ro', '-p', '127.0.0.1::8080', '-p', '127.0.0.1::8317', 'ha-cpa-test:local')
             # Force the HTTP fallback so collection also works when CPA disables RESP.
-            docker('create', '--init', '--name', names['keeper'], '--network', network, '-e', 'REDIS_QUEUE_ADDR=mock:1', '-v', f'{volumes[1]}:/data', '-p', '127.0.0.1::8080', 'ha-keeper-test:local')
+            docker('create', '--init', '--name', names['keeper'], '--network', network, '-e', 'REDIS_QUEUE_ADDR=mock:1', '-v', f'{volumes[1]}:/data', '-p', '127.0.0.1::8080', '-p', '127.0.0.1::8082', 'ha-keeper-test:local')
             docker('cp', str(temp / 'cpa.json'), names['cpa'] + ':/data/options.json')
             docker('cp', str(temp / 'keeper.json'), names['keeper'] + ':/data/options.json')
             for name in names.values():
@@ -101,6 +102,68 @@ def main():
             query = "import sqlite3; c=sqlite3.connect('file:/data/app.db?mode=ro', uri=True); print(c.execute('SELECT count(*) FROM usage_events').fetchone()[0])"
             eventually(lambda: int(docker('exec', names['keeper'], 'python3', '-c', query)) >= 2, timeout=90)
             count = int(docker('exec', names['keeper'], 'python3', '-c', query))
+            viewer_gateway = endpoint(names['keeper'], 8082)
+            assert request(viewer_gateway + '/keeper/')[0] == 404
+            assert request(keeper + '/api/v1/key-quota', opener=opener)[0] == 404
+            # Enable explicitly and preserve the same database across restart.
+            (temp / 'keeper.json').write_text(json.dumps({'cpa_base_url': 'http://cpa:8317', 'management_key': management, 'login_password': password, 'viewer_quota_enabled': True, 'viewer_dashboard_enabled': True, 'viewer_api_gateway_enabled': True}))
+            docker('cp', str(temp / 'keeper.json'), names['keeper'] + ':/data/options.json')
+            docker('restart', names['keeper'])
+            keeper = endpoint(names['keeper'], 8080)
+            viewer_gateway = endpoint(names['keeper'], 8082)
+            eventually(lambda: request(keeper + '/healthz')[0] == 200)
+            assert int(docker('exec', names['keeper'], 'python3', '-c', query)) >= count
+            page_status, page = request(viewer_gateway + '/keeper/')
+            assert page_status == 200 and b'window.__KEEPER_VIEWER_ONLY__ = true' in page and b'"/keeper"' in page
+            assert request(viewer_gateway + '/v1/models', auth)[0] == 200
+            assert request(viewer_gateway + '/v1/models')[0] == 401
+            assert request(viewer_gateway + '/v1/chat/completions', auth, body)[0] == 200
+            stream_status, stream_body = request(viewer_gateway + '/v1/chat/completions', auth, {**body, 'stream': True})
+            assert stream_status == 200 and b'data:' in stream_body and b'[DONE]' in stream_body
+            # Test an actual 101 upgrade and WebSocket data frame through the
+            # packaged public listener, against a deterministic upgrade fixture.
+            original_location = docker('exec', names['keeper'], 'cat', '/tmp/keeper-api-location.conf')
+            fixture_location = original_location.replace('http://cpa:8080', 'http://mock:8080')
+            (temp / 'api-location.conf').write_text(fixture_location)
+            docker('cp', str(temp / 'api-location.conf'), names['keeper'] + ':/tmp/keeper-api-location.conf')
+            docker('exec', names['keeper'], 'nginx', '-c', '/opt/ha/nginx.conf', '-s', 'reload')
+            time.sleep(1)
+            from urllib.parse import urlsplit
+            gateway_address = urlsplit(viewer_gateway)
+            with socket.create_connection((gateway_address.hostname, gateway_address.port), timeout=10) as sock:
+                sock.sendall(b'GET /v1/responses HTTP/1.1\r\nHost: test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
+                received = b''
+                while b'smoke-ws' not in received:
+                    chunk = sock.recv(4096)
+                    assert chunk, 'WebSocket fixture closed without a data frame'
+                    received += chunk
+                assert b'101 Switching Protocols' in received and b'\x81\x08smoke-ws' in received
+            (temp / 'api-location.conf').write_text(original_location)
+            docker('cp', str(temp / 'api-location.conf'), names['keeper'] + ':/tmp/keeper-api-location.conf')
+            docker('exec', names['keeper'], 'nginx', '-c', '/opt/ha/nginx.conf', '-s', 'reload')
+            print('PASS: combined gateway HTTP, SSE and WebSocket upgrade/data forwarding', flush=True)
+            # Assets load below the same prefix; all admin paths stay blocked.
+            import re
+            asset = re.search(rb'src="\./(assets/[^"]+)"', page).group(1).decode()
+            assert request(viewer_gateway + '/keeper/' + asset)[0] == 200
+            for path in ('/api/v1/usage/overview', '/keeper/api/v1/usage/overview', '/keeper/api/v1/auth/sessions', '/keeper/api/v1/quota/cache', '/keeper/../api/v1/usage/overview', '/keeper/%2e%2e/api/v1/usage/overview', '/keeper/api/v1/key-quota/../quota/cache'):
+                assert request(viewer_gateway + path, opener=opener)[0] == 404, path
+            for path in ('/keeper/api/v1/auth/login', '/keeper/api/v1/quota/refresh', '/keeper/api/v1/quota/reset', '/keeper/api/v1/key-quota'):
+                assert request(viewer_gateway + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'password': password}, opener=opener)[0] == 404, path
+            assert request(viewer_gateway + '/keeper/api/v1/key-quota')[0] == 401
+            cookies = http.cookiejar.CookieJar()
+            viewer_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
+            eventually(lambda: request(viewer_gateway + '/keeper/api/v1/auth/api-key-login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'apiKey': key}, opener=viewer_opener)[0] in (200, 204))
+            assert all(cookie.path == '/keeper/' for cookie in cookies)
+            session_status, session_body = request(viewer_gateway + '/keeper/api/v1/auth/session', opener=viewer_opener)
+            session = json.loads(session_body)
+            assert session_status == 200 and session['role'] == 'api_key_viewer' and session['api_key']['quota_enabled'] is True
+            quota_status, quota_body = request(viewer_gateway + '/keeper/api/v1/key-quota?auth_indexes=private', opener=viewer_opener)
+            assert quota_status == 200 and isinstance(json.loads(quota_body)['accounts'], list)
+            for secret in (key, management, password, 'fake-upstream-test-key', 'auth_index', 'base_url'):
+                assert secret.encode() not in quota_body
+            assert request(keeper + '/api/v1/usage/overview', opener=viewer_opener)[0] == 401  # cookie confined to /keeper/
+            print('PASS: disabled defaults, viewer login, quota serialization and public gateway method/path isolation', flush=True)
             # Exercise the same persisted client-key setting as the management UI.
             management_auth = {'Authorization': 'Bearer ' + management}
             keys_url = private + '/v8/management/config/access/api-keys'
@@ -109,6 +172,8 @@ def main():
             eventually(lambda: request(api + '/v1/models', rotated_auth)[0] == 200)
             assert request(keys_url, management_auth, body=[rotated_key], method='PUT')[0] == 200
             eventually(lambda: request(api + '/v1/models', auth)[0] == 401)
+            eventually(lambda: request(viewer_gateway + '/keeper/api/v1/key-quota', opener=viewer_opener)[0] == 401, timeout=90)
+            print('PASS: revoked client token loses viewer quota access', flush=True)
             # Clear stale HA keys after switching to management ownership.
             (temp / 'cpa.json').write_text(json.dumps({'api_key_source': 'management_ui', 'api_keys': [], 'management_key': management}))
             docker('cp', str(temp / 'cpa.json'), names['cpa'] + ':/data/options.json')

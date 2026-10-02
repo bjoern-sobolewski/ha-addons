@@ -2,6 +2,9 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import time
+import base64
+import hashlib
+import threading
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -25,4 +28,26 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps({'id': 'test-response', 'object': 'chat.completion', 'created': int(time.time()), 'model': 'test-model', 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'ok'}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 10, 'completion_tokens': 2, 'total_tokens': 12}}).encode())
 
 
+class WebSocketFixture(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        if self.path != '/v1/responses' or self.headers.get('Upgrade', '').lower() != 'websocket':
+            self.send_error(404)
+            return
+        accept = base64.b64encode(hashlib.sha1((self.headers['Sec-WebSocket-Key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+        self.send_response(101)
+        self.send_header('Upgrade', 'websocket')
+        self.send_header('Connection', 'Upgrade')
+        self.send_header('Sec-WebSocket-Accept', accept)
+        self.end_headers()
+        self.wfile.write(b'\x81\x08smoke-ws')
+        self.wfile.flush()
+        self.close_connection = True
+
+
+threading.Thread(target=HTTPServer(('0.0.0.0', 8080), WebSocketFixture).serve_forever, daemon=True).start()
 HTTPServer(('0.0.0.0', 9000), Handler).serve_forever()

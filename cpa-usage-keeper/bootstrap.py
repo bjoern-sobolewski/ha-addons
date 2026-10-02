@@ -3,6 +3,9 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
+import ipaddress
+import re
 from urllib.parse import urlsplit
 
 
@@ -21,6 +24,7 @@ def environment(options):
         'CPA_MANAGEMENT_KEY': options['management_key'],
         'LOGIN_PASSWORD': options['login_password'],
         'AUTH_ENABLED': 'true',
+        'API_KEY_VIEWER_QUOTA_ENABLED': 'true' if options.get('viewer_quota_enabled', False) is True else 'false',
         'APP_HOST': '0.0.0.0',
         'APP_PORT': '8080',
         'APP_BASE_PATH': '',
@@ -35,11 +39,45 @@ def environment(options):
     }
 
 
+def api_gateway_location(options):
+    if options.get('viewer_api_gateway_enabled', False) is not True:
+        return '# API forwarding disabled\n'
+    # The companion HA CPA app has a fixed API-only listener on port 8080.
+    # Never forward public traffic to its management listener from CPA_BASE_URL.
+    parsed = urlsplit(options['cpa_base_url'])
+    host = parsed.hostname
+    if ':' in host:
+        ipaddress.IPv6Address(host)
+        host = '[' + host + ']'
+    elif not re.fullmatch(r'[A-Za-z0-9_.-]+', host):
+        raise ValueError('Set cpa_base_url to a valid private CPA hostname.')
+    origin = f'{parsed.scheme}://{host}:8080'
+    return '''location /v1/ {
+      client_max_body_size 64m;
+      proxy_pass ORIGIN;
+      proxy_http_version 1.1;
+      proxy_set_header Host $http_host;
+      proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+      proxy_set_header X-Forwarded-For $remote_addr;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection $connection_upgrade;
+      proxy_buffering off;
+      proxy_request_buffering off;
+      proxy_read_timeout 3600s;
+      proxy_send_timeout 3600s;
+    }
+    '''.replace('ORIGIN', origin)
+
+
 if __name__ == '__main__':
     try:
         options = json.loads(Path('/data/options.json').read_text())
         env = environment(options)
+        locations = Path('/opt/ha/viewer-locations.conf').read_text() if options.get('viewer_dashboard_enabled', False) is True else '# Viewer dashboard disabled\n'
+        Path('/tmp/keeper-viewer-locations.conf').write_text(locations)
+        Path('/tmp/keeper-api-location.conf').write_text(api_gateway_location(options))
+        subprocess.run(['nginx', '-c', '/opt/ha/nginx.conf'], check=True)
         os.execve('/usr/local/bin/docker-entrypoint.sh', ['docker-entrypoint.sh', '/app/cpa-usage-keeper'], env)
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         print(str(exc) if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError) else 'Unable to load app options.', file=sys.stderr)
         sys.exit(1)

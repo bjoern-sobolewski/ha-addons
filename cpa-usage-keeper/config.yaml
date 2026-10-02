@@ -1,0 +1,35 @@
+name: CPA Usage Keeper
+version: "0.1.0"
+slug: cpa_usage_keeper
+description: Persistent usage, cost and quota dashboard for CLIProxyAPI
+url: https://github.com/bjoern-sobolewski/ha-addons/tree/main/cpa-usage-keeper
+arch:
+  - aarch64
+  - amd64
+startup: application
+boot: auto
+init: true
+stage: experimental
+image: ghcr.io/bjoern-sobolewski/ha-cpa-usage-keeper
+ports:
+  8080/tcp: 8081
+ports_description:
+  8080/tcp: Password-protected Keeper dashboard on your trusted LAN
+webui: http://[HOST]:[PORT:8080]
+backup: cold
+timeout: 30
+watchdog: http://[HOST]:[PORT:8080]/healthz
+options:
+  cpa_base_url: ""
+  management_key: ""
+  login_password: ""
+  timezone: Europe/Berlin
+  log_retention_days: 7
+  backup_retention_days: 7
+schema:
+  cpa_base_url: str
+  management_key: password
+  login_password: password
+  timezone: str
+  log_retention_days: int(1,90)
+  backup_retention_days: int(1,90)

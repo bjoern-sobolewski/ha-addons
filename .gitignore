@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.test-data/
+providers.yaml
+options.json
+*.db
+*.db-*

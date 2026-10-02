@@ -1,0 +1,35 @@
+name: CLIProxyAPI
+version: "0.1.0"
+slug: cliproxyapi
+description: AI API proxy with a separate API-only gateway for Cloudflare Tunnel
+url: https://github.com/bjoern-sobolewski/ha-addons/tree/main/cliproxyapi
+arch:
+  - aarch64
+  - amd64
+startup: services
+boot: auto
+init: true
+stage: experimental
+image: ghcr.io/bjoern-sobolewski/ha-cliproxyapi
+ports:
+  8080/tcp: null
+  8317/tcp: null
+ports_description:
+  8080/tcp: API-only gateway; point Cloudflared here (host publishing optional)
+  8317/tcp: Private management and provider setup; publish only on a trusted LAN
+map:
+  - addon_config
+backup: cold
+timeout: 30
+watchdog: tcp://[HOST]:[PORT:8080]
+options:
+  api_keys: []
+  management_key: ""
+  timezone: Europe/Berlin
+  streaming_keepalive_seconds: 15
+schema:
+  api_keys:
+    - password
+  management_key: password
+  timezone: str
+  streaming_keepalive_seconds: int(1,60)

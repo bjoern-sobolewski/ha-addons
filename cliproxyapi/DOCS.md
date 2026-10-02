@@ -6,7 +6,7 @@ Set `api_keys` to a list of random client secrets and `management_key` to a diff
 
 `api_key_source` defaults to `home_assistant`, which reapplies HA's `api_keys` on every startup. To manage client access in the private dashboard instead, select `management_ui` in HA options, save and restart the app. Existing client keys in `/data/config.yaml` are retained; HA's list is used only to initialize keys when the saved `access.api-keys` setting is absent.
 
-In the dashboard's **Config Panel**, edit **API Keys** under **Basic Settings** and save. Add or remove client keys there; saved changes survive app restarts and updates. These are client access keys, separate from the keys on the upstream provider pages. Keep at least one client key of 24 or more characters, distinct from the management key. An empty or invalid saved list prevents startup and is never replaced with old HA keys.
+In the dashboard's **Config Panel**, edit **Client API Keys (access.api-keys)** and save. Add or remove client keys there; saved changes survive app restarts and updates. These are client access keys, separate from the keys on the upstream provider pages. Keep at least one client key of 24 or more characters, distinct from the management key. An empty or invalid saved list prevents startup and is never replaced with old HA keys.
 
 In `management_ui` mode, HA's `api_keys` list can be cleared after confirming that saved keys work. For recovery, select `home_assistant`, provide a valid client key list in HA and restart. This deliberately replaces the saved list, so remove revoked keys from HA before using recovery. The management key remains controlled by HA in both modes.
 

@@ -12,16 +12,23 @@ import yaml
 
 def configure(data=Path('/data'), providers=Path('/config/providers.yaml')):
     options = json.loads((data / 'options.json').read_text())
-    keys = options.get('api_keys', [])
     secret = options.get('management_key', '')
-    if not keys or any(not isinstance(k, str) or len(k.strip()) < 24 for k in keys):
-        raise ValueError('Set at least one random API key of 24 or more characters in app options.')
-    if not isinstance(secret, str) or len(secret.strip()) < 24 or secret in keys:
-        raise ValueError('Set a separate management key of 24 or more characters in app options.')
+    source = options.get('api_key_source', 'home_assistant')
+    if source not in ('home_assistant', 'management_ui'):
+        raise ValueError('api_key_source must be home_assistant or management_ui.')
     target = data / 'config.yaml'
     config = yaml.safe_load(target.read_text()) if target.exists() else {}
     if not isinstance(config, dict):
         raise ValueError('Persistent config.yaml must contain a YAML mapping.')
+    access = config.get('access', {})
+    if not isinstance(access, dict):
+        raise ValueError('Persistent access configuration must contain a YAML mapping.')
+    # A present but empty list is intentional; never restore revoked keys from HA.
+    keys = access['api-keys'] if source == 'management_ui' and 'api-keys' in access else options.get('api_keys', [])
+    if not isinstance(keys, list) or not keys or any(not isinstance(k, str) or len(k.strip()) < 24 for k in keys):
+        raise ValueError('Configure at least one random client API key of 24 or more characters in the selected key source.')
+    if not isinstance(secret, str) or len(secret.strip()) < 24 or secret in keys:
+        raise ValueError('Set a separate management key of 24 or more characters in app options.')
     if providers.exists():
         extra = yaml.safe_load(providers.read_text()) or {}
         if not isinstance(extra, dict) or set(extra) - {'api-keys', 'oauth', 'routing', 'requests', 'client', 'multimedia'}:
@@ -30,7 +37,7 @@ def configure(data=Path('/data'), providers=Path('/config/providers.yaml')):
             config[key] = value
     config['config-version'] = 8
     config['server'] = {'host': '', 'port': 8317, 'tls': {'enable': False}, 'discovery': {'enabled': False}}
-    config['access'] = {'api-keys': keys}
+    config['access'] = {**access, 'api-keys': keys}
     config['management'] = {'allow-remote': True, 'secret-key': secret, 'disable-control-panel': False}
     config.setdefault('oauth', {})['auth-dir'] = str(data / 'auth')
     config.setdefault('requests', {}).setdefault('streaming', {})['keepalive-seconds'] = options.get('streaming_keepalive_seconds', 15)

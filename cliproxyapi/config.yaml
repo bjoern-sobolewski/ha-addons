@@ -1,5 +1,5 @@
 name: CLIProxyAPI
-version: "0.1.0"
+version: "0.1.1"
 slug: cliproxyapi
 description: AI API proxy with a separate API-only gateway for Cloudflare Tunnel
 url: https://github.com/bjoern-sobolewski/ha-addons/tree/main/cliproxyapi
@@ -23,11 +23,13 @@ backup: cold
 timeout: 30
 watchdog: tcp://[HOST]:[PORT:8080]
 options:
+  api_key_source: home_assistant
   api_keys: []
   management_key: ""
   timezone: Europe/Berlin
   streaming_keepalive_seconds: 15
 schema:
+  api_key_source: list(home_assistant|management_ui)
   api_keys:
     - password
   management_key: password

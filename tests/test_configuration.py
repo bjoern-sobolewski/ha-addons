@@ -41,6 +41,53 @@ class ConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     CPA.configure(data, data / 'absent.yaml')
 
+    def test_management_ui_seeds_once_then_preserves_additions_and_revocations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            options = {'api_key_source': 'management_ui', 'api_keys': ['c' * 32], 'management_key': 'm' * 32}
+            (data / 'options.json').write_text(json.dumps(options))
+            target = CPA.configure(data, data / 'absent.yaml')
+            config = yaml.safe_load(target.read_text())
+            self.assertEqual(config['access']['api-keys'], ['c' * 32])
+            config['access']['api-keys'] = ['n' * 32]
+            config['access']['other-setting'] = True
+            target.write_text(yaml.safe_dump(config))
+            # Revoking the original key in the UI must not reintroduce it from HA.
+            config = yaml.safe_load(CPA.configure(data, data / 'absent.yaml').read_text())
+            self.assertEqual(config['access']['api-keys'], ['n' * 32])
+            self.assertTrue(config['access']['other-setting'])
+            options['api_keys'] = []
+            (data / 'options.json').write_text(json.dumps(options))
+            self.assertEqual(yaml.safe_load(CPA.configure(data, data / 'absent.yaml').read_text())['access']['api-keys'], ['n' * 32])
+
+    def test_management_ui_rejects_invalid_saved_keys_without_restoring_ha_keys(self):
+        for keys in ([], None, 'c' * 32, ['short'], [7], ['m' * 32]):
+            with self.subTest(keys=keys), tempfile.TemporaryDirectory() as directory:
+                data = Path(directory)
+                (data / 'options.json').write_text(json.dumps({'api_key_source': 'management_ui', 'api_keys': ['c' * 32], 'management_key': 'm' * 32}))
+                target = data / 'config.yaml'
+                target.write_text(yaml.safe_dump({'access': {'api-keys': keys}}))
+                before = target.read_bytes()
+                with self.assertRaises(ValueError):
+                    CPA.configure(data, data / 'absent.yaml')
+                self.assertEqual(target.read_bytes(), before)
+
+    def test_home_assistant_mode_recovers_saved_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            (data / 'options.json').write_text(json.dumps({'api_key_source': 'home_assistant', 'api_keys': ['c' * 32], 'management_key': 'm' * 32}))
+            (data / 'config.yaml').write_text(yaml.safe_dump({'access': {'api-keys': []}}))
+            self.assertEqual(yaml.safe_load(CPA.configure(data, data / 'absent.yaml').read_text())['access']['api-keys'], ['c' * 32])
+
+    def test_cpa_rejects_unknown_source_and_malformed_access(self):
+        for source, access in (('unknown', {}), ('management_ui', [])):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                data = Path(directory)
+                (data / 'options.json').write_text(json.dumps({'api_key_source': source, 'api_keys': ['c' * 32], 'management_key': 'm' * 32}))
+                (data / 'config.yaml').write_text(yaml.safe_dump({'access': access}))
+                with self.assertRaises(ValueError):
+                    CPA.configure(data, data / 'absent.yaml')
+
     def test_provider_file_cannot_override_security(self):
         with tempfile.TemporaryDirectory() as directory:
             data = Path(directory)

@@ -19,11 +19,11 @@ def docker(*args, check=True):
     return (result.stdout + result.stderr if args and args[0] == 'logs' else result.stdout).strip()
 
 
-def request(url, headers=None, body=None, opener=None):
+def request(url, headers=None, body=None, opener=None, method=None):
     headers = dict(headers or {})
     if body is not None:
         headers['Content-Type'] = 'application/json'
-    req = urllib.request.Request(url, headers=headers, data=json.dumps(body).encode() if body is not None else None)
+    req = urllib.request.Request(url, headers=headers, data=json.dumps(body).encode() if body is not None else None, method=method)
     try:
         with (opener or urllib.request.build_opener()).open(req, timeout=10) as response:
             return response.status, response.read()
@@ -48,13 +48,13 @@ def main():
     network = prefix + '-net'
     names = {key: prefix + '-' + key for key in ('mock', 'cpa', 'keeper')}
     volumes = [prefix + '-cpa-data', prefix + '-keeper-data']
-    key, management, password = (secrets.token_urlsafe(32) for _ in range(3))
+    key, management, password, rotated_key = (secrets.token_urlsafe(32) for _ in range(4))
     with tempfile.TemporaryDirectory() as temporary:
         temp = Path(temporary)
         provider_dir = temp / 'config'
         provider_dir.mkdir()
         (provider_dir / 'providers.yaml').write_text(yaml.safe_dump({'api-keys': {'openai-compatibility': [{'name': 'test', 'base-url': 'http://mock:9000/v1', 'keys': [{'api-key': 'fake-upstream-test-key'}], 'models': [{'name': 'test-model', 'alias': 'test-model'}]}]}}))
-        (temp / 'cpa.json').write_text(json.dumps({'api_keys': [key], 'management_key': management}))
+        (temp / 'cpa.json').write_text(json.dumps({'api_key_source': 'management_ui', 'api_keys': [key], 'management_key': management}))
         (temp / 'keeper.json').write_text(json.dumps({'cpa_base_url': 'http://cpa:8317', 'management_key': management, 'login_password': password}))
         try:
             docker('network', 'create', network)
@@ -101,15 +101,30 @@ def main():
             query = "import sqlite3; c=sqlite3.connect('file:/data/app.db?mode=ro', uri=True); print(c.execute('SELECT count(*) FROM usage_events').fetchone()[0])"
             eventually(lambda: int(docker('exec', names['keeper'], 'python3', '-c', query)) >= 2, timeout=90)
             count = int(docker('exec', names['keeper'], 'python3', '-c', query))
+            # Exercise the same persisted client-key setting as the management UI.
+            management_auth = {'Authorization': 'Bearer ' + management}
+            keys_url = private + '/v8/management/config/access/api-keys'
+            assert request(keys_url, management_auth, body=[key, rotated_key], method='PUT')[0] == 200
+            rotated_auth = {'Authorization': 'Bearer ' + rotated_key}
+            eventually(lambda: request(api + '/v1/models', rotated_auth)[0] == 200)
+            assert request(keys_url, management_auth, body=[rotated_key], method='PUT')[0] == 200
+            eventually(lambda: request(api + '/v1/models', auth)[0] == 401)
+            # Clear stale HA keys after switching to management ownership.
+            (temp / 'cpa.json').write_text(json.dumps({'api_key_source': 'management_ui', 'api_keys': [], 'management_key': management}))
+            docker('cp', str(temp / 'cpa.json'), names['cpa'] + ':/data/options.json')
             docker('exec', names['cpa'], 'sh', '-c', 'echo test > /data/auth/persistence-marker')
             docker('restart', names['cpa'], names['keeper'])
             # Docker can reassign ephemeral host ports when restarting containers.
             api = endpoint(names['cpa'], 8080)
             keeper = endpoint(names['keeper'], 8080)
-            eventually(lambda: request(api + '/v1/models', auth)[0] == 200 and request(keeper + '/healthz')[0] == 200)
+            eventually(lambda: request(api + '/v1/models', rotated_auth)[0] == 200 and request(keeper + '/healthz')[0] == 200)
+            assert request(api + '/v1/models', auth)[0] == 401
+            private = endpoint(names['cpa'], 8317)
+            assert json.loads(request(private + '/v8/management/config/access/api-keys', management_auth)[1]) == [rotated_key]
             assert int(docker('exec', names['keeper'], 'python3', '-c', query)) >= count
             assert docker('exec', names['cpa'], 'cat', '/data/auth/persistence-marker') == 'test'
             print('PASS: Keeper authentication, HTTP usage ingestion and persistence across restarts', flush=True)
+            print('PASS: management API key additions and revocations survive restart with an empty HA key list', flush=True)
             for service in ('cpa', 'keeper'):
                 docker('stop', '-t', '25', names[service])
                 code = int(docker('inspect', '--format', '{{.State.ExitCode}}', names[service]))
@@ -119,7 +134,7 @@ def main():
             # Redact disposable credentials from any service logs before displaying.
             for name in names.values():
                 logs = docker('logs', '--tail', '40', name, check=False)
-                for secret in (key, management, password):
+                for secret in (key, management, password, rotated_key):
                     logs = logs.replace(secret, '[REDACTED]')
                 print(name + '\n' + logs)
             raise

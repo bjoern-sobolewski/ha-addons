@@ -1,2 +1,4 @@
 * text=auto eol=lf
 *.sh text eol=lf
+# Unified diff context intentionally starts with a space before Go tabs.
+*.patch -whitespace

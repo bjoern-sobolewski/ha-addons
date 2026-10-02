@@ -122,10 +122,10 @@ def main():
             assert stream_status == 200 and b'data:' in stream_body and b'[DONE]' in stream_body
             # Test an actual 101 upgrade and WebSocket data frame through the
             # packaged public listener, against a deterministic upgrade fixture.
-            original_location = docker('exec', names['keeper'], 'cat', '/tmp/keeper-api-location.conf')
+            original_location = docker('exec', names['keeper'], 'cat', '/run/keeper-gateway/api.conf')
             fixture_location = original_location.replace('http://cpa:8080', 'http://mock:8080')
             (temp / 'api-location.conf').write_text(fixture_location)
-            docker('cp', str(temp / 'api-location.conf'), names['keeper'] + ':/tmp/keeper-api-location.conf')
+            docker('cp', str(temp / 'api-location.conf'), names['keeper'] + ':/run/keeper-gateway/api.conf')
             docker('exec', names['keeper'], 'nginx', '-c', '/opt/ha/nginx.conf', '-s', 'reload')
             time.sleep(1)
             from urllib.parse import urlsplit
@@ -139,7 +139,7 @@ def main():
                     received += chunk
                 assert b'101 Switching Protocols' in received and b'\x81\x08smoke-ws' in received
             (temp / 'api-location.conf').write_text(original_location)
-            docker('cp', str(temp / 'api-location.conf'), names['keeper'] + ':/tmp/keeper-api-location.conf')
+            docker('cp', str(temp / 'api-location.conf'), names['keeper'] + ':/run/keeper-gateway/api.conf')
             docker('exec', names['keeper'], 'nginx', '-c', '/opt/ha/nginx.conf', '-s', 'reload')
             print('PASS: combined gateway HTTP, SSE and WebSocket upgrade/data forwarding', flush=True)
             # Assets load below the same prefix; all admin paths stay blocked.
@@ -178,6 +178,9 @@ def main():
             (temp / 'cpa.json').write_text(json.dumps({'api_key_source': 'management_ui', 'api_keys': [], 'management_key': management}))
             docker('cp', str(temp / 'cpa.json'), names['cpa'] + ':/data/options.json')
             docker('exec', names['cpa'], 'sh', '-c', 'echo test > /data/auth/persistence-marker')
+            # Linux Docker cp can leave fixture ownership from the host user.
+            # Startup must regenerate configs safely regardless of this owner.
+            docker('exec', names['keeper'], 'chown', '1001:1001', '/run/keeper-gateway/api.conf')
             docker('restart', names['cpa'], names['keeper'])
             # Docker can reassign ephemeral host ports when restarting containers.
             api = endpoint(names['cpa'], 8080)

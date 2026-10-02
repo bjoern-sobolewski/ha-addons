@@ -70,14 +70,20 @@ def api_gateway_location(options):
 
 
 if __name__ == '__main__':
+    stage = 'loading options'
     try:
         options = json.loads(Path('/data/options.json').read_text())
         env = environment(options)
+        stage = 'preparing gateway configuration'
+        gateway_dir = Path('/run/keeper-gateway')
+        gateway_dir.mkdir(mode=0o700, exist_ok=True)
         locations = Path('/opt/ha/viewer-locations.conf').read_text() if options.get('viewer_dashboard_enabled', False) is True else '# Viewer dashboard disabled\n'
-        Path('/tmp/keeper-viewer-locations.conf').write_text(locations)
-        Path('/tmp/keeper-api-location.conf').write_text(api_gateway_location(options))
+        (gateway_dir / 'viewer.conf').write_text(locations)
+        (gateway_dir / 'api.conf').write_text(api_gateway_location(options))
+        stage = 'starting gateway'
         subprocess.run(['nginx', '-c', '/opt/ha/nginx.conf'], check=True)
+        stage = 'starting Keeper'
         os.execve('/usr/local/bin/docker-entrypoint.sh', ['docker-entrypoint.sh', '/app/cpa-usage-keeper'], env)
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-        print(str(exc) if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError) else 'Unable to load app options.', file=sys.stderr)
+        print(str(exc) if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError) else f'Unable to start app while {stage} ({type(exc).__name__}).', file=sys.stderr)
         sys.exit(1)

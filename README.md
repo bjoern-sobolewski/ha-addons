@@ -19,6 +19,8 @@ These are experimental community wrappers, unaffiliated with the upstream projec
 6. In Keeper options, set `cpa_base_url` to `http://abcdef12-cliproxyapi:8317`, use the same `management_key`, and set a separate `login_password` of at least 16 characters. Start Keeper and open `http://HOME_ASSISTANT_IP:8081`.
 7. Add upstream credentials using the [CLIProxyAPI setup instructions](cliproxyapi/DOCS.md). Client API keys alone do not connect a model provider.
 
+To manage client keys in the private management UI, set `api_key_source` to `management_ui` in HA options and restart. The app preserves saved client keys across restarts; HA keys only initialize a missing saved list. See [client key management and recovery](cliproxyapi/DOCS.md#client-api-key-management).
+
 Generate secrets locally, for example `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Generate a different value for each credential. Store them in Home Assistant options and a password manager, never this repository.
 
 ## Cloudflare Tunnel
@@ -63,6 +65,17 @@ python tests/smoke.py
 Smoke tests use random disposable credentials, a fake model provider, isolated Docker resources, and no paid model calls. They check API authentication, blocked management paths, a model response, SSE forwarding, Keeper authentication and usage ingestion, persistence across restarts, and graceful shutdown. Resources are removed when the test exits.
 
 To update an upstream release, change its version and manifest digest in the Dockerfile, bump the app `version`, update the changelog, and push to `main`. Actions validates and tests amd64, then publishes both amd64 and arm64 under the app version tag. Home Assistant uses that exact version. Forks must update `repository.yaml` and the app image names/URLs to their own account.
+
+## Internal documentation
+
+Maintainer documentation is stored in a separate private repository, referenced
+by the `.local-docs` submodule. It is optional for installation and development.
+Automatic fetching is disabled so public checkouts do not require access.
+Authorized maintainers can fetch the pinned documents from this project root:
+
+```sh
+git submodule update --init --checkout -- .local-docs
+```
 
 ## Upstream and packaging references
 

@@ -1,0 +1,5 @@
+[submodule ".local-docs"]
+	path = .local-docs
+	url = https://github.com/bjoern-sobolewski/ha-addons-internal-docs.git
+	update = none
+	branch = main

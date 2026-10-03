@@ -52,16 +52,16 @@ missing observations do not erase existing windows. Late or equal observations
 cannot replace newer windows. Manual and scheduled provider queries remain
 available for idle accounts and providers without supported traffic metadata.
 
-Quota views read backend caches every ten seconds, without provider queries.
-Polling pauses while hidden, refreshes when visible, and does not overlap.
-Focus, click or tap a quota window label for its cached source, capture timestamp,
-relative age and account label. Escape, blur or an outside click dismisses the
-details. The native quota rows retain their percentage, reset text and colored
-meters without a separate freshness badge. Window duration metadata distinguishes
-short and weekly limits; unknown windows keep their reported labels.
-Data is stale after fifteen minutes or its reset time.
-Cache reads never update capture timestamps. Traffic caches are in memory and
-can be unavailable after restart until traffic or a fallback query arrives.
+Auth Files and Quota Management use the original pinned upstream interface.
+Provider queries supply plan, renewal, credit balance, manual-reset expiry and
+native quota windows where supported; Reset quota retains the original
+confirmation and eligibility checks. Traffic observations do not replace these
+management cards or add primary/secondary cache rows. Shared client-key names
+and management session diagnostics remain available.
+
+Keeper reporting reads cached traffic observations without provider queries.
+Traffic caches are in memory and can be unavailable after restart until traffic
+or a fallback query arrives.
 
 Reporting never includes credentials. Administrative routes remain private;
 individual-key reporting remains scoped and the all-key role remains read-only.

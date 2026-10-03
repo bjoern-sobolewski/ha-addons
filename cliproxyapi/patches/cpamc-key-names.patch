@@ -231,39 +231,6 @@ index 7e51d45..d0ccd8d 100644
              >
                {t('config_management.visual.api_keys.generate')}
              </Button>
-diff --git a/src/features/quota/QuotaFreshness.tsx b/src/features/quota/QuotaFreshness.tsx
-index c1e6db1..b4631cb 100644
---- a/src/features/quota/QuotaFreshness.tsx
-+++ b/src/features/quota/QuotaFreshness.tsx
-@@ -1,4 +1,4 @@
--import {useState} from 'react';
-+import { useEffect, useState } from 'react';
- export const quotaSourceLabel = (source?: string) => ({
-  api_response_headers: 'API response headers', usage_header: 'API response headers',
-  websocket_event: 'WebSocket event', scheduled: 'Scheduled provider query',
-@@ -8,13 +8,18 @@ export const quotaSourceLabel = (source?: string) => ({
- }[source ?? ''] ?? 'Unknown source');
- export function QuotaFreshness({capturedAt,source,account,resetAt,stale}: {capturedAt?:string;source?:string;account:string;resetAt?:string;stale?:boolean}) {
-  const [open,setOpen]=useState(false);
-- const at=capturedAt ? Date.parse(capturedAt) : NaN;
-- const seconds=Math.max(0,Math.floor((Date.now()-at)/1000));
-+ const [now, setNow] = useState(Date.now);
-+  useEffect(() => {
-+    const timer = setInterval(() => setNow(Date.now()), 10_000);
-+    return () => clearInterval(timer);
-+  }, []);
-+  const at=capturedAt ? Date.parse(capturedAt) : NaN;
-+ const seconds=Math.max(0,Math.floor((now-at)/1000));
-  const age=Number.isFinite(at) ? seconds<60 ? `${seconds}s ago` : seconds<3600 ? `${Math.floor(seconds/60)}m ago` : `${Math.floor(seconds/3600)}h ago` : 'Capture time unavailable';
-- const old=stale || !Number.isFinite(at) || seconds>900 || (resetAt && Date.parse(resetAt)<=Date.now());
-+ const old=stale || !Number.isFinite(at) || seconds>900 || (resetAt && Date.parse(resetAt)<=now);
-  const details=`${account}\n${quotaSourceLabel(source)}\n${Number.isFinite(at)?new Date(at).toLocaleString():'Capture time unavailable'}\n${age}`;
-  return <span style={{display:'inline-block',position:'relative'}} onMouseEnter={()=>setOpen(true)} onMouseLeave={()=>setOpen(false)}>
--  <button type="button" aria-expanded={open} aria-label={`Quota freshness: ${details}`} onFocus={()=>setOpen(true)} onBlur={()=>setOpen(false)} onClick={()=>setOpen(true)} style={{font:'inherit',color:old?'#d97706':'inherit',background:'transparent',border:'1px solid currentColor',borderRadius:4,padding:'2px 6px',cursor:'pointer'}}>{old?'Stale · ':''}{age} ⓘ</button>
-+  <button type="button" aria-expanded={open} aria-label={`Quota freshness: ${details}`} onFocus={()=>setOpen(true)} onBlur={()=>setOpen(false)} onClick={()=>setOpen(true)} style={{font:'inherit',color:old?'#d97706':'inherit',background:'transparent',border:'1px solid currentColor',borderRadius:4,padding:'2px 6px',cursor:'pointer'}}>{old?'Stale Â· ':''}{age} â“˜</button>
-   {open && <span role="tooltip" style={{display:'block',whiteSpace:'pre-line',position:'absolute',zIndex:30,bottom:'100%',left:0,minWidth:210,padding:10,borderRadius:6,background:'#172033',color:'white',boxShadow:'0 2px 10px #0005'}}>{details}</span>}
-  </span>;
- }
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
 index f356196..310d9b4 100644
 --- a/src/i18n/locales/en.json

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.8
+
+- Restore the original Auth Files and Quota Management interface, including provider plan, credit balance, manual-reset expiry, native window labels and Reset quota controls.
+- Keep traffic quota collection available to reporting without replacing management cards with cached traffic windows.
+- Preserve shared client-key names and management session diagnostics.
+
 ## 0.1.7
 
 - Keep quota observation details attached while keyboard focus scrolls a card into view, preserving Escape, blur and outside-click dismissal.

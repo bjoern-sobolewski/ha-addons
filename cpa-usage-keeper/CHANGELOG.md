@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.17
+
+- Give each account's quota refresh button a translated, account-specific accessible label in all supported languages.
+
 ## 0.1.16
 
 - Include the approved compact Overview layout and visible-tab automatic usage refresh control.

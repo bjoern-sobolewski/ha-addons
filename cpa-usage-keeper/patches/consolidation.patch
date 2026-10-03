@@ -35,6 +35,34 @@ index d44898c..22e76d9 100644
      expect(fetchUsageQuotaCache).toHaveBeenCalledOnce()
      await act(async () => vi.advanceTimersByTimeAsync(1))
      expect(fetchUsageQuotaCache).toHaveBeenCalledTimes(2)
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index ee65379..28a955e 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -536,6 +536,7 @@ const resources = {
+         credentials_quota_remaining: '{{count}} left',
+         credentials_quota_percent_used: '{{percent}} used',
+         credentials_refresh_status: 'Refresh',
++        credentials_refresh_single: 'Refresh quota for {{name}}',
+         credentials_refresh_status_queued: 'Queued',
+         credentials_refresh_status_running: 'Running',
+         credentials_refresh_status_completed: 'Completed',
+@@ -1483,6 +1484,7 @@ const resources = {
+         credentials_quota_remaining: '剩余 {{count}}',
+         credentials_quota_percent_used: '已用 {{percent}}',
+         credentials_refresh_status: '刷新',
++        credentials_refresh_single: '刷新 {{name}} 的限额',
+         credentials_refresh_status_queued: '排队中',
+         credentials_refresh_status_running: '运行中',
+         credentials_refresh_status_completed: '已完成',
+@@ -2430,6 +2432,7 @@ const resources = {
+         credentials_quota_remaining: '剩餘 {{count}}',
+         credentials_quota_percent_used: '已用 {{percent}}',
+         credentials_refresh_status: '重新整理',
++        credentials_refresh_single: '重新整理 {{name}} 的限額',
+         credentials_refresh_status_queued: '排隊中',
+         credentials_refresh_status_running: '執行中',
+         credentials_refresh_status_completed: '已完成',
 diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
 index 18bbf7e..9a153e4 100644
 --- a/web/src/pages/UsagePage.tsx

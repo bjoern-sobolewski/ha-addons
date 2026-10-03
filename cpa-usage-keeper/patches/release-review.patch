@@ -126,6 +126,61 @@ index 9b986ca3..cee835cb 100644
  			})
  			writer.Flush()
  			if err == nil {
+diff --git a/internal/app/app.go b/internal/app/app.go
+index dac1033f..509c5718 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -69,6 +69,7 @@ type App struct {
+ 	MetadataSync      *MetadataSyncRunner
+ 	QuotaService      QuotaRunner
+ 	QuotaAutoRefresh  QuotaRunner
++	QuotaTrafficSync  Runner
+ 	BackupMaintenance *DatabaseBackupRunner
+ 	RecentUsageCache  *repository.UsageRecentEventCache
+ 	PricingCatalog    *pricing.Catalog
+@@ -206,7 +207,6 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+ 		QuotaUpstreamResponsesEnabled:    cfg.QuotaUpstreamResponsesEnabled,
+ 		PricingCatalog:                   pricingCatalog,
+ 	})
+-	quotaService.StartTrafficQuotaSync(cpaClient)
+ 	// 单 writer aggregation runner 只维护 rollups/Identity，并在 App.Run 时主动追平。
+ 	usageAggregationRunner := poller.NewUsageAggregationRunner(db)
+ 	// syncService 仍然是 metadata 和 usage 处理共享的业务服务入口。
+@@ -353,6 +353,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+ 		MetadataSync:      metadataSyncRunner,
+ 		QuotaService:      quotaService,
+ 		QuotaAutoRefresh:  quotaService,
++		QuotaTrafficSync:  quota.NewTrafficQuotaSyncRunner(quotaService, cpaClient),
+ 		BackupMaintenance: backupMaintenance,
+ 		RecentUsageCache:  recentUsageCache,
+ 		PricingCatalog:    pricingCatalog,
+@@ -466,6 +467,16 @@ func (a *App) Run() error {
+ 
+ 	ctx := a.startBackgroundContext()
+ 	defer a.stopBackgroundTasks()
++	if a.QuotaService != nil {
++		a.QuotaService.SetRefreshContext(ctx)
++	}
++	if a.QuotaTrafficSync != nil {
++		a.startBackgroundTask(func() {
++			if err := a.QuotaTrafficSync.Run(ctx); err != nil {
++				logrus.Errorf("quota traffic synchronization stopped: %v", err)
++			}
++		})
++	}
+ 	if a.RedisIngest != nil {
+ 		a.startBackgroundTask(func() {
+ 			if err := a.RedisIngest.Run(ctx); err != nil {
+@@ -527,9 +538,6 @@ func (a *App) Run() error {
+ 			}
+ 		})
+ 	}
+-	if a.QuotaService != nil {
+-		a.QuotaService.SetRefreshContext(ctx)
+-	}
+ 	if a.QuotaAutoRefresh != nil {
+ 		a.startBackgroundTask(func() {
+ 			// quota 自动刷新和手动刷新共用队列，但作为独立后台任务跟随 App 生命周期启动和停止。
 diff --git a/internal/app/test/database_file_pool_test.go b/internal/app/test/database_file_pool_test.go
 index 4a8a7841..c02234af 100644
 --- a/internal/app/test/database_file_pool_test.go
@@ -146,6 +201,91 @@ index 4a8a7841..c02234af 100644
  	application := newDatabasePoolTestApp(t, cfg)
  	apiKey := entities.CPAAPIKey{APIKey: "sk-writer-command", DisplayKey: "sk-*********command"}
  	if err := application.DB.Create(&apiKey).Error; err != nil {
+diff --git a/internal/app/test/traffic_lifecycle_test.go b/internal/app/test/traffic_lifecycle_test.go
+new file mode 100644
+index 00000000..e23ca5bb
+--- /dev/null
++++ b/internal/app/test/traffic_lifecycle_test.go
+@@ -0,0 +1,79 @@
++package test
++
++import (
++	"context"
++	. "cpa-usage-keeper/internal/app"
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++)
++
++func TestConstructionDefersTrafficPollingUntilRun(t *testing.T) {
++	var calls atomic.Int32
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path == "/v8/management/quota/observations" {
++			calls.Add(1)
++		}
++		w.WriteHeader(http.StatusNotFound)
++	}))
++	defer upstream.Close()
++	cfg := testAppConfig(t)
++	cfg.CPABaseURL = upstream.URL
++	application, err := NewWithConfig(cfg)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer application.Close()
++	if application.QuotaTrafficSync == nil {
++		t.Fatal("traffic quota runner was not wired")
++	}
++	// Construction must not start network polling on a context that Run replaces.
++	time.Sleep(50 * time.Millisecond)
++	if calls.Load() != 0 {
++		t.Fatal("quota polling started before the application lifecycle")
++	}
++}
++
++func TestRunStartsTrafficPollingAfterContextAndWaitsForCancellation(t *testing.T) {
++	cfg := testAppConfig(t)
++	cfg.AppPort = "invalid-port"
++	contexts := make(chan context.Context, 1)
++	finished := make(chan bool, 1)
++	application := &App{
++		Config:           &cfg,
++		Router:           gin.New(),
++		QuotaService:     &quotaContextRecorder{contextSet: contexts},
++		QuotaTrafficSync: &trafficLifecycleRecorder{contexts: contexts, finished: finished},
++	}
++	if err := application.Run(); err == nil {
++		t.Fatal("expected invalid HTTP port error")
++	}
++	select {
++	case same := <-finished:
++		if !same {
++			t.Fatal("traffic runner did not receive the installed quota context")
++		}
++	default:
++		t.Fatal("Run returned before traffic polling stopped")
++	}
++}
++
++type trafficLifecycleRecorder struct {
++	contexts <-chan context.Context
++	finished chan<- bool
++}
++
++func (r *trafficLifecycleRecorder) Run(ctx context.Context) error {
++	select {
++	case installed := <-r.contexts:
++		<-ctx.Done()
++		r.finished <- installed == ctx
++	case <-time.After(time.Second):
++		r.finished <- false
++	}
++	return nil
++}
 diff --git a/internal/auth/read_only_credential.go b/internal/auth/read_only_credential.go
 index cfb84c2d..b9bae147 100644
 --- a/internal/auth/read_only_credential.go
@@ -588,24 +728,6 @@ index 1ba8e40a..26cc848d 100644
  }
  
  type UsageHeaderSnapshotAppender interface {
-diff --git a/internal/quota/service.go b/internal/quota/service.go
-index 30eec52f..ee2c88f0 100644
---- a/internal/quota/service.go
-+++ b/internal/quota/service.go
-@@ -32,9 +32,10 @@ type ServiceOptions struct {
- }
- 
- type Service struct {
--	db       *gorm.DB
--	registry ProviderRegistry
--	pricing  *pricing.Catalog
-+	trafficSyncOnce sync.Once
-+	db              *gorm.DB
-+	registry        ProviderRegistry
-+	pricing         *pricing.Catalog
- 	// quotaUpstreamResponsesEnabled 控制刷新任务是否把 CPA 转发的完整上游响应写入最新限额缓存。
- 	quotaUpstreamResponsesEnabled bool
- 
 diff --git a/internal/quota/test/api_provider_traffic_test.go b/internal/quota/test/api_provider_traffic_test.go
 new file mode 100644
 index 00000000..3a9db065
@@ -688,8 +810,62 @@ index 84c946f1..43dba838 100644
 +
 +//go:linkname applyTrafficAPIProviderQuota cpa-usage-keeper/internal/quota.(*Service).applyTrafficAPIProviderQuota
 +func applyTrafficAPIProviderQuota(service *quota.Service, ctx context.Context, snapshot *quota.UsageHeaderSnapshot, identity entities.UsageIdentity) bool
+diff --git a/internal/quota/test/traffic_runner_test.go b/internal/quota/test/traffic_runner_test.go
+new file mode 100644
+index 00000000..a5098c0e
+--- /dev/null
++++ b/internal/quota/test/traffic_runner_test.go
+@@ -0,0 +1,48 @@
++package test
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/cpa"
++	. "cpa-usage-keeper/internal/quota"
++	"testing"
++	"time"
++)
++
++func TestTrafficRunnerUsesRuntimeContextAndStopsInFlightRequest(t *testing.T) {
++	db := openQuotaTestDatabase(t)
++	service := NewServiceWithRegistry(db, NewProviderRegistry(nil), emptyPricingCatalogForTest())
++	defer service.StopRefreshTasks()
++	// Installing the runtime context cancels the construction-time lease.
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	service.SetRefreshContext(ctx)
++	reader := &blockingTrafficReader{started: make(chan context.Context, 1)}
++	runner := NewTrafficQuotaSyncRunner(service, reader)
++	done := make(chan error, 1)
++	go func() { done <- runner.Run(ctx) }()
++	select {
++	case request := <-reader.started:
++		if request.Err() != nil {
++			t.Fatal("polling used the canceled construction context")
++		}
++	case <-time.After(time.Second):
++		t.Fatal("traffic polling did not start")
++	}
++	cancel()
++	select {
++	case err := <-done:
++		if err != nil {
++			t.Fatalf("normal shutdown returned an error: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("traffic request did not stop with the application")
++	}
++}
++
++type blockingTrafficReader struct{ started chan context.Context }
++
++func (r *blockingTrafficReader) FetchQuotaObservations(ctx context.Context) ([]cpa.QuotaObservation, error) {
++	r.started <- ctx
++	<-ctx.Done()
++	return nil, ctx.Err()
++}
 diff --git a/internal/quota/traffic_sync.go b/internal/quota/traffic_sync.go
-index bf9682a2..4834f467 100644
+index bf9682a2..e7da77d6 100644
 --- a/internal/quota/traffic_sync.go
 +++ b/internal/quota/traffic_sync.go
 @@ -4,6 +4,9 @@ import (
@@ -702,14 +878,12 @@ index bf9682a2..4834f467 100644
  	"time"
  )
  
-@@ -11,34 +14,121 @@ type trafficQuotaReader interface {
+@@ -11,34 +14,129 @@ type trafficQuotaReader interface {
  	FetchQuotaObservations(context.Context) ([]cpa.QuotaObservation, error)
  }
  
 -// Only CPA's local cache is read. No upstream query is made by this loop.
-+// StartTrafficQuotaSync reads CPA's local cache, never a provider endpoint.
-+// The existing worker revalidates identities and applies cache/history protections.
- func (s *Service) StartTrafficQuotaSync(reader trafficQuotaReader) {
+-func (s *Service) StartTrafficQuotaSync(reader trafficQuotaReader) {
 -	s.startRefreshGoroutine(func() {
 -		timer := time.NewTicker(5 * time.Second)
 -		defer timer.Stop()
@@ -725,24 +899,8 @@ index bf9682a2..4834f467 100644
 -							s.applyUsageHeaderSnapshotWithIdentity(ctx, snapshot, identity, nil)
 -						}
 -					}
-+	if s == nil || reader == nil {
-+		return
-+	}
-+	s.trafficSyncOnce.Do(func() {
-+		s.startRefreshGoroutine(func() {
-+			timer := time.NewTicker(5 * time.Second)
-+			defer timer.Stop()
-+			seen := map[string]time.Time{}
-+			for {
-+				ctx, cancel := context.WithTimeout(s.refreshContextSnapshot(), 4*time.Second)
-+				seen, _ = s.syncTrafficQuota(ctx, reader, seen)
-+				cancel()
-+				select {
-+				case <-s.refreshContextSnapshot().Done():
-+					return
-+				case <-timer.C:
- 				}
- 			}
+-				}
+-			}
 -			cancel()
 -			select {
 -			case <-s.refreshContext.Done():
@@ -750,9 +908,39 @@ index bf9682a2..4834f467 100644
 -			case <-timer.C:
 -			}
 -		}
-+		})
- 	})
+-	})
++// TrafficQuotaSyncRunner reads CPA's local cache, never a provider endpoint.
++// App starts it after installing the quota service's runtime context.
++type TrafficQuotaSyncRunner struct {
++	service *Service
++	reader  trafficQuotaReader
  }
++
++func NewTrafficQuotaSyncRunner(service *Service, reader trafficQuotaReader) *TrafficQuotaSyncRunner {
++	return &TrafficQuotaSyncRunner{service: service, reader: reader}
++}
++
++func (r *TrafficQuotaSyncRunner) Run(ctx context.Context) error {
++	if r == nil || r.service == nil || r.reader == nil {
++		return nil
++	}
++	timer := time.NewTicker(5 * time.Second)
++	defer timer.Stop()
++	seen := map[string]time.Time{}
++	for {
++		if ctx.Err() != nil {
++			return nil
++		}
++		requestCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
++		seen, _ = r.service.syncTrafficQuota(requestCtx, r.reader, seen)
++		cancel()
++		select {
++		case <-ctx.Done():
++			return nil
++		case <-timer.C:
++		}
++	}
++}
 +
 +func (s *Service) syncTrafficQuota(ctx context.Context, reader trafficQuotaReader, seen map[string]time.Time) (map[string]time.Time, error) {
 +	items, err := reader.FetchQuotaObservations(ctx)
@@ -847,7 +1035,7 @@ index bf9682a2..4834f467 100644
  func stampQuotaRows(rows []QuotaRow, at time.Time, source RefreshSource) {
  	if source == "" || source == RefreshSourceUsageHeader {
  		source = "api_response_headers"
-@@ -46,8 +136,27 @@ func stampQuotaRows(rows []QuotaRow, at time.Time, source RefreshSource) {
+@@ -46,8 +144,27 @@ func stampQuotaRows(rows []QuotaRow, at time.Time, source RefreshSource) {
  	for i := range rows {
  		rows[i].CapturedAt = at
  		rows[i].Source = source

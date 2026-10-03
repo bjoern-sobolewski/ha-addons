@@ -1,5 +1,5 @@
 diff --git a/internal/api/auth.go b/internal/api/auth.go
-index 2abe5b2..0d27918 100644
+index 2abe5b2..4bdf6ba 100644
 --- a/internal/api/auth.go
 +++ b/internal/api/auth.go
 @@ -12,6 +12,7 @@ import (
@@ -10,7 +10,23 @@ index 2abe5b2..0d27918 100644
  )
  
  const (
-@@ -103,10 +104,16 @@ type resolvedSessionToken struct {
+@@ -56,11 +57,13 @@ type authHandler struct {
+ }
+ 
+ type loginRequest struct {
+-	Password string `json:"password"`
++	RememberMe *bool  `json:"rememberMe"`
++	Password   string `json:"password"`
+ }
+ 
+ type apiKeyLoginRequest struct {
+-	APIKey string `json:"apiKey"`
++	RememberMe *bool  `json:"rememberMe"`
++	APIKey     string `json:"apiKey"`
+ }
+ 
+ type sessionResponse struct {
+@@ -103,10 +106,16 @@ type resolvedSessionToken struct {
  }
  
  func NewAuthHandler(config AuthConfig, sessions *auth.SessionManager) *authHandler {
@@ -30,7 +46,7 @@ index 2abe5b2..0d27918 100644
  	}
  	return &authHandler{
  		config:   config,
-@@ -244,6 +251,9 @@ func (h *authHandler) resolveValidSession(c *gin.Context) (resolvedSessionToken,
+@@ -244,6 +253,9 @@ func (h *authHandler) resolveValidSession(c *gin.Context) (resolvedSessionToken,
  			}
  			continue
  		}
@@ -40,15 +56,70 @@ index 2abe5b2..0d27918 100644
  		return resolved, session, true
  	}
  	return resolveSessionToken(c), auth.Session{}, false
+@@ -319,7 +331,7 @@ func (h *authHandler) login(c *gin.Context) {
+ 		return
+ 	}
+ 
+-	setSessionCookie(c, h.config.BasePath, resolved.CookieKind, token, expiresAt)
++	setSessionCookie(c, h.config.BasePath, resolved.CookieKind, token, expiresAt, rememberLogin(request.RememberMe))
+ 	writeLoginSuccess(c, resolved, token)
+ }
+ 
+@@ -357,7 +369,7 @@ func (h *authHandler) apiKeyLogin(c *gin.Context) {
+ 		writeInternalError(c, "create api key viewer session failed", err)
+ 		return
+ 	}
+-	setSessionCookie(c, h.config.BasePath, resolved.CookieKind, token, expiresAt)
++	setSessionCookie(c, h.config.BasePath, resolved.CookieKind, token, expiresAt, rememberLogin(request.RememberMe))
+ 	writeLoginSuccess(c, resolved, token)
+ }
+ 
+@@ -487,14 +499,19 @@ func requestIntentMiddleware() gin.HandlerFunc {
+ 	}
+ }
+ 
+-func setSessionCookie(c *gin.Context, basePath string, kind sessionCookieKind, token string, expiresAt time.Time) {
++// Older API clients retain their existing persistent-cookie behavior.
++func rememberLogin(value *bool) bool { return value == nil || *value }
++
++func setSessionCookie(c *gin.Context, basePath string, kind sessionCookieKind, token string, expiresAt time.Time, remember ...bool) {
+ 	cookie := sessionCookie(basePath, kind)
+ 	if kind == sessionCookieKindStandard {
+ 		cookie.Secure = c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+ 	}
+ 	cookie.Value = token
+-	cookie.Expires = expiresAt
+-	cookie.MaxAge = int(time.Until(expiresAt).Seconds())
++	if len(remember) == 0 || remember[0] {
++		cookie.Expires = expiresAt
++		cookie.MaxAge = int(time.Until(expiresAt).Seconds())
++	}
+ 	http.SetCookie(c.Writer, cookie)
+ }
+ 
+diff --git a/internal/api/read_only.go b/internal/api/read_only.go
+index e349523..02cd22a 100644
+--- a/internal/api/read_only.go
++++ b/internal/api/read_only.go
+@@ -61,7 +61,7 @@ func (h *authHandler) readOnlyLogin(c *gin.Context) {
+ 		writeInternalError(c, "create read-only session failed", err)
+ 		return
+ 	}
+-	setSessionCookie(c, h.config.BasePath, resolved.CookieKind, token, expiresAt)
++	setSessionCookie(c, h.config.BasePath, resolved.CookieKind, token, expiresAt, rememberLogin(request.RememberMe))
+ 	writeLoginSuccess(c, resolved, token)
+ }
+ 
 diff --git a/internal/api/test/read_only_persistence_test.go b/internal/api/test/read_only_persistence_test.go
 new file mode 100644
-index 0000000..8b68ff7
+index 0000000..0b6b142
 --- /dev/null
 +++ b/internal/api/test/read_only_persistence_test.go
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,99 @@
 +package test
 +
 +import (
++	"encoding/json"
 +	"net/http"
 +	"path/filepath"
 +	"strings"
@@ -92,6 +163,56 @@ index 0000000..8b68ff7
 +	}
 +	if !manager.Validate(admin) {
 +		t.Fatal("read-only failure revoked admin")
++	}
++}
++
++func TestLoginCookieChoiceForAllRoles(t *testing.T) {
++	for _, mode := range []struct {
++		path, field, credential string
++		role                    auth.Role
++	}{
++		{"login", "password", "admin-test-password", auth.RoleAdmin},
++		{"read-only-login", "password", "read-only-test-password", auth.RoleReadOnly},
++		{"api-key-login", "apiKey", "test-client-key", auth.RoleAPIKeyViewer},
++	} {
++		for _, choice := range []string{"false", "true", "legacy"} {
++			t.Run(mode.path+"/"+choice, func(t *testing.T) {
++				manager := auth.NewSessionManager(7 * 24 * time.Hour)
++				config := AuthConfig{Enabled: true, LoginPassword: "admin-test-password", ReadOnlyPassword: "read-only-test-password"}
++				keys := &authLoginKeyStub{row: entities.CPAAPIKey{ID: 1, APIKey: "test-client-key"}}
++				router := NewRouter(nil, nil, nil, nil, config, NewAuthHandler(config, manager), "", OptionalProviders{CPAAPIKeys: keys})
++				payload := map[string]any{mode.field: mode.credential}
++				if choice != "legacy" {
++					payload["rememberMe"] = choice == "true"
++				}
++				body, _ := json.Marshal(payload)
++				response := serveCredentialMutation(router, "POST", "/api/v1/auth/"+mode.path, string(body))
++				if response.Code != 204 {
++					t.Fatal(response.Code)
++				}
++				cookie := response.Result().Cookies()[0]
++				if choice == "false" {
++					if !cookie.Expires.IsZero() || cookie.MaxAge != 0 {
++						t.Fatal("session cookie had persistent expiry")
++					}
++				} else if cookie.Expires.IsZero() || cookie.MaxAge < 6*24*60*60 {
++					t.Fatal("persistent cookie lost expiry")
++				}
++				if !cookie.HttpOnly || cookie.Path != "/" {
++					t.Fatal("cookie protections/path changed")
++				}
++				session, ok := manager.Get(cookie.Value)
++				if !ok || session.Role != mode.role || session.ExpiresAt.Sub(session.CreatedAt) != 7*24*time.Hour {
++					t.Fatal("choice changed role or server expiry")
++				}
++				for i := 0; i < 2; i++ {
++					state := serveAPIGet(router, "/api/v1/auth/session", cookie)
++					if state.Code != 200 || !strings.Contains(state.Body.String(), `"authenticated":true`) {
++						t.Fatal("reload/another tab lost login")
++					}
++				}
++			})
++		}
 +	}
 +}
 diff --git a/internal/api/test/read_only_test.go b/internal/api/test/read_only_test.go
@@ -338,3 +459,255 @@ index 0000000..4e0692d
 +		t.Fatal("expired session accepted after restart")
 +	}
 +}
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index b79440e..3827dfa 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -113,11 +113,11 @@ function App() {
+     window.history.replaceState(null, '', appPath(targetPath) + cpamcEmbedSearch());
+   }, [authRole, authState, isEmbeddedInCPAMC]);
+ 
+-  const handlePasswordLogin = useCallback(async (password: string) => {
++  const handlePasswordLogin = useCallback(async (password: string, rememberMe = true) => {
+     setSubmitting(true);
+     setAdminLoginError('');
+     try {
+-      await login(password);
++      await login(password,rememberMe);
+       const session = await loadSession();
+       if (!session.authenticated) {
+         setAdminLoginError(t('auth.login_failed'));
+@@ -139,10 +139,10 @@ function App() {
+     }
+   }, [clearSession, isEmbeddedInCPAMC, loadSession, t]);
+ 
+-  const handleReadOnlyLogin = useCallback(async (password: string) => {
++  const handleReadOnlyLogin = useCallback(async (password: string, rememberMe = true) => {
+     setSubmitting(true); setReadOnlyLoginError('');
+     try {
+-      await loginReadOnly(password);
++      await loginReadOnly(password,rememberMe);
+       const session = await loadSession();
+       if (!session.authenticated || session.role !== 'read_only') throw new Error('Invalid session');
+       window.history.replaceState(null, '', appPath('/read-only'));
+@@ -152,11 +152,11 @@ function App() {
+     } finally {setSubmitting(false);}
+   }, [clearSession, loadSession, t]);
+ 
+-  const handleAPIKeyLogin = useCallback(async (apiKey: string) => {
++  const handleAPIKeyLogin = useCallback(async (apiKey: string, rememberMe = true) => {
+     setSubmitting(true);
+     setAPIKeyLoginError('');
+     try {
+-      await loginWithCPAAPIKey(apiKey);
++      await loginWithCPAAPIKey(apiKey,rememberMe);
+       const session = await loadSession();
+       if (!session.authenticated || session.role !== 'api_key_viewer') {
+         setAPIKeyLoginError(t('auth.api_key_login_failed'));
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index 53702f3..40b005a 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -45,6 +45,9 @@ const resources = {
+       },
+       auth: {
+         login_title: 'CPA USAGE KEEPER',
++        stay_signed_in: 'Stay signed in',
++        stay_signed_in_help: 'Keep this browser signed in for 7 days.',
++        temporary_session_help: 'For this browser session. Reloads and additional tabs keep you signed in.',
+         login_subtitle: 'Every flow leaves a trace.',
+         console_kicker: 'Access control',
+         console_title: 'Choose your console',
+@@ -987,6 +990,9 @@ const resources = {
+       },
+       auth: {
+         login_title: 'CPA USAGE KEEPER',
++        stay_signed_in: '保持登录',
++        stay_signed_in_help: '在此浏览器中保持登录 7 天。',
++        temporary_session_help: '仅在此浏览器会话中登录。刷新和打开新标签页不会退出。',
+         login_subtitle: '万千流转，皆有迹可循。',
+         console_kicker: '访问控制',
+         console_title: '选择访问方式',
+@@ -1929,6 +1935,9 @@ const resources = {
+       },
+       auth: {
+         login_title: 'CPA USAGE KEEPER',
++        stay_signed_in: '保持登入',
++        stay_signed_in_help: '在此瀏覽器中保持登入 7 天。',
++        temporary_session_help: '僅在此瀏覽器工作階段中登入。重新整理和開啟新分頁不會登出。',
+         login_subtitle: '萬千流轉，皆有跡可循。',
+         console_kicker: '存取控制',
+         console_title: '選擇存取方式',
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index 2e06ae2..6c81256 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -232,7 +232,7 @@ async function activateEmbedSessionFallback(response: Response): Promise<void> {
+   }
+ }
+ 
+-export async function login(password: string): Promise<void> {
++export async function login(password: string, rememberMe = true): Promise<void> {
+   if (isCPAMCEmbed()) {
+     clearEmbedSessionToken()
+   }
+@@ -241,7 +241,7 @@ export async function login(password: string): Promise<void> {
+     headers: {
+       'Content-Type': 'application/json',
+     },
+-    body: JSON.stringify({ password }),
++    body: JSON.stringify({ password, rememberMe }),
+   })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to login: ${response.status}`)
+@@ -249,9 +249,9 @@ export async function login(password: string): Promise<void> {
+   await activateEmbedSessionFallback(response)
+ }
+ 
+-export async function loginReadOnly(password: string): Promise<void> {
++export async function loginReadOnly(password: string, rememberMe = true): Promise<void> {
+   const response = await apiFetch(apiPath('/auth/read-only-login'), {
+-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password}),
++    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password,rememberMe}),
+   });
+   if (!response.ok) return parseApiError(response, 'Unable to sign in');
+   await activateEmbedSessionFallback(response);
+@@ -274,7 +274,7 @@ export async function fetchReadOnlyQuota(signal?: AbortSignal): Promise<{account
+   return response.json();
+ }
+ 
+-export async function loginWithCPAAPIKey(apiKey: string): Promise<void> {
++export async function loginWithCPAAPIKey(apiKey: string, rememberMe = true): Promise<void> {
+   if (isCPAMCEmbed()) {
+     clearEmbedSessionToken()
+   }
+@@ -283,7 +283,7 @@ export async function loginWithCPAAPIKey(apiKey: string): Promise<void> {
+     headers: {
+       'Content-Type': 'application/json',
+     },
+-    body: JSON.stringify({ apiKey }),
++    body: JSON.stringify({ apiKey, rememberMe }),
+   })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to login with CPA API key: ${response.status}`)
+diff --git a/web/src/lib/test/api.test.ts b/web/src/lib/test/api.test.ts
+index 4d9f98f..b5262a7 100644
+--- a/web/src/lib/test/api.test.ts
++++ b/web/src/lib/test/api.test.ts
+@@ -39,7 +39,7 @@ describe('fetchUsageEvents', () => {
+     expect(new URL(String(url), 'http://localhost').pathname).toBe('/api/v1/auth/api-key-login');
+     expect(init).toMatchObject({ credentials: 'include', method: 'POST' });
+     expect(headerValue(init, 'Content-Type')).toBe('application/json');
+-    expect(init?.body).toBe(JSON.stringify({ apiKey: 'sk-cpa-viewer' }));
++    expect(init?.body).toBe(JSON.stringify({ apiKey: 'sk-cpa-viewer', rememberMe: true }));
+   });
+ 
+   it('loads key overview with only the viewer range query', async () => {
+diff --git a/web/src/lib/test/loginCookieChoice.test.ts b/web/src/lib/test/loginCookieChoice.test.ts
+new file mode 100644
+index 0000000..ea6fc9b
+--- /dev/null
++++ b/web/src/lib/test/loginCookieChoice.test.ts
+@@ -0,0 +1,11 @@
++import {afterEach,beforeEach,expect,it,vi} from 'vitest';
++import {login,loginReadOnly,loginWithCPAAPIKey} from '../api';
++beforeEach(()=>vi.stubGlobal('window',{__APP_BASE_PATH__:undefined}));
++afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals()});
++it.each([['admin',login],['read-only',loginReadOnly],['key',loginWithCPAAPIKey]] as const)('sends the explicit cookie choice for %s login',async(_name,submit)=>{
++ const fetchMock=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(null,{status:204}));
++ await submit('test-credential',false);await submit('test-credential',true);
++ expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).rememberMe).toBe(false);
++ expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).rememberMe).toBe(true);
++ expect(fetchMock.mock.calls[0][1]?.credentials).toBe('include');
++});
+diff --git a/web/src/pages/LoginPage.module.scss b/web/src/pages/LoginPage.module.scss
+index d615e5d..692d39b 100644
+--- a/web/src/pages/LoginPage.module.scss
++++ b/web/src/pages/LoginPage.module.scss
+@@ -230,3 +230,9 @@
+     line-height: 1.45;
+   }
+ }
++
++.sessionChoice {
++  label { display:flex; align-items:center; gap:8px; color:var(--text-primary); cursor:pointer; }
++  input { accent-color:var(--primary-color); width:16px; height:16px; }
++  p { margin:6px 0 0; color:var(--text-secondary); font-size:12px; line-height:1.5; }
++}
+diff --git a/web/src/pages/LoginPage.tsx b/web/src/pages/LoginPage.tsx
+index dce5f8d..164fb0d 100644
+--- a/web/src/pages/LoginPage.tsx
++++ b/web/src/pages/LoginPage.tsx
+@@ -26,9 +26,9 @@ type LoginErrors = {
+ interface LoginPageProps extends LoginErrors {
+   loading?: boolean;
+   readOnlyEnabled?: boolean;
+-  onReadOnlySubmit?: (password: string) => Promise<void>;
+-  onPasswordSubmit: (password: string) => Promise<void>;
+-  onAPIKeySubmit: (apiKey: string) => Promise<void>;
++  onReadOnlySubmit?: (password: string, rememberMe?: boolean) => Promise<void>;
++  onPasswordSubmit: (password: string, rememberMe?: boolean) => Promise<void>;
++  onAPIKeySubmit: (apiKey: string, rememberMe?: boolean) => Promise<void>;
+ }
+ 
+ export const getLoginErrorForMode = (mode: LoginMode, { adminError = '', apiKeyError = '', readOnlyError = '' }: LoginErrors) => (
+@@ -40,6 +40,7 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+   const theme = useThemeStore((state) => state.theme);
+   const setTheme = useThemeStore((state) => state.setTheme);
+   const [mode, setMode] = useState<LoginMode>(window.__KEEPER_VIEWER_ONLY__ ? 'api_key' : 'admin');
++  const [rememberMe, setRememberMe] = useState(false);
+   const [password, setPassword] = useState('');
+   const [apiKey, setApiKey] = useState('');
+   const activeError = getLoginErrorForMode(mode, { adminError, apiKeyError, readOnlyError });
+@@ -51,11 +52,11 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+     event.preventDefault();
+     if (mode === 'api_key') {
+-      await onAPIKeySubmit(apiKey);
++      await onAPIKeySubmit(apiKey,rememberMe);
+       return;
+     }
+-    if (mode === 'read_only') { await onReadOnlySubmit?.(password); return; }
+-    await onPasswordSubmit(password);
++    if (mode === 'read_only') { await onReadOnlySubmit?.(password,rememberMe); return; }
++    await onPasswordSubmit(password,rememberMe);
+   };
+ 
+   const canSubmit = mode === 'api_key' ? Boolean(apiKey.trim()) : Boolean(password.trim());
+@@ -148,6 +149,10 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+                 disabled={loading}
+               />
+             )}
++            <div className={styles.sessionChoice}>
++              <label><input type="checkbox" checked={rememberMe} onChange={(event)=>setRememberMe(event.target.checked)} disabled={loading} aria-describedby="session-choice-help" />{t('auth.stay_signed_in')}</label>
++              <p id="session-choice-help">{t(rememberMe ? 'auth.stay_signed_in_help' : 'auth.temporary_session_help')}</p>
++            </div>
+             <Button type="submit" fullWidth loading={loading} disabled={!canSubmit}>
+               {mode === 'api_key' ? t('auth.api_key_login_submit') : mode === 'read_only' ? t('read_only.login_submit') : t('auth.login_submit')}
+             </Button>
+diff --git a/web/src/pages/test/LoginPage.test.tsx b/web/src/pages/test/LoginPage.test.tsx
+index 2f0b419..3383f76 100644
+--- a/web/src/pages/test/LoginPage.test.tsx
++++ b/web/src/pages/test/LoginPage.test.tsx
+@@ -28,3 +28,4 @@ it('exposes all theme options in a labelled control', () => {
+     expect(html).toContain(`usage_stats.theme_${theme}`);
+   }
+ });
++// @vitest-environment happy-dom
+diff --git a/web/src/pages/test/ReadOnlyLogin.test.tsx b/web/src/pages/test/ReadOnlyLogin.test.tsx
+index cd37c45..c08b797 100644
+--- a/web/src/pages/test/ReadOnlyLogin.test.tsx
++++ b/web/src/pages/test/ReadOnlyLogin.test.tsx
+@@ -17,6 +17,12 @@ it('offers a distinct read-only login while hiding public admin login',async ()
+     expect(element.textContent).toContain('Read-only password');
+     expect(element.textContent).toContain('Open overview');
+     expect(element.querySelector('input')?.placeholder).toBe('Enter read-only password');
++    const remember=element.querySelector<HTMLInputElement>('input[type="checkbox"]');
++    expect(remember?.checked).toBe(false);
++    expect(element.textContent).toContain('browser session');
++    await act(async()=>remember!.click());
++    expect(remember?.checked).toBe(true);
++    expect(element.textContent).toContain('7 days');
+     expect(getLoginErrorForMode('read_only',{adminError:'admin',readOnlyError:'read-only'})).toBe('read-only');
+     await act(async () => root.render(<LoginPage onPasswordSubmit={vi.fn()} onAPIKeySubmit={vi.fn()}/>));
+     expect(Array.from(element.querySelectorAll('button[role="tab"]')).some(tab=>tab.textContent==='Read-only overview')).toBe(false);

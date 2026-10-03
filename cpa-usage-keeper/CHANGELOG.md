@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.12
+
+- Add a Stay signed in checkbox to browser login forms: seven-day persistent cookies when checked, browser-session cookies otherwise.
+- Keep reloads, multiple tabs and hidden tabs signed in without inactivity timers, heartbeat requests or tab coordination.
+
 ## 0.1.11
 
 - Preserve read-only logins across restarts and updates until their original seven-day expiry.

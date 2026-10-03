@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7
+
+- Keep quota observation details attached while keyboard focus scrolls a card into view, preserving Escape, blur and outside-click dismissal.
+- Preserve native quota label typography regardless of stylesheet load order.
+
 ## 0.1.6
 
 - Restore native quota typography, spacing and 6px green/amber/red meters.

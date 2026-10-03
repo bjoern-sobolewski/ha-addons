@@ -100,11 +100,11 @@ index 1224c83..0000000
 -}
 diff --git a/src/features/quota/QuotaWindowLabel.module.scss b/src/features/quota/QuotaWindowLabel.module.scss
 new file mode 100644
-index 0000000..570c673
+index 0000000..7bccd80
 --- /dev/null
 +++ b/src/features/quota/QuotaWindowLabel.module.scss
 @@ -0,0 +1,39 @@
-+.label {
++:where(.label) {
 +  display: inline;
 +  margin: 0;
 +  padding: 0;
@@ -145,10 +145,10 @@ index 0000000..570c673
 +}
 diff --git a/src/features/quota/QuotaWindowLabel.tsx b/src/features/quota/QuotaWindowLabel.tsx
 new file mode 100644
-index 0000000..0fa3c84
+index 0000000..369bac1
 --- /dev/null
 +++ b/src/features/quota/QuotaWindowLabel.tsx
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,132 @@
 +import { useEffect, useId, useRef, useState } from 'react';
 +import { createPortal } from 'react-dom';
 +import { useTranslation } from 'react-i18next';
@@ -180,15 +180,18 @@ index 0000000..0fa3c84
 +    if (!open) return;
 +    const button = anchor.current;
 +    if (!button) return;
-+    const bounds = button.getBoundingClientRect();
-+    const height = popup.current?.getBoundingClientRect().height ?? 150;
-+    setPosition({
-+      left: Math.max(8, Math.min(bounds.left, window.innerWidth - 308)),
-+      top:
-+        bounds.bottom + height + 14 <= window.innerHeight
-+          ? bounds.bottom + 6
-+          : Math.max(8, bounds.top - height - 6),
-+    });
++    const positionTooltip = () => {
++      const bounds = button.getBoundingClientRect();
++      const height = popup.current?.getBoundingClientRect().height ?? 150;
++      setPosition({
++        left: Math.max(8, Math.min(bounds.left, window.innerWidth - 308)),
++        top:
++          bounds.bottom + height + 14 <= window.innerHeight
++            ? bounds.bottom + 6
++            : Math.max(8, bounds.top - height - 6),
++      });
++    };
++    positionTooltip();
 +    setNow(Date.now());
 +    const timer = window.setInterval(() => {
 +      if (!document.hidden) setNow(Date.now());
@@ -196,15 +199,15 @@ index 0000000..0fa3c84
 +    const dismissOutside = (event: PointerEvent) => {
 +      if (!button.contains(event.target as Node)) setOpen(false);
 +    };
-+    const dismiss = () => setOpen(false);
 +    document.addEventListener('pointerdown', dismissOutside);
-+    window.addEventListener('resize', dismiss);
-+    window.addEventListener('scroll', dismiss, true);
++    // Focusing a card may scroll it into view; keep its details attached.
++    window.addEventListener('resize', positionTooltip);
++    window.addEventListener('scroll', positionTooltip, true);
 +    return () => {
 +      window.clearInterval(timer);
 +      document.removeEventListener('pointerdown', dismissOutside);
-+      window.removeEventListener('resize', dismiss);
-+      window.removeEventListener('scroll', dismiss, true);
++      window.removeEventListener('resize', positionTooltip);
++      window.removeEventListener('scroll', positionTooltip, true);
 +    };
 +  }, [open]);
 +  if (!details)

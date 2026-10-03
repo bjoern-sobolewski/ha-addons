@@ -41,3 +41,21 @@ The upstream provider key is separate from both the CPA client API key and manag
 - Keeper has no data: verify the internal hostname and management key; send a new model request. Keeper automatically falls back to the HTTP usage queue on CPA v8.
 - Connection refused from another app: use the app identifier with underscores replaced by hyphens and the appropriate internal port.
 - API route returns 404 for management: expected on port 8080; use the private 8317 listener for management.
+
+## Automatic quota freshness
+
+Supported Codex and Claude upstream quota headers, and Codex WebSocket quota
+events, populate account-specific cached windows when present. Quota is optional;
+missing observations do not erase existing windows. Late or equal observations
+cannot replace newer windows. Manual and scheduled provider queries remain
+available for idle accounts and providers without supported traffic metadata.
+
+Quota views read backend caches every ten seconds, without provider queries.
+Polling pauses while hidden, refreshes when visible, and does not overlap. Hover,
+focus or tap the freshness indicator for the source, capture timestamp, relative
+age and account label. Data is stale after fifteen minutes or its reset time.
+Cache reads never update capture timestamps. Traffic caches are in memory and
+can be unavailable after restart until traffic or a fallback query arrives.
+
+Reporting never includes credentials. Administrative routes remain private;
+individual-key reporting remains scoped and the all-key role remains read-only.

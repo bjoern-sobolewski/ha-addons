@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- Capture supported HTTP quota headers and Codex WebSocket quota events in an account/window cache.
+- Build a pinned CPAMC dashboard with ten-second cache polling and quota provenance, age and stale indicators.
+- Keep management-only cache reporting and manual provider-query fallback.
+
 ## 0.1.1
 
 - Add a client API key source option: Home Assistant or the management UI.

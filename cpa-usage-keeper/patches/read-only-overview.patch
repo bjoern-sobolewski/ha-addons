@@ -87,20 +87,37 @@ index 8020994..e1f567e 100644
  			continue
  		}
 diff --git a/internal/api/key_quota.go b/internal/api/key_quota.go
-index 5c38d93..ee29a97 100644
+index 5c38d93..ff6cc89 100644
 --- a/internal/api/key_quota.go
 +++ b/internal/api/key_quota.go
-@@ -16,6 +16,9 @@ import (
+@@ -16,15 +16,19 @@ import (
  // Deliberately separate DTOs: never serialize identities, raw provider payloads,
  // auth indexes, upstream errors, reset credits or local billing statistics.
  type viewerQuotaRow struct {
-+	CapturedAt time.Time `json:"captured_at,omitempty"`
-+ Source quota.RefreshSource `json:"source,omitempty"`
-+ Stale bool `json:"stale"`
- 	Label            string   `json:"label"`
- 	Metric           string   `json:"metric,omitempty"`
- 	Remaining        *float64 `json:"remaining,omitempty"`
-@@ -37,6 +40,10 @@ func viewerProviderName(identity entities.UsageIdentity) string {
+-	Label            string   `json:"label"`
+-	Metric           string   `json:"metric,omitempty"`
+-	Remaining        *float64 `json:"remaining,omitempty"`
+-	Limit            *float64 `json:"limit,omitempty"`
+-	RemainingPercent *float64 `json:"remaining_percent,omitempty"`
+-	ResetAt          string   `json:"reset_at,omitempty"`
+-	LimitReached     *bool    `json:"limit_reached,omitempty"`
++	CapturedAt       time.Time           `json:"captured_at,omitempty"`
++	Source           quota.RefreshSource `json:"source,omitempty"`
++	Stale            bool                `json:"stale"`
++	Label            string              `json:"label"`
++	Metric           string              `json:"metric,omitempty"`
++	Remaining        *float64            `json:"remaining,omitempty"`
++	Limit            *float64            `json:"limit,omitempty"`
++	RemainingPercent *float64            `json:"remaining_percent,omitempty"`
++	ResetAt          string              `json:"reset_at,omitempty"`
++	LimitReached     *bool               `json:"limit_reached,omitempty"`
+ }
+ type viewerQuotaAccount struct {
++	Kind      string           `json:"kind"`
+ 	Label     string           `json:"label"`
+ 	Provider  string           `json:"provider"`
+ 	Status    string           `json:"status"`
+@@ -37,6 +41,10 @@ func viewerProviderName(identity entities.UsageIdentity) string {
  	switch strings.ToLower(strings.TrimSpace(identity.Type)) {
  	case "codex":
  		return "Codex"
@@ -111,7 +128,7 @@ index 5c38d93..ee29a97 100644
  	case "claude":
  		return "Claude"
  	case "gemini", "gemini-cli":
-@@ -57,7 +64,11 @@ func viewerProviderName(identity entities.UsageIdentity) string {
+@@ -57,7 +65,11 @@ func viewerProviderName(identity entities.UsageIdentity) string {
  }
  
  func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityProvider, provider QuotaProvider) {
@@ -124,18 +141,57 @@ index 5c38d93..ee29a97 100644
  		setNoStoreHeaders(c)
  		if identities == nil || provider == nil {
  			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Quota data is unavailable"})
-@@ -115,6 +126,11 @@ func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityP
+@@ -78,7 +90,7 @@ func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityP
+ 				continue
+ 			}
+ 			selected = append(selected, identity)
+-			if identity.AuthType == entities.UsageIdentityAuthTypeAuthFile && identity.Identity != "" {
++			if identity.Identity != "" && (identity.AuthType == entities.UsageIdentityAuthTypeAuthFile || identity.Type == "codex" || identity.Type == "claude") {
+ 				indexes = append(indexes, identity.Identity)
+ 			}
+ 		}
+@@ -101,8 +113,12 @@ func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityP
+ 			name := viewerProviderName(identity)
+ 			counts[name]++
+ 			account := viewerQuotaAccount{Label: fmt.Sprintf("%s account %d", name, counts[name]), Provider: name, Status: "unavailable", Rows: []viewerQuotaRow{}}
++			account.Kind = "oauth"
++			if identity.AuthType == entities.UsageIdentityAuthTypeAIProvider {
++				account.Kind = "api"
++			}
+ 			item, ok := byIndex[identity.Identity]
+-			if identity.AuthType == entities.UsageIdentityAuthTypeAuthFile && ok && item.Status == quota.RefreshTaskStatusCompleted && item.Quota != nil && len(item.Quota.Quota) > 0 {
++			if ok && item.Status == quota.RefreshTaskStatusCompleted && item.Quota != nil && len(item.Quota.Quota) > 0 {
+ 				account.UpdatedAt = item.RefreshedAt
+ 				account.Status = "available"
+ 				if item.RefreshedAt == nil || now.Sub(*item.RefreshedAt) > 15*time.Minute {
+@@ -115,6 +131,18 @@ func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityP
  						label = "Quota window"
  					}
  					safe := viewerQuotaRow{Label: label, Metric: row.Metric, Remaining: row.Remaining, Limit: row.Limit, ResetAt: row.ResetAt, LimitReached: row.LimitReached}
-+					safe.CapturedAt=row.CapturedAt;safe.Source=row.Source
-+ if safe.CapturedAt.IsZero()&&item.RefreshedAt!=nil{safe.CapturedAt=*item.RefreshedAt}
-+ safe.Stale=safe.CapturedAt.IsZero()||now.Sub(safe.CapturedAt)>15*time.Minute
-+ if reset,e:=time.Parse(time.RFC3339,safe.ResetAt);e==nil&&!reset.After(now){safe.Stale=true}
-+ if safe.Stale{account.Status="stale"}
++					safe.CapturedAt = row.CapturedAt
++					safe.Source = row.Source
++					if safe.CapturedAt.IsZero() && item.RefreshedAt != nil {
++						safe.CapturedAt = *item.RefreshedAt
++					}
++					safe.Stale = safe.CapturedAt.IsZero() || now.Sub(safe.CapturedAt) > 15*time.Minute
++					if reset, e := time.Parse(time.RFC3339, safe.ResetAt); e == nil && !reset.After(now) {
++						safe.Stale = true
++					}
++					if safe.Stale {
++						account.Status = "stale"
++					}
  					if row.RemainingFraction != nil {
  						value := *row.RemainingFraction * 100
  						safe.RemainingPercent = &value
+@@ -123,7 +151,7 @@ func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityP
+ 						safe.RemainingPercent = &value
+ 					}
+ 					if safe.ResetAt == "" && row.ResetAfterSeconds != nil && item.RefreshedAt != nil {
+-						safe.ResetAt = item.RefreshedAt.Add(time.Duration(*row.ResetAfterSeconds) * time.Second).UTC().Format(time.RFC3339)
++						safe.ResetAt = safe.CapturedAt.Add(time.Duration(*row.ResetAfterSeconds) * time.Second).UTC().Format(time.RFC3339)
+ 					}
+ 					if reset, err := time.Parse(time.RFC3339, safe.ResetAt); err == nil && !reset.After(now) {
+ 						account.Status = "stale"
 diff --git a/internal/api/read_only.go b/internal/api/read_only.go
 new file mode 100644
 index 0000000..e349523
@@ -1075,7 +1131,7 @@ index 4b3ba41..d76591e 100644
  			return
  		}
 diff --git a/internal/api/router.go b/internal/api/router.go
-index cda67b1..90db3b8 100644
+index cda67b1..2135609 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
 @@ -127,9 +127,16 @@ func NewRouter(
@@ -1096,6 +1152,14 @@ index cda67b1..90db3b8 100644
  	adminProtected := apiV1.Group("")
  	adminProtected.Use(authHandler.adminMiddleware())
  	registerStatusRoutes(adminProtected, statusProvider, statusConfig)
+@@ -147,6 +154,7 @@ func NewRouter(
+ 	registerCPAAPIKeyRoutes(adminProtected, cpaAPIKeyProvider)
+ 	registerPricingRoutes(adminProtected, pricingProvider)
+ 	registerQuotaRoutes(adminProtected, quotaProvider)
++	registerViewerQuotaRoute(adminProtected, "/usage/provider-quota", usageIdentityProvider, quotaProvider)
+ 	if rankingProvider != nil {
+ 		rankinghttpapi.RegisterRoutes(adminProtected, rankingProvider)
+ 	}
 diff --git a/internal/api/test/read_only_reporting_test.go b/internal/api/test/read_only_reporting_test.go
 new file mode 100644
 index 0000000..52315ce
@@ -1479,10 +1543,26 @@ index 0000000..fa45dca
 +	}
 +}
 diff --git a/internal/app/app.go b/internal/app/app.go
-index 6ab9413..8115685 100644
+index 6ab9413..3cf51e2 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
-@@ -322,6 +322,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+@@ -200,10 +200,12 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+ 
+ 	cpaClient := cpa.NewClient(cfg.CPABaseURL, cfg.CPAManagementKey, cfg.RequestTimeout, cfg.TLSSkipVerify)
+ 	quotaService := quota.NewServiceWithOptions(db, cpaClient, quota.ServiceOptions{
+-		RefreshWorkerLimit:            cfg.QuotaRefreshWorkerLimit,
+-		QuotaUpstreamResponsesEnabled: cfg.QuotaUpstreamResponsesEnabled,
+-		PricingCatalog:                pricingCatalog,
++		UsageHeaderSnapshotFlushInterval: time.Second,
++		RefreshWorkerLimit:               cfg.QuotaRefreshWorkerLimit,
++		QuotaUpstreamResponsesEnabled:    cfg.QuotaUpstreamResponsesEnabled,
++		PricingCatalog:                   pricingCatalog,
+ 	})
++	quotaService.StartTrafficQuotaSync(cpaClient)
+ 	// 单 writer aggregation runner 只维护 rollups/Identity，并在 App.Run 时主动追平。
+ 	usageAggregationRunner := poller.NewUsageAggregationRunner(db)
+ 	// syncService 仍然是 metadata 和 usage 处理共享的业务服务入口。
+@@ -322,6 +324,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
  	authConfig := api.AuthConfig{
  		Enabled:                         cfg.AuthEnabled,
  		LoginPassword:                   cfg.LoginPassword,
@@ -1558,264 +1638,574 @@ index 82d318e..c0856e9 100644
  		if cfg.TLSCertFile == "" {
  			return nil, fmt.Errorf("TLS_CERT_FILE is required when TLS_ENABLED is true")
 diff --git a/internal/cpa/client.go b/internal/cpa/client.go
-index bed9034..981e45c 100644
+index bed9034..6ac0697 100644
 --- a/internal/cpa/client.go
 +++ b/internal/cpa/client.go
 @@ -465,6 +465,7 @@ func (c *Client) DeleteAuthFiles(ctx context.Context, names []string) error {
  }
  
  func (c *Client) CallManagementAPI(ctx context.Context, request apicall.Request) (*apicall.Response, error) {
-+ request.QuotaSource=apicall.QuotaSource(ctx)
++	request.QuotaSource = apicall.QuotaSource(ctx)
  	result := &apicall.Response{}
  	_, _, err := c.doManagementJSONPostRequest(ctx, cpaManagementAPICallEndpoint, request, result, "api call")
  	if err != nil {
 diff --git a/internal/cpa/dto/apicall/api_call.go b/internal/cpa/dto/apicall/api_call.go
-index c075d72..b219820 100644
+index c075d72..88d4481 100644
 --- a/internal/cpa/dto/apicall/api_call.go
 +++ b/internal/cpa/dto/apicall/api_call.go
-@@ -1,8 +1,12 @@
+@@ -1,13 +1,24 @@
  package apicall
  
 -import "encoding/json"
-+import ("encoding/json";"context")
++import (
++	"context"
++	"encoding/json"
++)
++
 +type quotaSourceKey struct{}
-+func WithQuotaSource(ctx context.Context, source string)context.Context{return context.WithValue(ctx,quotaSourceKey{},source)}
-+func QuotaSource(ctx context.Context)string{v,_:=ctx.Value(quotaSourceKey{}).(string);return v}
++
++func WithQuotaSource(ctx context.Context, source string) context.Context {
++	return context.WithValue(ctx, quotaSourceKey{}, source)
++}
++func QuotaSource(ctx context.Context) string { v, _ := ctx.Value(quotaSourceKey{}).(string); return v }
  
  type Request struct {
-+ QuotaSource string `json:"quota_source,omitempty"`
- 	AuthIndex string            `json:"authIndex"`
- 	Method    string            `json:"method"`
- 	URL       string            `json:"url"`
+-	AuthIndex string            `json:"authIndex"`
+-	Method    string            `json:"method"`
+-	URL       string            `json:"url"`
+-	Header    map[string]string `json:"header,omitempty"`
+-	Data      any               `json:"data,omitempty"`
++	QuotaSource string            `json:"quota_source,omitempty"`
++	AuthIndex   string            `json:"authIndex"`
++	Method      string            `json:"method"`
++	URL         string            `json:"url"`
++	Header      map[string]string `json:"header,omitempty"`
++	Data        any               `json:"data,omitempty"`
+ }
+ 
+ func (r Request) MarshalJSON() ([]byte, error) {
 diff --git a/internal/cpa/quota_observations.go b/internal/cpa/quota_observations.go
 new file mode 100644
-index 0000000..560fd9f
+index 0000000..cd668d0
 --- /dev/null
 +++ b/internal/cpa/quota_observations.go
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,31 @@
 +package cpa
++
 +import (
-+ "context"
-+ "fmt"
-+ "net/http"
-+ "time"
++	"context"
++	"fmt"
++	"net/http"
++	"time"
 +)
++
 +type QuotaObservation struct {
-+ AuthIndex string `json:"auth_index"`
-+ Provider string `json:"provider"`
-+ Window string `json:"window"`
-+ Headers http.Header `json:"headers"`
-+ ObservedAt time.Time `json:"observed_at"`
-+ Source string `json:"source"`
++	AuthIndex  string      `json:"auth_index"`
++	Provider   string      `json:"provider"`
++	Window     string      `json:"window"`
++	Headers    http.Header `json:"headers"`
++	ObservedAt time.Time   `json:"observed_at"`
++	Source     string      `json:"source"`
 +}
-+func (c *Client) FetchQuotaObservations(ctx context.Context) ([]QuotaObservation,error) {
-+ var result struct {Items []QuotaObservation `json:"items"`}
-+ status,_,err:=c.doManagementJSONRequest(ctx,"/v0/management/quota/observations",&result,"quota observations")
-+ if err!=nil{return nil,err};if status!=http.StatusOK{return nil,fmt.Errorf("quota cache status %d",status)};return result.Items,nil
++
++func (c *Client) FetchQuotaObservations(ctx context.Context) ([]QuotaObservation, error) {
++	var result struct {
++		Items []QuotaObservation `json:"items"`
++	}
++	status, _, err := c.doManagementJSONRequest(ctx, "/v0/management/quota/observations", &result, "quota observations")
++	if err != nil {
++		return nil, err
++	}
++	if status != http.StatusOK {
++		return nil, fmt.Errorf("quota cache status %d", status)
++	}
++	return result.Items, nil
 +}
 diff --git a/internal/quota/header_cache_worker.go b/internal/quota/header_cache_worker.go
-index decb0fe..bbc4d48 100644
+index decb0fe..ddead22 100644
 --- a/internal/quota/header_cache_worker.go
 +++ b/internal/quota/header_cache_worker.go
-@@ -19,7 +19,7 @@ import (
+@@ -179,7 +179,49 @@ func mergePendingUsageHeaderSnapshotPointers(pending map[string]*UsageHeaderSnap
+ }
  
- const (
- 	// usageHeaderSnapshotFlushInterval 是 usage response header 快照的默认批量落 cache 间隔。
--	usageHeaderSnapshotFlushInterval = time.Minute
-+	usageHeaderSnapshotFlushInterval = time.Second
- 	// usageHeaderPendingIdentityLimit 限制一个窗口内不同身份的内存占用；满载只保留 ObservedAt 最新项。
- 	usageHeaderPendingIdentityLimit = 1000
- )
-@@ -634,6 +634,7 @@ func (s *Service) applyUsageHeaderSnapshotWithIdentity(ctx context.Context, snap
+ // mergePendingUsageHeaderCacheSnapshot 把同一账号一分钟内观察到的主额度和 Additional 收敛成一份 cache 快照。
+-func mergePendingUsageHeaderCacheSnapshot(existing *UsageHeaderSnapshot, candidate *UsageHeaderSnapshot) *UsageHeaderSnapshot {
++func mergePendingUsageHeaderCacheSnapshot(existing *UsageHeaderSnapshot, candidate *UsageHeaderSnapshot) (result *UsageHeaderSnapshot) {
++	defer func() {
++		if result == nil || existing == nil || candidate == nil || existing.Provider != candidate.Provider {
++			return
++		}
++		merged := *result
++		merged.rowCapture = map[string]quotaCapture{}
++		merged.cacheRows = nil
++		positions := map[string]int{}
++		for _, part := range []*UsageHeaderSnapshot{existing, candidate} {
++			rows := part.cacheRows
++			if rows == nil {
++				rows = NormalizeQuotaRows(part.CacheOutput)
++			}
++			for _, row := range rows {
++				capture, ok := part.rowCapture[row.Key]
++				if !ok {
++					capture = quotaCapture{part.ObservedAt, part.Source}
++				}
++				if old, found := merged.rowCapture[row.Key]; found && !capture.At.After(old.At) {
++					continue
++				}
++				merged.rowCapture[row.Key] = capture
++				if i, found := positions[row.Key]; found {
++					merged.cacheRows[i] = row
++				} else {
++					positions[row.Key] = len(merged.cacheRows)
++					merged.cacheRows = append(merged.cacheRows, row)
++				}
++			}
++		}
++		sort.SliceStable(merged.cacheRows, func(i, j int) bool {
++			a, b := merged.cacheRows[i], merged.cacheRows[j]
++			if a.Scope == "window" && b.Scope != "window" {
++				return true
++			}
++			if b.Scope == "window" && a.Scope != "window" {
++				return false
++			}
++			return a.Key < b.Key
++		})
++		result = &merged
++	}()
+ 	if existing == nil {
+ 		return candidate
+ 	}
+@@ -219,6 +261,19 @@ func mergePendingUsageHeaderCacheSnapshot(existing *UsageHeaderSnapshot, candida
+ 		otherUsage = existingUsage
+ 	}
+ 	mergedSnapshot := *baseSnapshot
++	mergedSnapshot.rowCapture = make(map[string]quotaCapture)
++	for _, part := range []*UsageHeaderSnapshot{existing, candidate} {
++		for _, row := range NormalizeQuotaRows(part.CacheOutput) {
++			capture, ok := part.rowCapture[row.Key]
++			if !ok {
++				capture = quotaCapture{part.ObservedAt, part.Source}
++			}
++			old, found := mergedSnapshot.rowCapture[row.Key]
++			if !found || capture.At.After(old.At) {
++				mergedSnapshot.rowCapture[row.Key] = capture
++			}
++		}
++	}
+ 	mergedUsage := *baseUsage
+ 	if strings.TrimSpace(mergedUsage.PlanType) == "" {
+ 		// 新 Header 未返回套餐时，保留本分钟已观察到的套餐。
+@@ -634,6 +689,17 @@ func (s *Service) applyUsageHeaderSnapshotWithIdentity(ctx context.Context, snap
  		Quota:        NormalizeQuotaRows(output),
  		Subscription: NormalizeSubscription(output),
  	}
-+	stampQuotaRows(response.Quota, snapshot.ObservedAt, snapshot.Source)
++	if snapshot.cacheRows != nil {
++		response.Quota = append([]QuotaRow(nil), snapshot.cacheRows...)
++	}
++	for i := range response.Quota {
++		capture, ok := snapshot.rowCapture[response.Quota[i].Key]
++		if !ok {
++			capture = quotaCapture{snapshot.ObservedAt, snapshot.Source}
++		}
++		stampQuotaRows(response.Quota[i:i+1], capture.At, capture.Source)
++	}
++
  	// 没有可展示 quota row 时不写空 cache，避免覆盖已有有效结果。
  	if len(response.Quota) == 0 {
  		return false
-@@ -709,7 +710,7 @@ func (s *Service) shouldProcessUsageHeaderQuotaSnapshot(authIndex string, identi
+@@ -709,9 +775,7 @@ func (s *Service) shouldProcessUsageHeaderQuotaSnapshot(authIndex string, identi
  		return false
  	}
  	// 已有 completed cache 时间不早于当前 header 时，跳过旧 snapshot。
 -	if usageHeaderCompletedCacheIsCurrentOrNewer(existing, identityType, observedAt) {
-+	if false && usageHeaderCompletedCacheIsCurrentOrNewer(existing, identityType, observedAt) {
- 		return false
- 	}
+-		return false
+-	}
++
  	// 已有 cache 更旧或失败时，允许当前 header snapshot 修复/更新 cache。
-@@ -731,13 +732,17 @@ func (s *Service) mergeUsageHeaderQuotaCache(authIndex string, response CheckRes
+ 	return true
+ }
+@@ -731,13 +795,35 @@ func (s *Service) mergeUsageHeaderQuotaCache(authIndex string, response CheckRes
  			return false
  		}
  		// completed cache 可能在前置检查后更新，二次检查避免旧 header 回写。
 -		if usageHeaderCompletedCacheIsCurrentOrNewer(existing, identity.Type, observedAt) {
-+		if false && usageHeaderCompletedCacheIsCurrentOrNewer(existing, identity.Type, observedAt) {
- 			return false
- 		}
+-			return false
+-		}
++
  		// Auth File 的真实 type 变化后，旧 provider 的 row、套餐和 credits 不能混进新 cache。
  		if normalizeIdentityType(existing.Type) == normalizeIdentityType(identity.Type) {
  			if existing.Quota != nil {
--				response = mergeUsageHeaderQuotaResponse(*existing.Quota, response)
 +				fresh := response.Quota[:0]
-+ for _,candidate:=range response.Quota {accept:=true;for _,old:=range existing.Quota.Quota {at:=old.CapturedAt;if at.IsZero(){at=existing.RefreshedAt};if old.Key==candidate.Key&&!candidate.CapturedAt.After(at){accept=false;break}};if accept{fresh=append(fresh,candidate)}}
-+ if len(fresh)==0{return false};response.Quota=fresh
-+ response = mergeUsageHeaderQuotaResponse(*existing.Quota, response)
-+ if observedAt.Before(existing.RefreshedAt){observedAt=existing.RefreshedAt}
++				for _, candidate := range response.Quota {
++					accept := true
++					for _, old := range existing.Quota.Quota {
++						at := old.CapturedAt
++						if at.IsZero() {
++							at = existing.RefreshedAt
++						}
++						if old.Key == candidate.Key && !candidate.CapturedAt.After(at) {
++							accept = false
++							break
++						}
++					}
++					if accept {
++						fresh = append(fresh, candidate)
++					}
++				}
++				if len(fresh) == 0 {
++					return false
++				}
++				response.Quota = fresh
+ 				response = mergeUsageHeaderQuotaResponse(*existing.Quota, response)
++				if observedAt.Before(existing.RefreshedAt) {
++					observedAt = existing.RefreshedAt
++				}
  			}
  			// Header 无 management api-call，同一 provider 才保留最近主动刷新响应，包括失败任务。
  			upstreamResponses = cloneUpstreamResponses(existing.UpstreamResponses)
-@@ -843,6 +848,7 @@ func mergeUsageHeaderQuotaRows(existing []QuotaRow, header []QuotaRow) []QuotaRo
+@@ -843,6 +929,8 @@ func mergeUsageHeaderQuotaRows(existing []QuotaRow, header []QuotaRow) []QuotaRo
  func mergeUsageHeaderQuotaRow(existing QuotaRow, header QuotaRow) QuotaRow {
  	// 以旧 row 为基底，保留 header 没有携带的人工/官方完整字段。
  	merged := existing
-+ merged.CapturedAt=header.CapturedAt;merged.Source=header.Source
++	merged.CapturedAt = header.CapturedAt
++	merged.Source = header.Source
  	// header key 非空时覆盖 key，正常情况下与 existing key 相同。
  	if strings.TrimSpace(header.Key) != "" {
  		merged.Key = header.Key
 diff --git a/internal/quota/header_snapshot.go b/internal/quota/header_snapshot.go
-index e9f3df8..970f27e 100644
+index e9f3df8..1ba8e40 100644
 --- a/internal/quota/header_snapshot.go
 +++ b/internal/quota/header_snapshot.go
 @@ -11,6 +11,7 @@ import (
  const codexHeaderSnapshotValueMaxLength = 4096
  
  type UsageHeaderSnapshotInput struct {
-+ Source RefreshSource
++	Source RefreshSource
  	// AuthType 是 UsageEvent 的标准化身份来源；只有 oauth 才能对应支持的 Auth File。
  	AuthType string
  	// AuthIndex 是 UsageEvent 携带的 CPA auth-index，空值不能建立 cache 或历史归属。
-@@ -24,6 +25,7 @@ type UsageHeaderSnapshotInput struct {
+@@ -23,7 +24,14 @@ type UsageHeaderSnapshotInput struct {
+ 	Headers http.Header
  }
  
++type quotaCapture struct {
++	At     time.Time
++	Source RefreshSource
++}
  type UsageHeaderSnapshot struct {
-+ Source RefreshSource
++	cacheRows  []QuotaRow
++	rowCapture map[string]quotaCapture
++	Source     RefreshSource
  	// AuthType 是标准化身份来源；Header 快照只接受 oauth。
  	AuthType string
  	// AuthIndex 是 CPA Auth File 稳定账号键，供 cache 身份匹配和历史回溯使用。
-@@ -59,13 +61,13 @@ func BuildUsageHeaderSnapshot(input UsageHeaderSnapshotInput) (*UsageHeaderSnaps
+@@ -59,13 +67,22 @@ func BuildUsageHeaderSnapshot(input UsageHeaderSnapshotInput) (*UsageHeaderSnaps
  		return nil, false
  	}
  	// 协议仅由已归一化的身份字段决定；未知 provider 不推测 Header 命名空间。
--	switch input.Provider {
--	case "codex":
++	var snapshot *UsageHeaderSnapshot
++	var ok bool
+ 	switch input.Provider {
+ 	case "codex":
 -		return codexUsageHeaderSnapshotProcessor{}.TryBuildUsageHeaderSnapshot(input)
--	case "claude":
++		snapshot, ok = codexUsageHeaderSnapshotProcessor{}.TryBuildUsageHeaderSnapshot(input)
+ 	case "claude":
 -		return claudeUsageHeaderSnapshotProcessor{}.TryBuildUsageHeaderSnapshot(input)
--	}
++		snapshot, ok = claudeUsageHeaderSnapshotProcessor{}.TryBuildUsageHeaderSnapshot(input)
++	}
++	if ok {
++		snapshot.Source = input.Source
++		snapshot.rowCapture = make(map[string]quotaCapture)
++		for _, row := range NormalizeQuotaRows(snapshot.CacheOutput) {
++			snapshot.rowCapture[row.Key] = quotaCapture{input.ObservedAt, input.Source}
++		}
+ 	}
 -	return nil, false
-+	var snapshot *UsageHeaderSnapshot;var ok bool
-+ switch input.Provider {
-+ case "codex": snapshot,ok=codexUsageHeaderSnapshotProcessor{}.TryBuildUsageHeaderSnapshot(input)
-+ case "claude": snapshot,ok=claudeUsageHeaderSnapshotProcessor{}.TryBuildUsageHeaderSnapshot(input)
-+ }
-+ if ok {snapshot.Source=input.Source}
-+ return snapshot,ok
++	return snapshot, ok
  }
  
  type codexUsageHeaderSnapshotProcessor struct{}
 diff --git a/internal/quota/refresh.go b/internal/quota/refresh.go
-index 91cb798..acb2a23 100644
+index 91cb798..87ba6f3 100644
 --- a/internal/quota/refresh.go
 +++ b/internal/quota/refresh.go
-@@ -503,7 +503,8 @@ func (s *Service) markRefreshTaskCompleted(expected *RefreshTaskRecord, response
+@@ -416,6 +416,7 @@ func (s *Service) runRefreshTaskWithWorker(expected *RefreshTaskRecord) {
+ 		return
+ 	}
+ 	// provider 成功后立即把窗口内 token/cost 补进同一次缓存，前端读取缓存时不再触发额外统计请求。
++	stampQuotaRows(response.Quota, time.Now(), source)
+ 	if !statsAttached {
+ 		response = s.attachWindowUsageStats(ctx, authIndex, response, time.Now())
+ 	}
+@@ -503,6 +504,11 @@ func (s *Service) markRefreshTaskCompleted(expected *RefreshTaskRecord, response
  	// RefreshedAt 是对外唯一的刷新时间口径，成功缓存不设置 ExpiresAt。
  	task.RefreshedAt = now
  	// 保存包含 token/cost 的 quota 响应，后续 cache 接口直接复用。
--	task.Quota = &response
-+	stampQuotaRows(response.Quota, now, task.Source)
-+ task.Quota = &response
++	for i := range response.Quota {
++		if response.Quota[i].CapturedAt.IsZero() {
++			stampQuotaRows(response.Quota[i:i+1], now, task.Source)
++		}
++	}
+ 	task.Quota = &response
  	// raw 响应与当前 quota 同生命周期；同 auth_index 的下一次刷新会整体覆盖任务记录。
  	task.UpstreamResponses = cloneUpstreamResponses(upstreamResponses)
- }
 diff --git a/internal/quota/service.go b/internal/quota/service.go
-index 82615fa..14b06a7 100644
+index 82615fa..30eec52 100644
 --- a/internal/quota/service.go
 +++ b/internal/quota/service.go
-@@ -10,6 +10,7 @@ import (
+@@ -9,6 +9,7 @@ import (
+ 	"sync"
  	"time"
  
++	"cpa-usage-keeper/internal/cpa/dto/apicall"
  	"cpa-usage-keeper/internal/entities"
-+ "cpa-usage-keeper/internal/cpa/dto/apicall"
  	"cpa-usage-keeper/internal/pricing"
  	"cpa-usage-keeper/internal/repository"
- 
-@@ -136,10 +137,13 @@ func NewService(db *gorm.DB, caller ManagementClient, pricingCatalog *pricing.Ca
- }
- 
- func NewServiceWithOptions(db *gorm.DB, caller ManagementClient, options ServiceOptions) *Service {
--	if options.QuotaUpstreamResponsesEnabled {
-+	reader, hasReader := caller.(trafficQuotaReader)
-+ if options.QuotaUpstreamResponsesEnabled {
+@@ -139,7 +140,8 @@ func NewServiceWithOptions(db *gorm.DB, caller ManagementClient, options Service
+ 	if options.QuotaUpstreamResponsesEnabled {
  		caller = upstreamResponseRecordingCaller{ManagementClient: caller}
  	}
 -	return NewServiceWithRegistryAndOptions(db, NewDefaultProviderRegistry(caller, DefaultProviderConfigs()), options)
 +	service := NewServiceWithRegistryAndOptions(db, NewDefaultProviderRegistry(caller, DefaultProviderConfigs()), options)
-+ if hasReader {service.startTrafficQuotaSync(reader)}
-+ return service
++	return service
  }
  
  func NewServiceWithRegistry(db *gorm.DB, registry ProviderRegistry, pricingCatalog *pricing.Catalog) *Service {
-@@ -310,6 +314,7 @@ func (s *Service) checkWithUpstreamResponses(ctx context.Context, request CheckR
+@@ -310,6 +312,7 @@ func (s *Service) checkWithUpstreamResponses(ctx context.Context, request CheckR
  }
  
  func (s *Service) check(ctx context.Context, request CheckRequest, beforeSubscriptionDone func(CheckResponse) CheckResponse) (CheckResponse, bool, error) {
-+ ctx=apicall.WithQuotaSource(ctx,string(request.Source))
++	ctx = apicall.WithQuotaSource(ctx, string(request.Source))
  	// 单条查询以 auth_index 为唯一入口，前端不需要知道具体 provider 的 API 细节。
  	authIndex := strings.TrimSpace(request.AuthIndex)
  	if authIndex == "" {
+diff --git a/internal/quota/test/traffic_freshness_test.go b/internal/quota/test/traffic_freshness_test.go
+new file mode 100644
+index 0000000..66ac7fe
+--- /dev/null
++++ b/internal/quota/test/traffic_freshness_test.go
+@@ -0,0 +1,57 @@
++package test
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/entities"
++	. "cpa-usage-keeper/internal/quota"
++	"net/http"
++	"testing"
++	"time"
++)
++
++func TestTrafficFreshnessIsPerWindowAndNeverChangesOnRead(t *testing.T) {
++	db := openQuotaTestDatabase(t)
++	for _, index := range []string{"account-a", "account-b"} {
++		seedUsageIdentity(t, db, entities.UsageIdentity{Identity: index, Name: index, Type: "codex", AuthType: entities.UsageIdentityAuthTypeAuthFile})
++	}
++	service := NewServiceWithRegistry(db, NewProviderRegistry(nil), emptyPricingCatalogForTest())
++	defer service.StopRefreshTasks()
++	at := time.Now().Truncate(time.Second)
++	apply := func(index, window, used string, at time.Time, source RefreshSource) {
++		h := http.Header{}
++		prefix := "X-Codex-" + window + "-"
++		h.Set(prefix+"Used-Percent", used)
++		h.Set(prefix+"Window-Minutes", "300")
++		h.Set(prefix+"Reset-After-Seconds", "120")
++		snapshot, ok := BuildUsageHeaderSnapshot(UsageHeaderSnapshotInput{AuthType: "oauth", AuthIndex: index, Provider: "codex", ObservedAt: at, Source: source, Headers: h})
++		if !ok {
++			t.Fatal("snapshot rejected")
++		}
++		applyUsageHeaderSnapshot(service, context.Background(), *snapshot)
++	}
++	apply("account-a", "Primary", "10", at, "websocket_event")
++	apply("account-a", "Secondary", "20", at.Add(-time.Minute), "api_response_headers")
++	apply("account-b", "Primary", "90", at, "api_response_headers")
++	apply("account-a", "Primary", "99", at.Add(-time.Second), "api_response_headers")
++	result, err := service.GetCachedQuota(context.Background(), CacheRequest{AuthIndexes: []string{"account-a", "account-b"}})
++	if err != nil || len(result.Items) != 2 {
++		t.Fatal("account caches missing")
++	}
++	rows := result.Items[0].Quota.Quota
++	if len(rows) != 2 {
++		t.Fatalf("independent older window lost: %d", len(rows))
++	}
++	for _, row := range rows {
++		if row.Key == "rate_limit.primary_window" {
++			if row.UsedPercent == nil || *row.UsedPercent != 10 || !row.CapturedAt.Equal(at) || row.Source != "websocket_event" {
++				t.Fatalf("wrong primary provenance %+v", row)
++			}
++		} else if !row.CapturedAt.Equal(at.Add(-time.Minute)) {
++			t.Fatal("older independent window capture time lost")
++		}
++	}
++	again, _ := service.GetCachedQuota(context.Background(), CacheRequest{AuthIndexes: []string{"account-a"}})
++	if !again.Items[0].Quota.Quota[0].CapturedAt.Equal(rows[0].CapturedAt) {
++		t.Fatal("cache read refreshed timestamp")
++	}
++}
 diff --git a/internal/quota/traffic_sync.go b/internal/quota/traffic_sync.go
 new file mode 100644
-index 0000000..41d97a6
+index 0000000..bf9682a
 --- /dev/null
 +++ b/internal/quota/traffic_sync.go
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,53 @@
 +package quota
++
 +import (
-+ "context"
-+ "time"
-+ "cpa-usage-keeper/internal/cpa"
++	"context"
++	"cpa-usage-keeper/internal/cpa"
++	"cpa-usage-keeper/internal/entities"
++	"time"
 +)
-+type trafficQuotaReader interface {FetchQuotaObservations(context.Context)([]cpa.QuotaObservation,error)}
++
++type trafficQuotaReader interface {
++	FetchQuotaObservations(context.Context) ([]cpa.QuotaObservation, error)
++}
++
 +// Only CPA's local cache is read. No upstream query is made by this loop.
-+func(s *Service) startTrafficQuotaSync(reader trafficQuotaReader) {
-+ s.startRefreshGoroutine(func(){
-+  timer:=time.NewTicker(5*time.Second);defer timer.Stop()
-+  for {
-+   ctx,cancel:=context.WithTimeout(s.refreshContext,4*time.Second)
-+   items,err:=reader.FetchQuotaObservations(ctx)
-+   if err==nil {for _,item:=range items {
-+    snapshot,ok:=BuildUsageHeaderSnapshot(UsageHeaderSnapshotInput{AuthType:"oauth",AuthIndex:item.AuthIndex,Provider:item.Provider,ObservedAt:item.ObservedAt,Headers:item.Headers,Source:RefreshSource(item.Source)})
-+    if ok {s.applyUsageHeaderSnapshotPointers(ctx,[]*UsageHeaderSnapshot{snapshot})}
-+   }}
-+   cancel()
-+   select {case <-s.refreshContext.Done():return;case <-timer.C:}
-+  }
-+ })
++func (s *Service) StartTrafficQuotaSync(reader trafficQuotaReader) {
++	s.startRefreshGoroutine(func() {
++		timer := time.NewTicker(5 * time.Second)
++		defer timer.Stop()
++		for {
++			ctx, cancel := context.WithTimeout(s.refreshContext, 4*time.Second)
++			items, err := reader.FetchQuotaObservations(ctx)
++			if err == nil {
++				for _, item := range items {
++					snapshot, ok := BuildUsageHeaderSnapshot(UsageHeaderSnapshotInput{AuthType: "oauth", AuthIndex: item.AuthIndex, Provider: item.Provider, ObservedAt: item.ObservedAt, Headers: item.Headers, Source: RefreshSource(item.Source)})
++					if ok {
++						var identity entities.UsageIdentity
++						if err := s.db.WithContext(ctx).Where("identity = ? AND is_deleted = ? AND (disabled IS NULL OR disabled = ?)", item.AuthIndex, false, false).First(&identity).Error; err == nil {
++							s.applyUsageHeaderSnapshotWithIdentity(ctx, snapshot, identity, nil)
++						}
++					}
++				}
++			}
++			cancel()
++			select {
++			case <-s.refreshContext.Done():
++				return
++			case <-timer.C:
++			}
++		}
++	})
 +}
 +func stampQuotaRows(rows []QuotaRow, at time.Time, source RefreshSource) {
-+ if source==""||source==RefreshSourceUsageHeader{source="api_response_headers"}
-+ for i:=range rows {rows[i].CapturedAt=at;rows[i].Source=source}
++	if source == "" || source == RefreshSourceUsageHeader {
++		source = "api_response_headers"
++	}
++	for i := range rows {
++		rows[i].CapturedAt = at
++		rows[i].Source = source
++		if rows[i].ResetAt == "" && rows[i].ResetAfterSeconds != nil {
++			rows[i].ResetAt = at.Add(time.Duration(*rows[i].ResetAfterSeconds) * time.Second).Format(time.RFC3339)
++		}
++	}
 +}
 diff --git a/internal/quota/types.go b/internal/quota/types.go
-index be755dd..c57b879 100644
+index be755dd..fb7cf27 100644
 --- a/internal/quota/types.go
 +++ b/internal/quota/types.go
 @@ -2,6 +2,7 @@ package quota
  
  import (
  	"context"
-+ "time"
++	"time"
  
  	"cpa-usage-keeper/internal/cpa/dto/apicall"
  	"cpa-usage-keeper/internal/entities"
-@@ -58,6 +59,8 @@ type SubscriptionInfo struct {
+@@ -58,25 +59,27 @@ type SubscriptionInfo struct {
  }
  
  type QuotaRow struct {
-+ CapturedAt time.Time `json:"captured_at,omitempty"`
-+ Source RefreshSource `json:"source,omitempty"`
- 	Key               string       `json:"key"`
- 	Label             string       `json:"label,omitempty"`
- 	Scope             string       `json:"scope,omitempty"`
+-	Key               string       `json:"key"`
+-	Label             string       `json:"label,omitempty"`
+-	Scope             string       `json:"scope,omitempty"`
+-	Metric            string       `json:"metric,omitempty"`
+-	GroupKey          string       `json:"groupKey,omitempty"`
+-	GroupLabel        string       `json:"groupLabel,omitempty"`
+-	GroupDescription  string       `json:"groupDescription,omitempty"`
+-	Used              *float64     `json:"used,omitempty"`
+-	Limit             *float64     `json:"limit,omitempty"`
+-	Remaining         *float64     `json:"remaining,omitempty"`
+-	UsedPercent       *float64     `json:"usedPercent,omitempty"`
+-	RemainingFraction *float64     `json:"remainingFraction,omitempty"`
+-	Allowed           *bool        `json:"allowed,omitempty"`
+-	LimitReached      *bool        `json:"limitReached,omitempty"`
+-	Window            *QuotaWindow `json:"window,omitempty"`
+-	ResetAt           string       `json:"resetAt,omitempty"`
+-	ResetAfterSeconds *int64       `json:"resetAfterSeconds,omitempty"`
+-	WindowUsageTokens *int64       `json:"window_usage_tokens,omitempty"`
+-	WindowUsageCost   *float64     `json:"window_usage_cost,omitempty"`
++	CapturedAt        time.Time     `json:"captured_at,omitempty"`
++	Source            RefreshSource `json:"source,omitempty"`
++	Key               string        `json:"key"`
++	Label             string        `json:"label,omitempty"`
++	Scope             string        `json:"scope,omitempty"`
++	Metric            string        `json:"metric,omitempty"`
++	GroupKey          string        `json:"groupKey,omitempty"`
++	GroupLabel        string        `json:"groupLabel,omitempty"`
++	GroupDescription  string        `json:"groupDescription,omitempty"`
++	Used              *float64      `json:"used,omitempty"`
++	Limit             *float64      `json:"limit,omitempty"`
++	Remaining         *float64      `json:"remaining,omitempty"`
++	UsedPercent       *float64      `json:"usedPercent,omitempty"`
++	RemainingFraction *float64      `json:"remainingFraction,omitempty"`
++	Allowed           *bool         `json:"allowed,omitempty"`
++	LimitReached      *bool         `json:"limitReached,omitempty"`
++	Window            *QuotaWindow  `json:"window,omitempty"`
++	ResetAt           string        `json:"resetAt,omitempty"`
++	ResetAfterSeconds *int64        `json:"resetAfterSeconds,omitempty"`
++	WindowUsageTokens *int64        `json:"window_usage_tokens,omitempty"`
++	WindowUsageCost   *float64      `json:"window_usage_cost,omitempty"`
+ }
+ 
+ type AntigravityQuotaBucket struct {
+diff --git a/internal/quota/window_capture_test.go b/internal/quota/window_capture_test.go
+new file mode 100644
+index 0000000..d02067a
+--- /dev/null
++++ b/internal/quota/window_capture_test.go
+@@ -0,0 +1,39 @@
++package quota
++
++import (
++	"net/http"
++	"testing"
++	"time"
++)
++
++func TestCoalescedWindowsKeepOwnCaptureAndRejectOlder(t *testing.T) {
++	at := time.Now()
++	build := func(window, value string, when time.Time, source RefreshSource) *UsageHeaderSnapshot {
++		h := http.Header{}
++		h.Set("X-Codex-"+window+"-Used-Percent", value)
++		h.Set("X-Codex-"+window+"-Window-Minutes", "300")
++		h.Set("X-Codex-"+window+"-Reset-After-Seconds", "60")
++		snapshot, ok := BuildUsageHeaderSnapshot(UsageHeaderSnapshotInput{AuthType: "oauth", AuthIndex: "a", Provider: "codex", ObservedAt: when, Source: source, Headers: h})
++		if !ok {
++			t.Fatal("missing snapshot")
++		}
++		return snapshot
++	}
++	a := build("Primary", "10", at, "api_response_headers")
++	b := build("Secondary", "20", at.Add(time.Minute), "websocket_event")
++	merged := mergePendingUsageHeaderCacheSnapshot(a, b)
++	merged = mergePendingUsageHeaderCacheSnapshot(merged, build("Primary", "99", at.Add(-time.Minute), "manual_provider_query"))
++	if len(merged.cacheRows) != 2 {
++		t.Fatal("independent window lost")
++	}
++	for _, row := range merged.cacheRows {
++		c := merged.rowCapture[row.Key]
++		if row.UsedPercent != nil && *row.UsedPercent == 10 {
++			if !c.At.Equal(at) || c.Source != "api_response_headers" {
++				t.Fatal("capture changed")
++			}
++		} else if row.UsedPercent == nil || *row.UsedPercent != 20 || !c.At.Equal(at.Add(time.Minute)) {
++			t.Fatal("late capture or wrong window")
++		}
++	}
++}
 diff --git a/internal/service/dto/usage.go b/internal/service/dto/usage.go
 index 5e54d7a..2b424b0 100644
 --- a/internal/service/dto/usage.go
@@ -1832,24 +2222,27 @@ index 5e54d7a..2b424b0 100644
  
  // UsageEventsPage 是 usage events 列表的服务层结果。
 diff --git a/internal/service/redis_usage.go b/internal/service/redis_usage.go
-index 5fe5be9..1670e26 100644
+index 5fe5be9..781558d 100644
 --- a/internal/service/redis_usage.go
 +++ b/internal/service/redis_usage.go
-@@ -182,11 +182,15 @@ func (d queuedUsageDetail) toUsageHeaderSnapshot(event entities.UsageEvent) *quo
+@@ -182,11 +182,19 @@ func (d queuedUsageDetail) toUsageHeaderSnapshot(event entities.UsageEvent) *quo
  	if !ok {
  		return nil
  	}
--	snapshot, ok := quota.BuildUsageHeaderSnapshot(quota.UsageHeaderSnapshotInput{
-+	observedAt:=event.Timestamp
-+ if value:=headers.Get("X-CPA-Quota-Captured-At");value!="" {if at,e:=time.Parse(time.RFC3339Nano,value);e==nil{observedAt=at}}
-+ source:=quota.RefreshSource(headers.Get("X-CPA-Quota-Source"))
-+ snapshot, ok := quota.BuildUsageHeaderSnapshot(quota.UsageHeaderSnapshotInput{
++	observedAt := event.Timestamp
++	if value := headers.Get("X-CPA-Quota-Captured-At"); value != "" {
++		if at, e := time.Parse(time.RFC3339Nano, value); e == nil {
++			observedAt = at
++		}
++	}
++	source := quota.RefreshSource(headers.Get("X-CPA-Quota-Source"))
+ 	snapshot, ok := quota.BuildUsageHeaderSnapshot(quota.UsageHeaderSnapshotInput{
  		AuthType:   event.AuthType,
  		AuthIndex:  event.AuthIndex,
  		Provider:   event.Provider,
 -		ObservedAt: event.Timestamp,
 +		ObservedAt: observedAt,
-+ Source:source,
++		Source:     source,
  		Headers:    headers,
  	})
  	if !ok {
@@ -2135,7 +2528,7 @@ index 814f442..b79440e 100644
        ? <KeyQuotaPage apiKey={sessionAPIKey} onNavigate={handleKeyViewerNavigate} onAuthRequired={clearSession} />
 diff --git a/web/src/components/usage/QuotaFreshness.tsx b/web/src/components/usage/QuotaFreshness.tsx
 new file mode 100644
-index 0000000..b3a7b42
+index 0000000..c1e6db1
 --- /dev/null
 +++ b/web/src/components/usage/QuotaFreshness.tsx
 @@ -0,0 +1,20 @@
@@ -2155,7 +2548,7 @@ index 0000000..b3a7b42
 + const old=stale || !Number.isFinite(at) || seconds>900 || (resetAt && Date.parse(resetAt)<=Date.now());
 + const details=`${account}\n${quotaSourceLabel(source)}\n${Number.isFinite(at)?new Date(at).toLocaleString():'Capture time unavailable'}\n${age}`;
 + return <span style={{display:'inline-block',position:'relative'}} onMouseEnter={()=>setOpen(true)} onMouseLeave={()=>setOpen(false)}>
-+  <button type="button" aria-expanded={open} aria-label={`Quota freshness: ${details}`} onFocus={()=>setOpen(true)} onBlur={()=>setOpen(false)} onClick={()=>setOpen(!open)} style={{font:'inherit',color:old?'#d97706':'inherit',background:'transparent',border:'1px solid currentColor',borderRadius:4,padding:'2px 6px',cursor:'pointer'}}>{old?'Stale · ':''}{age} ⓘ</button>
++  <button type="button" aria-expanded={open} aria-label={`Quota freshness: ${details}`} onFocus={()=>setOpen(true)} onBlur={()=>setOpen(false)} onClick={()=>setOpen(true)} style={{font:'inherit',color:old?'#d97706':'inherit',background:'transparent',border:'1px solid currentColor',borderRadius:4,padding:'2px 6px',cursor:'pointer'}}>{old?'Stale · ':''}{age} ⓘ</button>
 +  {open && <span role="tooltip" style={{display:'block',whiteSpace:'pre-line',position:'absolute',zIndex:30,bottom:'100%',left:0,minWidth:210,padding:10,borderRadius:6,background:'#172033',color:'white',boxShadow:'0 2px 10px #0005'}}>{details}</span>}
 + </span>;
 +}
@@ -2182,10 +2575,15 @@ index 8a5c49b..fe49e25 100644
      return session.alias || t('usage_stats.session_settings_admin_label');
    }
 diff --git a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
-index cce8afb..6552e11 100644
+index cce8afb..83c853b 100644
 --- a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
-@@ -11,6 +11,7 @@ import { CredentialStatusToggle, CredentialStatusUnsupportedIcon, isCredentialSt
+@@ -1,3 +1,4 @@
++import {ApiProviderQuota} from './ApiProviderQuota'
+ import type { Ref } from 'react'
+ import { useTranslation } from 'react-i18next'
+ import styles from './CredentialSections.module.scss'
+@@ -11,6 +12,7 @@ import { CredentialStatusToggle, CredentialStatusUnsupportedIcon, isCredentialSt
  import { QuestionMarkHelp } from '@/components/ui/QuestionMarkHelp'
  
  interface AiProviderCredentialsSectionProps {
@@ -2193,7 +2591,7 @@ index cce8afb..6552e11 100644
    rows: AiProviderCredentialRow[]
    total: number
    page: number
-@@ -33,7 +34,7 @@ interface AiProviderCredentialsSectionProps {
+@@ -33,7 +35,7 @@ interface AiProviderCredentialsSectionProps {
    onSortChange: (sort: UsageIdentityPageSort) => void
  }
  
@@ -2202,7 +2600,15 @@ index cce8afb..6552e11 100644
    const { t } = useTranslation()
    const helpText = t('usage_stats.credentials_ai_providers_active_only_help')
  
-@@ -89,7 +90,7 @@ export function AiProviderCredentialsSection({ rows, total, page, totalPages, pa
+@@ -67,6 +69,7 @@ export function AiProviderCredentialsSection({ rows, total, page, totalPages, pa
+         </div>
+       )}
+     >
++      <ApiProviderQuota />
+       {loading && rows.length === 0 && <div className={styles.credentialEmptyState}>{t('common.loading')}</div>}
+       {!loading && rows.length === 0 && <div className={styles.credentialEmptyState}>{t('usage_stats.credentials_ai_providers_empty')}</div>}
+       {rows.length > 0 && (
+@@ -89,7 +92,7 @@ export function AiProviderCredentialsSection({ rows, total, page, totalPages, pa
                displayName={row.displayName}
                disabled={row.identity.disabled}
                pending={statusPendingIdentityIds?.has(row.identity.id || row.identity.identity) ?? false}
@@ -2211,7 +2617,7 @@ index cce8afb..6552e11 100644
                onToggle={(disabled) => onToggleStatus?.(row.identity.id || row.identity.identity, row.identity.identity, disabled)}
              />
            ) : (
-@@ -121,13 +122,13 @@ export function AiProviderCredentialsSection({ rows, total, page, totalPages, pa
+@@ -121,13 +124,13 @@ export function AiProviderCredentialsSection({ rows, total, page, totalPages, pa
                <CredentialPriorityEditor
                  priority={row.identity.priority}
                  displayName={row.displayName}
@@ -2227,8 +2633,23 @@ index cce8afb..6552e11 100644
            metricsTitle={row.identity.stats_reset_at ? t('usage_stats.credentials_stats_since', { time: formatCredentialTimestamp(row.identity.stats_reset_at) ?? row.identity.stats_reset_at }) : undefined}
            metrics={(
              <>
+diff --git a/web/src/components/usage/credentials/ApiProviderQuota.tsx b/web/src/components/usage/credentials/ApiProviderQuota.tsx
+new file mode 100644
+index 0000000..72e40c5
+--- /dev/null
++++ b/web/src/components/usage/credentials/ApiProviderQuota.tsx
+@@ -0,0 +1,9 @@
++import {useEffect,useState} from 'react';
++import {fetchAdminProviderQuota,type ViewerQuotaAccount} from '@/lib/api';
++import {startQuotaPolling} from '@/lib/quotaPolling';
++import {QuotaAccounts} from '@/pages/KeyQuotaPage';
++export function ApiProviderQuota(){
++ const [accounts,setAccounts]=useState<ViewerQuotaAccount[]>([]);
++ useEffect(()=>startQuotaPolling(async(signal)=>{const data=await fetchAdminProviderQuota(signal);if(!signal.aborted)setAccounts(data.accounts.filter(a=>a.kind==='api'&&a.rows.length>0))}),[]);
++ return accounts.length ? <details open><summary>API provider quota</summary><QuotaAccounts accounts={accounts}/></details> : null;
++}
 diff --git a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
-index 580f222..ebc34ea 100644
+index 580f222..8cfc342 100644
 --- a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
 @@ -10,6 +10,7 @@ import { IconChartLine, IconGaugeReset, IconRefreshCw, IconSearch, IconSettings,
@@ -2329,7 +2750,7 @@ index 580f222..ebc34ea 100644
        <div className={styles.credentialQuotaBarHeader}>
          <span className={styles.credentialQuotaLabelGroup}>
            <span>{quota.label}</span>
-+          <QuotaFreshness capturedAt={quota.capturedAt} source={quota.source} account={"Provider account"} resetAt={quota.resetText} />
++          <QuotaFreshness capturedAt={quota.capturedAt} source={quota.source} account={quota.accountLabel ?? "Provider account"} resetAt={quota.resetText} />
          </span>
          {(resetDuration || percentLabel) && (
            <span className={styles.credentialQuotaValueGroup}>
@@ -2428,19 +2849,30 @@ index 43b49c7..e132ce2 100644
            {((activeTab === 'requests' && eventsError && events.length === 0 && !eventsLoading)
              || (activeTab === 'errors' && errorEventsError && errorEvents.length === 0 && !errorEventsLoading)) ? (
 diff --git a/web/src/components/usage/credentials/credentialViewModels.ts b/web/src/components/usage/credentials/credentialViewModels.ts
-index 5c5e0a2..1a754ae 100644
+index 5c5e0a2..0757349 100644
 --- a/web/src/components/usage/credentials/credentialViewModels.ts
 +++ b/web/src/components/usage/credentials/credentialViewModels.ts
-@@ -23,6 +23,8 @@ export interface QuotaBillingUsageDisplay {
+@@ -23,6 +23,9 @@ export interface QuotaBillingUsageDisplay {
  }
  
  export interface DisplayQuota {
++ accountLabel?:string
 + capturedAt?: string
 + source?: string
    key: string
    label: string
    scope?: string
-@@ -216,6 +218,7 @@ function toDisplayQuota(row: UsageQuotaRow): DisplayQuota | undefined {
+@@ -157,7 +160,8 @@ export function buildAuthFileCredentialRows(
+     const quotaResponse = quotas.get(identity.identity)
+     const quota = quotaResponse?.quota ?? []
+     const state = quotaStates.get(identity.identity)
+-    const displayQuotas = quota.map(toDisplayQuota).filter(isDisplayableQuota)
++    const accountLabel=`${credentialProviderLabel(identity)} account ${identities.filter(x=>x.type===identity.type).map(x=>x.id).sort().indexOf(identity.id)+1}`
++    const displayQuotas = quota.map(toDisplayQuota).filter(isDisplayableQuota).map(q=>({...q,accountLabel}))
+     const subscriptionBadge = resolveCredentialSubscriptionBadge(quotaResponse?.subscription ?? identity.subscription)
+ 
+     return {
+@@ -216,6 +220,7 @@ function toDisplayQuota(row: UsageQuotaRow): DisplayQuota | undefined {
    }
  
    return {
@@ -2683,10 +3115,10 @@ index a8c1332..53702f3 100644
          loading: '載入中...',
          save: '儲存',
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index bf62a55..c4078c2 100644
+index bf62a55..2e06ae2 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
-@@ -3,6 +3,7 @@ import { isCPAMCEmbed } from '@/embed/cpamcEmbed'
+@@ -3,13 +3,18 @@ import { isCPAMCEmbed } from '@/embed/cpamcEmbed'
  import { resolveUsageRequestRange } from '@/utils/usage/rangeQuery'
  
  export interface ViewerQuotaRow {
@@ -2694,7 +3126,18 @@ index bf62a55..c4078c2 100644
    label: string; metric?: string; remaining?: number; limit?: number;
    remaining_percent?: number; reset_at?: string; limit_reached?: boolean;
  }
-@@ -90,6 +91,8 @@ function normalizeOverviewRealtimeBlock(
+ export interface ViewerQuotaAccount {
++ kind?: "oauth" | "api";
+   label: string; provider: string; status: 'available' | 'stale' | 'unavailable';
+   updated_at?: string; rows: ViewerQuotaRow[];
+ }
++export async function fetchAdminProviderQuota(signal?:AbortSignal):Promise<{accounts:ViewerQuotaAccount[]}> {
++ const response=await apiFetch(apiPath("/usage/provider-quota"),{signal});if(!response.ok)return parseApiError(response,"Unable to load quota");return response.json();
++}
+ export async function fetchKeyQuota(signal?: AbortSignal): Promise<{accounts: ViewerQuotaAccount[]}> {
+   const response = await apiFetch(apiPath('/key-quota'), {signal});
+   if (!response.ok) return parseApiError(response, 'Unable to load quota');
+@@ -90,6 +95,8 @@ function normalizeOverviewRealtimeBlock(
  }
  
  export interface FetchKeyOverviewRealtimeOptions {
@@ -2703,7 +3146,7 @@ index bf62a55..c4078c2 100644
    window?: OverviewRealtimeWindow
    signal?: AbortSignal
  }
-@@ -242,6 +245,31 @@ export async function login(password: string): Promise<void> {
+@@ -242,6 +249,31 @@ export async function login(password: string): Promise<void> {
    await activateEmbedSessionFallback(response)
  }
  
@@ -2735,7 +3178,7 @@ index bf62a55..c4078c2 100644
  export async function loginWithCPAAPIKey(apiKey: string): Promise<void> {
    if (isCPAMCEmbed()) {
      clearEmbedSessionToken()
-@@ -318,27 +346,30 @@ const buildUsageRangeParams = (request: UsageRangeRequest): URLSearchParams => {
+@@ -318,27 +350,30 @@ const buildUsageRangeParams = (request: UsageRangeRequest): URLSearchParams => {
    return params
  }
  
@@ -2772,7 +3215,7 @@ index bf62a55..c4078c2 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to load key analysis latency: ${response.status}`)
    }
-@@ -347,6 +378,7 @@ export async function fetchKeyAnalysisLatency(request: UsageRangeRequest, signal
+@@ -347,6 +382,7 @@ export async function fetchKeyAnalysisLatency(request: UsageRangeRequest, signal
  
  export interface FetchUsageActivityOptions {
    request: UsageActivityRequest
@@ -2780,7 +3223,7 @@ index bf62a55..c4078c2 100644
    apiKeyId?: string
    signal?: AbortSignal
  }
-@@ -361,9 +393,10 @@ const buildUsageActivityParams = (request: UsageActivityRequest): URLSearchParam
+@@ -361,9 +397,10 @@ const buildUsageActivityParams = (request: UsageActivityRequest): URLSearchParam
    return buildUsageRangeParams(request)
  }
  
@@ -2793,7 +3236,7 @@ index bf62a55..c4078c2 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to load key activity: ${response.status}`)
    }
-@@ -371,13 +404,14 @@ export async function fetchKeyActivity({ request, signal }: FetchUsageActivityOp
+@@ -371,13 +408,14 @@ export async function fetchKeyActivity({ request, signal }: FetchUsageActivityOp
  }
  
  export async function fetchKeyOverviewRealtime(options: FetchKeyOverviewRealtimeOptions = {}): Promise<OverviewRealtimeBlock> {
@@ -2810,7 +3253,7 @@ index bf62a55..c4078c2 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to load key overview realtime: ${response.status}`)
    }
-@@ -401,11 +435,11 @@ export async function fetchUsageOverview(request: UsageRangeRequest, signal?: Ab
+@@ -401,11 +439,11 @@ export async function fetchUsageOverview(request: UsageRangeRequest, signal?: Ab
    return response.json()
  }
  
@@ -2824,7 +3267,7 @@ index bf62a55..c4078c2 100644
    const query = params.toString()
    const response = await apiFetch(`${apiPath(path)}${query ? `?${query}` : ''}`, { signal: options.signal })
    if (!response.ok) {
-@@ -449,6 +483,7 @@ export async function fetchUsageOverviewRealtime(options: FetchUsageOverviewReal
+@@ -449,6 +487,7 @@ export async function fetchUsageOverviewRealtime(options: FetchUsageOverviewReal
  }
  
  export interface FetchUsageEventsOptions {
@@ -2832,7 +3275,7 @@ index bf62a55..c4078c2 100644
    page?: number
    pageSize?: number
    cursorMode?: boolean
-@@ -534,7 +569,7 @@ export async function fetchUsageEventSourceFilterOptions(signal?: AbortSignal):
+@@ -534,7 +573,7 @@ export async function fetchUsageEventSourceFilterOptions(signal?: AbortSignal):
  export async function fetchUsageEvents(request: UsageRangeRequest | undefined, signal?: AbortSignal, options?: FetchUsageEventsOptions): Promise<UsageEventsResponse> {
    const params = buildUsageEventsParams(request, options)
    const query = params.toString()
@@ -2841,7 +3284,7 @@ index bf62a55..c4078c2 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to load usage events: ${response.status}`)
    }
-@@ -579,7 +614,7 @@ export async function exportUsageEvents(request: UsageRangeRequest, format: Usag
+@@ -579,7 +618,7 @@ export async function exportUsageEvents(request: UsageRangeRequest, format: Usag
    const params = buildUsageEventsParams(request, options, false)
    params.set('format', format)
    const query = params.toString()
@@ -2850,7 +3293,7 @@ index bf62a55..c4078c2 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to export usage events: ${response.status}`)
    }
-@@ -1056,3 +1091,14 @@ export async function deletePricing(model: string): Promise<void> {
+@@ -1056,3 +1095,14 @@ export async function deletePricing(model: string): Promise<void> {
      await parseApiError(response, `Failed to delete pricing: ${response.status}`)
    }
  }
@@ -2867,25 +3310,56 @@ index bf62a55..c4078c2 100644
 +}
 diff --git a/web/src/lib/quotaPolling.ts b/web/src/lib/quotaPolling.ts
 new file mode 100644
-index 0000000..09911b2
+index 0000000..f5fe57c
 --- /dev/null
 +++ b/web/src/lib/quotaPolling.ts
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,16 @@
 +export function startQuotaPolling(refresh: (signal: AbortSignal) => Promise<unknown>, interval = 10_000) {
 + let stopped = false;
++ let visibleRefreshPending=false;
 + let controller: AbortController | null = null;
 + const run = async () => {
 +  if (stopped || document.hidden || controller) return;
 +  const current = new AbortController(); controller = current;
 +  try { await refresh(current.signal); } catch { /* callers present errors; retain last good data */ }
-+  finally { if (controller === current) controller = null; }
++  finally { if (controller === current) controller = null; if(visibleRefreshPending&&!stopped&&!document.hidden){visibleRefreshPending=false;void run()} }
 + };
-+ const visibility = () => { if (document.hidden) controller?.abort(); else void run(); };
++ const visibility = () => { if (document.hidden) controller?.abort(); else {if(controller)visibleRefreshPending=true;else void run();} };
 + const timer = window.setInterval(() => void run(), interval);
 + document.addEventListener('visibilitychange', visibility);
 + void run();
 + return () => { stopped = true; window.clearInterval(timer); document.removeEventListener('visibilitychange', visibility); controller?.abort(); };
 +}
+diff --git a/web/src/lib/test/quotaPolling.test.ts b/web/src/lib/test/quotaPolling.test.ts
+new file mode 100644
+index 0000000..16dd65b
+--- /dev/null
++++ b/web/src/lib/test/quotaPolling.test.ts
+@@ -0,0 +1,24 @@
++// @vitest-environment happy-dom
++import {afterEach,describe,expect,it,vi} from 'vitest';
++import {startQuotaPolling} from '../quotaPolling';
++describe('cached quota polling',()=>{
++ it('queues visibility refresh until an aborted request settles',async()=>{
++  vi.useFakeTimers();let hidden=false;vi.spyOn(document,'hidden','get').mockImplementation(()=>hidden);
++  let finish:()=>void=()=>{};const refresh=vi.fn(()=>new Promise<void>(resolve=>{finish=resolve}));
++  const stop=startQuotaPolling(refresh);hidden=true;document.dispatchEvent(new Event('visibilitychange'));
++  hidden=false;document.dispatchEvent(new Event('visibilitychange'));expect(refresh).toHaveBeenCalledTimes(1);
++  finish();await Promise.resolve();expect(refresh).toHaveBeenCalledTimes(2);stop();finish();
++ });
++ afterEach(()=>{vi.useRealTimers();vi.restoreAllMocks()});
++ it('polls every ten seconds, pauses hidden tabs, refreshes on visibility, and never overlaps',async()=>{
++  vi.useFakeTimers();let hidden=false;vi.spyOn(document,'hidden','get').mockImplementation(()=>hidden);
++  let finish:()=>void=()=>{};const refresh=vi.fn((_signal:AbortSignal)=>new Promise<void>(resolve=>{finish=resolve}));
++  const stop=startQuotaPolling(refresh);expect(refresh).toHaveBeenCalledTimes(1);
++  await vi.advanceTimersByTimeAsync(30000);expect(refresh).toHaveBeenCalledTimes(1);
++  finish();await Promise.resolve();await vi.advanceTimersByTimeAsync(10000);expect(refresh).toHaveBeenCalledTimes(2);
++  hidden=true;document.dispatchEvent(new Event('visibilitychange'));expect(refresh.mock.calls[1][0].aborted).toBe(true);
++  finish();await Promise.resolve();await vi.advanceTimersByTimeAsync(30000);expect(refresh).toHaveBeenCalledTimes(2);
++  hidden=false;document.dispatchEvent(new Event('visibilitychange'));expect(refresh).toHaveBeenCalledTimes(3);
++  stop();finish();await Promise.resolve();await vi.advanceTimersByTimeAsync(10000);expect(refresh).toHaveBeenCalledTimes(3);
++ });
++});
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
 index 3bfbfbb..e48201e 100644
 --- a/web/src/lib/types.ts
@@ -3401,10 +3875,10 @@ index 0000000..e99e7be
 +}
 diff --git a/web/src/pages/ReadOnlyReportingPage.tsx b/web/src/pages/ReadOnlyReportingPage.tsx
 new file mode 100644
-index 0000000..99043be
+index 0000000..04caa8e
 --- /dev/null
 +++ b/web/src/pages/ReadOnlyReportingPage.tsx
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,91 @@
 +import {useCallback,useEffect,useMemo,useRef,useState,type ReactNode} from 'react';
 +import {useTranslation} from 'react-i18next';
 +import {ApiError,exportUsageEvents,fetchReadOnlyReport,fetchUsageEvents,type UsageEventsExportFormat,type UsageIdentityPageSort} from '@/lib/api';
@@ -3418,6 +3892,7 @@ index 0000000..99043be
 +import {AiProviderCredentialsSection} from '@/components/usage/credentials/AiProviderCredentialsSection';
 +import {CredentialDetailDrawer} from '@/components/usage/credentials/CredentialDetailDrawer';
 +import {buildAuthFileCredentialRows,buildAiProviderCredentialRows,type CredentialDetailSelection} from '@/components/usage/credentials/credentialViewModels';
++import {startQuotaPolling} from '@/lib/quotaPolling';
 +import {buildUsageRangeQuery} from '@/utils/usage/rangeQuery';
 +
 +interface Props {
@@ -3455,13 +3930,21 @@ index 0000000..99043be
 +    } else {
 +     const params=new URLSearchParams({auth_type:page==='auth-files'?'1':'2',page:String(number),page_size:String(size),active_only:String(active),sort});
 +     if(provider)params.append('type',provider);
-+     const quotaRequest=page==='auth-files'?fetchReadOnlyReport<UsageQuotaCacheResponse>('accounts/quota-cache',undefined,controller.signal).catch(err=>{if(err instanceof ApiError&&err.status===401)throw err;if(!controller.signal.aborted)setError('Cached quota is unavailable.');return {items:[]};}):Promise.resolve({items:[]});
-+     const [data,quota]=await Promise.all([fetchReadOnlyReport<UsageIdentitiesPageResponse>('accounts',params,controller.signal),quotaRequest]);
-+     if(controller.signal.aborted)return;setAccounts(data);setCache(quota);
++     const data=await fetchReadOnlyReport<UsageIdentitiesPageResponse>('accounts',params,controller.signal);
++     if(controller.signal.aborted)return;setAccounts(data);
++
 +    }
 +   } catch(err){if(!controller.signal.aborted)fail(err);}finally{if(!controller.signal.aborted)setLoading(false);}
 +  };void load();return()=>{controller.abort();moreController.current?.abort();};
 + },[page,query,eventOptions,selectedApiKeyId,number,size,active,sort,provider,revision,fail]);
++
++ useEffect(()=>{
++  if(page!=='auth-files')return;
++  return startQuotaPolling(async(signal)=>{try{
++   const quota=await fetchReadOnlyReport<UsageQuotaCacheResponse>('accounts/quota-cache',undefined,signal);
++   if(!signal.aborted)setCache(quota);
++  }catch(err){if(!signal.aborted){if(err instanceof ApiError&&err.status===401)onAuthRequired();else setError('Cached quota is unavailable.')}}});
++ },[page,onAuthRequired]);
 +
 + const loadMore=async()=>{
 +  if(!nextCursor||loadingMore)return;setLoadingMore(true);const controller=new AbortController();moreController.current=controller;

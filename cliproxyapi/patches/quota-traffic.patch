@@ -1,0 +1,633 @@
+diff --git a/internal/api/handlers/management/api_tools.go b/internal/api/handlers/management/api_tools.go
+index c030205..ef4a3dd 100644
+--- a/internal/api/handlers/management/api_tools.go
++++ b/internal/api/handlers/management/api_tools.go
+@@ -14,6 +14,7 @@ import (
+ 	"github.com/gin-gonic/gin"
+ 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
+@@ -33,6 +34,7 @@ type apiCallRequest struct {
+ 	AuthIndexSnake  *string           `json:"auth_index"`
+ 	AuthIndexCamel  *string           `json:"authIndex"`
+ 	AuthIndexPascal *string           `json:"AuthIndex"`
++	QuotaSource     string            `json:"quota_source,omitempty"`
+ 	Method          string            `json:"method"`
+ 	URL             string            `json:"url"`
+ 	ProxyURL        string            `json:"proxy_url"`
+@@ -232,6 +234,13 @@ func (h *Handler) APICall(c *gin.Context) {
+ 		return
+ 	}
+ 
++	if auth != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && ((auth.Provider == "codex" && parsedURL.Hostname() == "chatgpt.com" && parsedURL.Path == "/backend-api/wham/usage") || (auth.Provider == "claude" && parsedURL.Hostname() == "api.anthropic.com" && parsedURL.Path == "/api/oauth/usage")) {
++		source := "manual_provider_query"
++		if body.QuotaSource == "scheduled" {
++			source = "scheduled_provider_query"
++		}
++		quotatraffic.CaptureQuery(auth.Index, auth.Provider, respBody, time.Now(), source)
++	}
+ 	c.JSON(http.StatusOK, apiCallResponse{
+ 		StatusCode: resp.StatusCode,
+ 		Header:     resp.Header,
+diff --git a/internal/api/handlers/management/quota_observations.go b/internal/api/handlers/management/quota_observations.go
+new file mode 100644
+index 0000000..12fdac6
+--- /dev/null
++++ b/internal/api/handlers/management/quota_observations.go
+@@ -0,0 +1,20 @@
++package management
++
++import (
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
++	"net/http"
++)
++
++func (h *Handler) GetQuotaObservations(c *gin.Context) {
++	allowed := map[string]bool{}
++	if h.authManager != nil {
++		for _, a := range h.authManager.List() {
++			if a != nil && !a.Disabled {
++				allowed[a.Index] = true
++			}
++		}
++	}
++	c.Header("Cache-Control", "no-store")
++	c.JSON(http.StatusOK, gin.H{"items": quotatraffic.Read(allowed)})
++}
+diff --git a/internal/api/server_management.go b/internal/api/server_management.go
+index 12a2ba5..897b744 100644
+--- a/internal/api/server_management.go
++++ b/internal/api/server_management.go
+@@ -81,6 +81,7 @@ func (s *Server) registerManagementRoutes() {
+ 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
+ 		mgmt.POST("/reset-quota", s.mgmt.ResetQuota)
+ 
++		mgmt.GET("/quota/observations", s.mgmt.GetQuotaObservations)
+ 		mgmt.GET("/quota/providers", s.mgmt.GetQuotaProviders)
+ 		mgmt.POST("/quota/fetch", s.mgmt.FetchCredentialQuota)
+ 		mgmt.POST("/quota/reset", s.mgmt.ResetCredentialQuota)
+diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
+index 7f68dad..25eb130 100644
+--- a/internal/api/server_management_v8.go
++++ b/internal/api/server_management_v8.go
+@@ -18,6 +18,7 @@ func (s *Server) registerManagementV8Routes() {
+ 	v8.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
+ 		c.Set(management.ConfigV8ContextKey, true)
+ 	})
++	v8.GET("/quota/observations", s.mgmt.GetQuotaObservations)
+ 	v8.GET("/config", s.mgmt.ConfigV8)
+ 	v8.PUT("/config", s.mgmt.ConfigV8)
+ 	v8.PATCH("/config", s.mgmt.ConfigV8)
+diff --git a/internal/logging/requestmeta.go b/internal/logging/requestmeta.go
+index be20511..e04981e 100644
+--- a/internal/logging/requestmeta.go
++++ b/internal/logging/requestmeta.go
+@@ -5,11 +5,27 @@ import (
+ 	"net/http"
+ 	"sync"
+ 	"sync/atomic"
++	"time"
+ )
+ 
+ type endpointKey struct{}
+ type responseStatusKey struct{}
+ type responseHeadersKey struct{}
++type quotaObserverKey struct{}
++type QuotaObserver func(http.Header, time.Time, string)
++
++func WithQuotaObserver(ctx context.Context, observer QuotaObserver) context.Context {
++	return context.WithValue(ctx, quotaObserverKey{}, observer)
++}
++func ObserveQuota(ctx context.Context, h http.Header, source string) {
++	if ctx == nil || len(h) == 0 {
++		return
++	}
++	if fn, ok := ctx.Value(quotaObserverKey{}).(QuotaObserver); ok {
++		fn(h, time.Now(), source)
++	}
++}
++
+ type clientRequestMetadataKey struct{}
+ 
+ // ClientRequestMetadata stores immutable downstream request metadata for asynchronous consumers.
+@@ -113,6 +129,7 @@ func SetResponseStatus(ctx context.Context, status int) {
+ }
+ 
+ func SetResponseHeaders(ctx context.Context, headers http.Header) {
++	ObserveQuota(ctx, headers, "api_response_headers")
+ 	if ctx == nil {
+ 		return
+ 	}
+diff --git a/internal/managementasset/updater.go b/internal/managementasset/updater.go
+index c466703..559b58c 100644
+--- a/internal/managementasset/updater.go
++++ b/internal/managementasset/updater.go
+@@ -59,6 +59,9 @@ func SetCurrentConfig(cfg *config.Config) {
+ // StartAutoUpdater launches a background goroutine that periodically ensures the management asset is up to date.
+ // It respects the disable-control-panel flag on every iteration and supports hot-reloaded configurations.
+ func StartAutoUpdater(ctx context.Context, configFilePath string) {
++	if os.Getenv("HA_PINNED_MANAGEMENT") == "1" {
++		return
++	}
+ 	configFilePath = strings.TrimSpace(configFilePath)
+ 	if configFilePath == "" {
+ 		log.Debug("management asset auto-updater skipped: empty config path")
+@@ -189,6 +192,10 @@ func FilePath(configFilePath string) string {
+ // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
+ // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
+ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
++	if os.Getenv("HA_PINNED_MANAGEMENT") == "1" {
++		_, err := os.Stat(filepath.Join(staticDir, ManagementFileName))
++		return err == nil
++	}
+ 	if ctx == nil {
+ 		ctx = context.Background()
+ 	}
+diff --git a/internal/quotatraffic/cache.go b/internal/quotatraffic/cache.go
+new file mode 100644
+index 0000000..3fb7123
+--- /dev/null
++++ b/internal/quotatraffic/cache.go
+@@ -0,0 +1,215 @@
++package quotatraffic
++
++import (
++	"encoding/json"
++	"net/http"
++	"sort"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++)
++
++type Observation struct {
++	AuthIndex  string      `json:"auth_index"`
++	Provider   string      `json:"provider"`
++	Window     string      `json:"window"`
++	Headers    http.Header `json:"headers"`
++	ObservedAt time.Time   `json:"observed_at"`
++	Source     string      `json:"source"`
++}
++
++var cache = struct {
++	sync.Mutex
++	items map[string]Observation
++}{items: make(map[string]Observation)}
++
++func Capture(index, provider string, headers http.Header, at time.Time, source string) {
++	if index == "" || at.IsZero() {
++		return
++	}
++	groups := map[string]http.Header{}
++	for key, values := range headers {
++		key = http.CanonicalHeaderKey(key)
++		lower := strings.ToLower(key)
++		group := ""
++		if provider == "codex" && strings.HasPrefix(lower, "x-codex-") {
++			for _, marker := range []string{"-primary-", "-secondary-"} {
++				if i := strings.LastIndex(lower, marker); i >= 0 {
++					group = lower[:i] + marker[:len(marker)-1]
++					break
++				}
++			}
++		} else if provider == "claude" && strings.HasPrefix(lower, "anthropic-ratelimit-unified-") {
++			for _, window := range []string{"5h", "7d", "7d-opus", "7d-sonnet"} {
++				if strings.HasPrefix(lower, "anthropic-ratelimit-unified-"+window+"-") {
++					group = "claude-" + window
++				}
++			}
++		}
++		allowed := false
++		for _, suffix := range []string{"-used-percent", "-window-minutes", "-reset-at", "-reset-after-seconds", "-utilization", "-reset"} {
++			if strings.HasSuffix(lower, suffix) {
++				allowed = true
++				break
++			}
++		}
++		if !allowed || group == "" || len(values) == 0 {
++			continue
++		}
++		value := strings.TrimSpace(values[0])
++		if len(value) > 512 || strings.ContainsAny(value, "\r\n") {
++			continue
++		}
++		if groups[group] == nil {
++			groups[group] = http.Header{}
++		}
++		groups[group].Set(key, value)
++	}
++	cache.Lock()
++	defer cache.Unlock()
++	for group, h := range groups {
++		for key, values := range headers {
++			lower := strings.ToLower(key)
++			if lower == "x-codex-plan-type" || lower == "x-codex-active-limit" || (strings.HasSuffix(lower, "-limit-name") && strings.HasPrefix(group, strings.TrimSuffix(lower, "-limit-name"))) {
++				if len(values) > 0 && len(values[0]) <= 256 && !strings.ContainsAny(values[0], "\r\n") {
++					h.Set(key, values[0])
++				}
++			}
++		}
++		// Percent/utilization is required: reset-only or unrelated headers are not a fresh quota observation.
++		for name := range h {
++			if strings.HasSuffix(strings.ToLower(name), "-limit-name") {
++				id := strings.ToLower(strings.TrimSpace(h.Get(name)))
++				if id != "" {
++					window := "primary"
++					if strings.HasSuffix(group, "secondary") {
++						window = "secondary"
++					}
++					group = "x-codex-additional-" + id + "-" + window
++				}
++			}
++		}
++		valid := false
++		for name := range h {
++			if strings.HasSuffix(strings.ToLower(name), "-used-percent") || strings.HasSuffix(strings.ToLower(name), "-utilization") {
++				n, e := strconv.ParseFloat(h.Get(name), 64)
++				valid = e == nil && n >= 0 && n <= 100
++				if valid {
++					break
++				}
++			}
++		}
++		if !valid {
++			continue
++		}
++		key := index + "\x00" + provider + "\x00" + group
++		if old, ok := cache.items[key]; ok && !at.After(old.ObservedAt) {
++			continue
++		}
++		if _, exists := cache.items[key]; !exists && len(cache.items) >= 4096 {
++			oldKey := ""
++			var oldest time.Time
++			for k, v := range cache.items {
++				if oldKey == "" || v.ObservedAt.Before(oldest) {
++					oldKey = k
++					oldest = v.ObservedAt
++				}
++			}
++			delete(cache.items, oldKey)
++		}
++		cache.items[key] = Observation{index, provider, group, h.Clone(), at, source}
++	}
++}
++func Read(allowed map[string]bool) []Observation {
++	cache.Lock()
++	defer cache.Unlock()
++	items := []Observation{}
++	for _, v := range cache.items {
++		if allowed[v.AuthIndex] {
++			v.Headers = v.Headers.Clone()
++			items = append(items, v)
++		}
++	}
++	sort.Slice(items, func(i, j int) bool {
++		if items[i].AuthIndex == items[j].AuthIndex {
++			return items[i].Window < items[j].Window
++		}
++		return items[i].AuthIndex < items[j].AuthIndex
++	})
++	return items
++}
++
++// Provider queries use explicit known payload shapes. Never retain raw bodies or credentials.
++func CaptureQuery(index, provider string, body []byte, at time.Time, source string) {
++	var payload map[string]json.RawMessage
++	if json.Unmarshal(body, &payload) != nil {
++		return
++	}
++	headers := http.Header{}
++	if provider == "codex" {
++		add := func(prefix string, raw json.RawMessage) {
++			var limit map[string]json.RawMessage
++			if json.Unmarshal(raw, &limit) != nil {
++				return
++			}
++			for _, w := range []string{"primary", "secondary"} {
++				var values map[string]json.RawMessage
++				if json.Unmarshal(limit[w+"_window"], &values) != nil {
++					continue
++				}
++				for field, suffix := range map[string]string{"used_percent": "Used-Percent", "reset_at": "Reset-At", "reset_after_seconds": "Reset-After-Seconds"} {
++					if value := values[field]; value != nil {
++						headers.Set(prefix+w+"-"+suffix, string(value))
++					}
++				}
++				var seconds int64
++				if json.Unmarshal(values["limit_window_seconds"], &seconds) == nil && seconds > 0 {
++					headers.Set(prefix+w+"-Window-Minutes", strconv.FormatInt(seconds/60, 10))
++				}
++			}
++		}
++		add("X-Codex-", payload["rate_limit"])
++		add("X-Codex-Code-Review-", payload["code_review_rate_limit"])
++		var extra []struct {
++			LimitName string          `json:"limit_name"`
++			RateLimit json.RawMessage `json:"rate_limit"`
++		}
++		if json.Unmarshal(payload["additional_rate_limits"], &extra) == nil {
++			for i, item := range extra {
++				if i >= 8 {
++					break
++				}
++				name := strings.TrimSpace(item.LimitName)
++				if name == "" || len(name) > 128 || strings.ContainsAny(name, "\r\n") {
++					continue
++				}
++				id := strings.Map(func(r rune) rune {
++					if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
++						return r
++					}
++					return '-'
++				}, name)
++				prefix := "X-Codex-Additional-" + id + "-"
++				add(prefix, item.RateLimit)
++				headers.Set(prefix+"Limit-Name", name)
++			}
++		}
++	} else if provider == "claude" {
++		for field, window := range map[string]string{"five_hour": "5h", "seven_day": "7d", "seven_day_opus": "7d-opus", "seven_day_sonnet": "7d-sonnet"} {
++			var values struct {
++				Utilization *float64 `json:"utilization"`
++				ResetsAt    string   `json:"resets_at"`
++			}
++			if json.Unmarshal(payload[field], &values) != nil || values.Utilization == nil {
++				continue
++			}
++			prefix := "Anthropic-Ratelimit-Unified-" + window + "-"
++			headers.Set(prefix+"Utilization", strconv.FormatFloat(*values.Utilization/100, 'f', -1, 64))
++			if reset, e := time.Parse(time.RFC3339, values.ResetsAt); e == nil {
++				headers.Set(prefix+"Reset", strconv.FormatInt(reset.Unix(), 10))
++			}
++		}
++	}
++	Capture(index, provider, headers, at, source)
++}
+diff --git a/internal/quotatraffic/cache_test.go b/internal/quotatraffic/cache_test.go
+new file mode 100644
+index 0000000..c1091fe
+--- /dev/null
++++ b/internal/quotatraffic/cache_test.go
+@@ -0,0 +1,77 @@
++package quotatraffic
++
++import (
++	"net/http"
++	"testing"
++	"time"
++)
++
++func resetCache() { cache.Lock(); cache.items = map[string]Observation{}; cache.Unlock() }
++func headers(window, used string) http.Header {
++	return http.Header{"X-Codex-" + window + "-Used-Percent": {used}, "X-Codex-" + window + "-Window-Minutes": {"300"}, "X-Codex-" + window + "-Reset-After-Seconds": {"120"}, "Authorization": {"must-never-be-reported"}, "Set-Cookie": {"must-never-be-reported"}}
++}
++func TestCaptureSeparatesAccountsAndWindowsRejectsLateData(t *testing.T) {
++	resetCache()
++	at := time.Now()
++	Capture("a", "codex", headers("Primary", "10"), at, "api_response_headers")
++	Capture("a", "codex", headers("Secondary", "20"), at.Add(-time.Minute), "websocket_event")
++	Capture("b", "codex", headers("Primary", "90"), at, "websocket_event")
++	Capture("a", "codex", headers("Primary", "99"), at.Add(-time.Second), "websocket_event")
++	Capture("a", "codex", http.Header{"Server": {"anything"}}, at.Add(time.Hour), "api_response_headers")
++	rows := Read(map[string]bool{"a": true, "b": true})
++	if len(rows) != 3 {
++		t.Fatalf("wanted 3 distinct windows, got %d", len(rows))
++	}
++	for _, row := range rows {
++		if row.Headers.Get("Authorization") != "" || row.Headers.Get("Set-Cookie") != "" {
++			t.Fatal("credential leak")
++		}
++		if row.AuthIndex == "a" && row.Window == "x-codex-primary" {
++			if row.Headers.Get("X-Codex-Primary-Used-Percent") != "10" || !row.ObservedAt.Equal(at) || row.Source != "api_response_headers" {
++				t.Fatal("late or missing observations changed cache")
++			}
++		}
++	}
++	rows[0].Headers.Set("Authorization", "caller mutation")
++	again := Read(map[string]bool{"a": true})
++	if len(again) != 2 || again[0].Headers.Get("Authorization") != "" {
++		t.Fatal("cache read mutated cache or expanded scope")
++	}
++}
++func TestProviderQueriesHaveCaptureTimeAndSource(t *testing.T) {
++	resetCache()
++	at := time.Now()
++	CaptureQuery("a", "codex", []byte(`{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":18000,"reset_after_seconds":60},"secondary_window":{"used_percent":42,"limit_window_seconds":604800,"reset_at":1800000000}},"access_token":"secret"}`), at, "scheduled_provider_query")
++	rows := Read(map[string]bool{"a": true})
++	if len(rows) != 2 {
++		t.Fatal("missing queried windows")
++	}
++	for _, row := range rows {
++		if row.Source != "scheduled_provider_query" || !row.ObservedAt.Equal(at) {
++			t.Fatal("query provenance changed")
++		}
++	}
++	Capture("a", "codex", headers("Primary", "11"), at.Add(time.Second), "websocket_event")
++	rows = Read(map[string]bool{"a": true})
++	if rows[0].Source != "websocket_event" || rows[1].Source != "scheduled_provider_query" {
++		t.Fatal("independent sources lost")
++	}
++}
++
++func TestQueryAdditionalWindowsAndHeaderAllowlist(t *testing.T) {
++	resetCache()
++	at := time.Now()
++	CaptureQuery("a", "codex", []byte(`{"code_review_rate_limit":{"primary_window":{"used_percent":12,"limit_window_seconds":604800,"reset_after_seconds":60}},"additional_rate_limits":[{"limit_name":"Spark","rate_limit":{"secondary_window":{"used_percent":32,"limit_window_seconds":604800,"reset_after_seconds":120}}}]}`), at, "manual_provider_query")
++	rows := Read(map[string]bool{"a": true})
++	if len(rows) != 2 {
++		t.Fatal("optional windows lost")
++	}
++	h := headers("Primary", "10")
++	h.Set("X-Codex-Primary-Authorization", "secret")
++	Capture("b", "codex", h, at, "api_response_headers")
++	for _, row := range Read(map[string]bool{"b": true}) {
++		if row.Headers.Get("X-Codex-Primary-Authorization") != "" {
++			t.Fatal("unknown header leaked")
++		}
++	}
++}
+diff --git a/internal/runtime/executor/helps/logging_helpers.go b/internal/runtime/executor/helps/logging_helpers.go
+index e1db297..46fbdb0 100644
+--- a/internal/runtime/executor/helps/logging_helpers.go
++++ b/internal/runtime/executor/helps/logging_helpers.go
+@@ -403,7 +403,9 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
+ // AppendCodexAPIWebsocketResponse stores a codex upstream websocket response frame and merges any
+ // quota event headers carried by the frame into the request log.
+ func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
+-	logging.MergeResponseHeaders(ctx, ParseCodexQuotaEventHeaders(payload))
++	quotaHeaders := ParseCodexQuotaEventHeaders(payload)
++	logging.ObserveQuota(ctx, quotaHeaders, "websocket_event")
++	logging.MergeResponseHeaders(ctx, quotaHeaders)
+ 	AppendAPIWebsocketResponse(ctx, cfg, payload)
+ }
+ 
+diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
+index 9616a82..38753a9 100644
+--- a/sdk/cliproxy/auth/conductor_execution.go
++++ b/sdk/cliproxy/auth/conductor_execution.go
+@@ -16,6 +16,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+@@ -24,7 +25,12 @@ import (
+ 	log "github.com/sirupsen/logrus"
+ )
+ 
+-func newUpstreamAttemptContext(ctx context.Context) context.Context {
++func newUpstreamAttemptContext(ctx context.Context, selected ...*Auth) context.Context {
++	if len(selected) > 0 && selected[0] != nil {
++		a := selected[0]
++		index, provider := a.Index, a.Provider
++		ctx = logging.WithQuotaObserver(ctx, func(h http.Header, at time.Time, source string) { quotatraffic.Capture(index, provider, h, at, source) })
++	}
+ 	ctx = logging.WithFreshResponseHeadersHolder(ctx)
+ 	return cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
+ }
+@@ -530,7 +536,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+ 		}
+ 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+-		execCtx = newUpstreamAttemptContext(execCtx)
++		execCtx = newUpstreamAttemptContext(execCtx, auth)
+ 
+ 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+ 		if len(models) == 0 {
+@@ -556,7 +562,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 		var authErr error
+ 		didRefreshOnUnauthorized := false
+ 		for _, upstreamModel := range models {
+-			execCtx = newUpstreamAttemptContext(execCtx)
++			execCtx = newUpstreamAttemptContext(execCtx, auth)
+ 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+ 			execReq := req
+ 			execReq.Model = upstreamModel
+@@ -602,11 +608,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+ 				if errCtx := execCtx.Err(); errCtx != nil {
+ 					return cliproxyexecutor.Response{}, errCtx
+ 				}
+-				refreshCtx := newUpstreamAttemptContext(execCtx)
++				refreshCtx := newUpstreamAttemptContext(execCtx, auth)
+ 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
+ 					auth = refreshed
+ 					didRefreshOnUnauthorized = true
+-					execCtx = newUpstreamAttemptContext(execCtx)
++					execCtx = newUpstreamAttemptContext(execCtx, auth)
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 					startRetry := time.Now()
+ 					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+@@ -742,7 +748,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+ 		}
+ 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+-		execCtx = newUpstreamAttemptContext(execCtx)
++		execCtx = newUpstreamAttemptContext(execCtx, auth)
+ 
+ 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+ 		if len(models) == 0 {
+@@ -768,7 +774,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 		var authErr error
+ 		didRefreshOnUnauthorized := false
+ 		for _, upstreamModel := range models {
+-			execCtx = newUpstreamAttemptContext(execCtx)
++			execCtx = newUpstreamAttemptContext(execCtx, auth)
+ 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+ 			execReq := req
+ 			execReq.Model = upstreamModel
+@@ -814,11 +820,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+ 				if errCtx := execCtx.Err(); errCtx != nil {
+ 					return cliproxyexecutor.Response{}, errCtx
+ 				}
+-				refreshCtx := newUpstreamAttemptContext(execCtx)
++				refreshCtx := newUpstreamAttemptContext(execCtx, auth)
+ 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized); okRefresh {
+ 					auth = refreshed
+ 					didRefreshOnUnauthorized = true
+-					execCtx = newUpstreamAttemptContext(execCtx)
++					execCtx = newUpstreamAttemptContext(execCtx, auth)
+ 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+ 					startRetry := time.Now()
+ 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+@@ -1059,7 +1065,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
+ 		}
+ 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
+ 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+-		execCtx = newUpstreamAttemptContext(execCtx)
++		execCtx = newUpstreamAttemptContext(execCtx, auth)
+ 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+ 		if selection != nil && aliasResult.ForceMapping && responseAlias != "" {
+ 			aliasResult.OriginalAlias = responseAlias
+diff --git a/sdk/cliproxy/auth/conductor_home_execution.go b/sdk/cliproxy/auth/conductor_home_execution.go
+index 1b8f233..dee930f 100644
+--- a/sdk/cliproxy/auth/conductor_home_execution.go
++++ b/sdk/cliproxy/auth/conductor_home_execution.go
+@@ -131,7 +131,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
+ 		}
+ 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
+ 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+-		execCtx = newUpstreamAttemptContext(execCtx)
++		execCtx = newUpstreamAttemptContext(execCtx, auth)
+ 		if rt := m.roundTripperFor(auth); rt != nil {
+ 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+ 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+@@ -169,7 +169,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
+ 			continue
+ 		}
+ 		for _, upstreamModel := range models {
+-			execCtx = newUpstreamAttemptContext(execCtx)
++			execCtx = newUpstreamAttemptContext(execCtx, auth)
+ 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
+ 			execReq := req
+ 			execReq.Model = upstreamModel
+diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
+index 1e0137b..fd81c36 100644
+--- a/sdk/cliproxy/auth/conductor_stream.go
++++ b/sdk/cliproxy/auth/conductor_stream.go
+@@ -215,7 +215,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 	var upstreamErr error
+ 	didRefreshOnUnauthorized := false
+ 	for idx, execModel := range execModels {
+-		ctx = newUpstreamAttemptContext(ctx)
++		ctx = newUpstreamAttemptContext(ctx, auth)
+ 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
+ 		execReq := req
+ 		execReq.Model = execModel
+@@ -252,12 +252,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 			}
+ 			if allowRetry && !ephemeralResult {
+ 				alreadyTried := didRefreshOnUnauthorized
+-				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, errStream, alreadyTried)
++				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx, auth), auth, errStream, alreadyTried)
+ 				if okRefresh {
+ 					auth = refreshed
+ 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
+ 					didRefreshOnUnauthorized = true
+-					ctx = newUpstreamAttemptContext(ctx)
++					ctx = newUpstreamAttemptContext(ctx, auth)
+ 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+ 					startRetry := time.Now()
+ 					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
+@@ -328,13 +328,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 			}
+ 			if allowRetry && !ephemeralResult {
+ 				alreadyTried := didRefreshOnUnauthorized
+-				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, bootstrapErr, alreadyTried)
++				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx, auth), auth, bootstrapErr, alreadyTried)
+ 				if okRefresh {
+ 					discardStreamChunks(streamResult.Chunks)
+ 					auth = refreshed
+ 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
+ 					didRefreshOnUnauthorized = true
+-					ctx = newUpstreamAttemptContext(ctx)
++					ctx = newUpstreamAttemptContext(ctx, auth)
+ 					startRetry := time.Now()
+ 					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+ 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)

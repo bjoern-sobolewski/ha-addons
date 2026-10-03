@@ -6,3 +6,5 @@
 !viewer-locations.conf
 !patches/
 !patches/viewer-quota.patch
+
+!patches/**

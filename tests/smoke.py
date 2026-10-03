@@ -1,6 +1,7 @@
 """Exercise the packaged services with isolated, automatically cleaned Docker resources."""
 import http.cookiejar
 import json
+import os
 from pathlib import Path
 import secrets
 import socket
@@ -13,6 +14,8 @@ import urllib.request
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+CPA_TEST_IMAGE = os.environ.get('CPA_TEST_IMAGE', 'ha-cpa-test:local')
+KEEPER_TEST_IMAGE = os.environ.get('KEEPER_TEST_IMAGE', 'ha-keeper-test:local')
 
 
 def docker(*args, check=True):
@@ -61,10 +64,10 @@ def main():
             docker('network', 'create', network)
             for volume in volumes:
                 docker('volume', 'create', volume)
-            docker('create', '--name', names['mock'], '--network', network, '--network-alias', 'mock', '-v', f'{ROOT / "tests"}:/test:ro', '--entrypoint', 'python3', 'ha-keeper-test:local', '/test/mock_provider.py')
-            docker('create', '--init', '--name', names['cpa'], '--network', network, '--network-alias', 'cpa', '-v', f'{volumes[0]}:/data', '-v', f'{provider_dir}:/config:ro', '-p', '127.0.0.1::8080', '-p', '127.0.0.1::8317', 'ha-cpa-test:local')
+            docker('create', '--name', names['mock'], '--network', network, '--network-alias', 'mock', '-v', f'{ROOT / "tests"}:/test:ro', '--entrypoint', 'python3', KEEPER_TEST_IMAGE, '/test/mock_provider.py')
+            docker('create', '--init', '--name', names['cpa'], '--network', network, '--network-alias', 'cpa', '-v', f'{volumes[0]}:/data', '-v', f'{provider_dir}:/config:ro', '-p', '127.0.0.1::8080', '-p', '127.0.0.1::8317', CPA_TEST_IMAGE)
             # Force the HTTP fallback so collection also works when CPA disables RESP.
-            docker('create', '--init', '--name', names['keeper'], '--network', network, '-e', 'REDIS_QUEUE_ADDR=mock:1', '-v', f'{volumes[1]}:/data', '-p', '127.0.0.1::8080', '-p', '127.0.0.1::8082', 'ha-keeper-test:local')
+            docker('create', '--init', '--name', names['keeper'], '--network', network, '-e', 'REDIS_QUEUE_ADDR=mock:1', '-v', f'{volumes[1]}:/data', '-p', '127.0.0.1::8080', '-p', '127.0.0.1::8082', KEEPER_TEST_IMAGE)
             docker('cp', str(temp / 'cpa.json'), names['cpa'] + ':/data/options.json')
             docker('cp', str(temp / 'keeper.json'), names['keeper'] + ':/data/options.json')
             for name in names.values():

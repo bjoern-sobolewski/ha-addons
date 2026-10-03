@@ -49,3 +49,21 @@ For the HA Cloudflared app's hostname-only **Additional Hosts**, instead enable 
 If an existing WAF rule requires a Bearer header for the entire API hostname, narrow that rule to API paths or exclude the exact `viewer_base_path` and paths starting with `viewer_base_path + "/"`; browsers log in with a POSTed key and then an HttpOnly session cookie. Remove any exception for the old prefix when changing it. Keep API header protection in place and verify anonymous quota requests remain 401. Use HTTPS for remote access. Do not route the hostname directly to the full Keeper listener. Routing `/v1/` through Keeper makes that API hostname depend on Keeper being up; restoring its original CPA API gateway service bypasses this extra hop if Keeper is unavailable.
 
 This HA build applies a reviewed local patch to upstream Keeper 1.15.9 at commit `3f1b29aa5b0b5284b75ec53573b5146cd50fea1b`, builds its embedded frontend and binary, and retains the upstream runtime and `/data` database layout.
+
+## Automatic quota freshness
+
+Supported Codex and Claude upstream quota headers, and Codex WebSocket quota
+events, populate account-specific cached windows when present. Quota is optional;
+missing observations do not erase existing windows. Late or equal observations
+cannot replace newer windows. Manual and scheduled provider queries remain
+available for idle accounts and providers without supported traffic metadata.
+
+Quota views read backend caches every ten seconds, without provider queries.
+Polling pauses while hidden, refreshes when visible, and does not overlap. Hover,
+focus or tap the freshness indicator for the source, capture timestamp, relative
+age and account label. Data is stale after fifteen minutes or its reset time.
+Cache reads never update capture timestamps. Traffic caches are in memory and
+can be unavailable after restart until traffic or a fallback query arrives.
+
+Reporting never includes credentials. Administrative routes remain private;
+individual-key reporting remains scoped and the all-key role remains read-only.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9
+
+- Automatically ingest account/window observations from CPA every five seconds, reusing the usage-header cache path.
+- Poll cached quota every ten seconds in admin, individual-key and all-key read-only dashboards; pause hidden tabs and prevent overlap.
+- Show capture source, timestamp, age and account label on hover/tap, with visible stale status.
+- Preserve manual/scheduled fallback queries, independent window timestamps, read-only permissions and the API key selector.
+
 ## 0.1.8
 
 - Add Request Events, Auth Files, AI Provider details and Local Ranking to the read-only dashboard.

@@ -19,6 +19,9 @@ jobs:
       - run: docker build -t ha-cpa-test:local cliproxyapi
       - run: docker build -t ha-keeper-test:local cpa-usage-keeper
       - run: python tests/smoke.py
+      - run: docker tag ha-cpa-test:local ha-cpa-quota:local
+      - run: docker tag ha-keeper-test:local ha-keeper-quota:local
+      - run: python tests/quota_flow.py
   publish:
     needs: validate
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.15
+
+- Use the compact inline quota refresh display.
+- Route quota observations through the bounded cache/history worker, preserving partial Claude windows and per-window freshness.
+- Harden reporting exports, credential sanitization and read-only session credential binding.
+- Preserve local key alias editing on older CPA versions and keep write-command reads on the writer pool.
+
+
 ## 0.1.14
 
 - Put Total Requests and a compact, scrollable Usage Limits table in the top row; show average RPM beside the request count and enlarge its graph.

@@ -1,0 +1,257 @@
+diff --git a/internal/api/handlers/management/api_key_names.go b/internal/api/handlers/management/api_key_names.go
+index fc1520ff..7aa7035e 100644
+--- a/internal/api/handlers/management/api_key_names.go
++++ b/internal/api/handlers/management/api_key_names.go
+@@ -18,6 +18,9 @@ import (
+ // Metadata never changes authentication. Fingerprints are SHA-256 of the full key.
+ // Empty entries are tombstones: old browser imports must not resurrect cleared names.
+ func (h *Handler) readAPIKeyNamesLocked() (map[string]string, error) {
++	if strings.TrimSpace(h.configFilePath) == "" {
++		return nil, errors.New("key name persistence requires a configuration file")
++	}
+ 	names := map[string]string{}
+ 	data, err := os.ReadFile(filepath.Join(filepath.Dir(h.configFilePath), "api-key-names.json"))
+ 	if errors.Is(err, os.ErrNotExist) {
+@@ -63,11 +66,15 @@ func (h *Handler) PatchAPIKeyNames(c *gin.Context) {
+ 			return
+ 		}
+ 		for _, char := range value {
+-			if unicode.IsControl(char) {
++			if unicode.IsControl(char) || unicode.Is(unicode.Cf, char) {
+ 				c.JSON(400, gin.H{"error": "invalid_key_name"})
+ 				return
+ 			}
+ 		}
++		if h.cfg == nil {
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration_unavailable"})
++			return
++		}
+ 		for _, key := range h.cfg.APIKeys {
+ 			if key != "" && strings.Contains(value, key) {
+ 				c.JSON(400, gin.H{"error": "name_contains_key"})
+@@ -85,6 +92,10 @@ func (h *Handler) PatchAPIKeyNames(c *gin.Context) {
+ 			names[key] = strings.TrimSpace(name)
+ 		}
+ 	}
++	if len(names) > 10000 {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "too_many_key_names"})
++		return
++	}
+ 	data, err := json.Marshal(names)
+ 	if err != nil {
+ 		c.JSON(500, gin.H{"error": "key_names_write_failed"})
+diff --git a/internal/api/handlers/management/api_key_names_test.go b/internal/api/handlers/management/api_key_names_test.go
+index b53f17ed..1d08a43d 100644
+--- a/internal/api/handlers/management/api_key_names_test.go
++++ b/internal/api/handlers/management/api_key_names_test.go
+@@ -48,6 +48,7 @@ func TestSharedKeyNamesPersistenceImportClearAndValidation(t *testing.T) {
+ 	request(`{"names":{"bad":"invalid"}}`, 400)
+ 	request(fmt.Sprintf(`{"names":{"%s":"existing-client-key"}}`, fingerprint), 400)
+ 	request(fmt.Sprintf(`{"names":{"%s":"bad\nname"}}`, fingerprint), 400)
++	request(fmt.Sprintf(`{"names":{"%s":"hidden\u200bname"}}`, fingerprint), 400)
+ 	request(fmt.Sprintf(`{"names":{"%s":"%s"}}`, fingerprint, strings.Repeat("界", 129)), 400)
+ 	saved, _ := os.ReadFile(path)
+ 	if string(saved) != string(original) || len(h.cfg.APIKeys) != 1 {
+diff --git a/internal/api/handlers/management/quota_observations.go b/internal/api/handlers/management/quota_observations.go
+index 12fdac6b..62598cee 100644
+--- a/internal/api/handlers/management/quota_observations.go
++++ b/internal/api/handlers/management/quota_observations.go
+@@ -1,20 +1,31 @@
+ package management
+ 
+ import (
++	"net/http"
++
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
+-	"net/http"
+ )
+ 
+ func (h *Handler) GetQuotaObservations(c *gin.Context) {
+ 	allowed := map[string]bool{}
++	providers := map[string]string{}
+ 	if h.authManager != nil {
+ 		for _, a := range h.authManager.List() {
+ 			if a != nil && !a.Disabled {
+ 				allowed[a.Index] = true
++				providers[a.Index] = a.Provider
+ 			}
+ 		}
+ 	}
+ 	c.Header("Cache-Control", "no-store")
+-	c.JSON(http.StatusOK, gin.H{"items": quotatraffic.Read(allowed)})
++	items := make([]quotatraffic.Observation, 0)
++	for _, item := range quotatraffic.Read(allowed) {
++		// An auth index may survive a provider change. Do not report the old
++		// provider's observations as quota for the replacement credential.
++		if providers[item.AuthIndex] == item.Provider {
++			items = append(items, item)
++		}
++	}
++	c.JSON(http.StatusOK, gin.H{"items": items})
+ }
+diff --git a/internal/logging/requestmeta.go b/internal/logging/requestmeta.go
+index e04981e5..3ffc3786 100644
+--- a/internal/logging/requestmeta.go
++++ b/internal/logging/requestmeta.go
+@@ -21,7 +21,7 @@ func ObserveQuota(ctx context.Context, h http.Header, source string) {
+ 	if ctx == nil || len(h) == 0 {
+ 		return
+ 	}
+-	if fn, ok := ctx.Value(quotaObserverKey{}).(QuotaObserver); ok {
++	if fn, ok := ctx.Value(quotaObserverKey{}).(QuotaObserver); ok && fn != nil {
+ 		fn(h, time.Now(), source)
+ 	}
+ }
+diff --git a/internal/quotatraffic/cache.go b/internal/quotatraffic/cache.go
+index 3fb71233..7dd7d3fe 100644
+--- a/internal/quotatraffic/cache.go
++++ b/internal/quotatraffic/cache.go
+@@ -2,6 +2,7 @@ package quotatraffic
+ 
+ import (
+ 	"encoding/json"
++	"math"
+ 	"net/http"
+ 	"sort"
+ 	"strconv"
+@@ -19,6 +20,8 @@ type Observation struct {
+ 	Source     string      `json:"source"`
+ }
+ 
++const maxObservations = 4096
++
+ var cache = struct {
+ 	sync.Mutex
+ 	items map[string]Observation
+@@ -28,6 +31,14 @@ func Capture(index, provider string, headers http.Header, at time.Time, source s
+ 	if index == "" || at.IsZero() {
+ 		return
+ 	}
++	if provider != "codex" && provider != "claude" {
++		return
++	}
++	switch source {
++	case "api_response_headers", "websocket_event", "manual_provider_query", "scheduled_provider_query":
++	default:
++		return
++	}
+ 	groups := map[string]http.Header{}
+ 	for key, values := range headers {
+ 		key = http.CanonicalHeaderKey(key)
+@@ -61,6 +72,28 @@ func Capture(index, provider string, headers http.Header, at time.Time, source s
+ 		if len(value) > 512 || strings.ContainsAny(value, "\r\n") {
+ 			continue
+ 		}
++		// Only numeric quota fields are retained. An upstream header using a
++		// recognized suffix must not smuggle arbitrary text into cache output.
++		if strings.HasSuffix(lower, "-used-percent") || strings.HasSuffix(lower, "-utilization") {
++			maximum := 100.0
++			if provider == "claude" {
++				maximum = 1
++			}
++			number, err := strconv.ParseFloat(value, 64)
++			if err != nil || !(number >= 0 && number <= maximum) {
++				continue
++			}
++		} else {
++			number, err := strconv.ParseInt(value, 10, 64)
++			if err != nil || number < 0 {
++				continue
++			}
++			if (strings.HasSuffix(lower, "-reset-after-seconds") && number > math.MaxInt64/int64(time.Second)) ||
++				(strings.HasSuffix(lower, "-window-minutes") && number > math.MaxInt64/60) ||
++				((strings.HasSuffix(lower, "-reset-at") || strings.HasSuffix(lower, "-reset")) && number > 253402300799) {
++				continue
++			}
++		}
+ 		if groups[group] == nil {
+ 			groups[group] = http.Header{}
+ 		}
+@@ -107,11 +140,11 @@ func Capture(index, provider string, headers http.Header, at time.Time, source s
+ 		if old, ok := cache.items[key]; ok && !at.After(old.ObservedAt) {
+ 			continue
+ 		}
+-		if _, exists := cache.items[key]; !exists && len(cache.items) >= 4096 {
++		if _, exists := cache.items[key]; !exists && len(cache.items) >= maxObservations {
+ 			oldKey := ""
+ 			var oldest time.Time
+ 			for k, v := range cache.items {
+-				if oldKey == "" || v.ObservedAt.Before(oldest) {
++				if oldKey == "" || v.ObservedAt.Before(oldest) || (v.ObservedAt.Equal(oldest) && k < oldKey) {
+ 					oldKey = k
+ 					oldest = v.ObservedAt
+ 				}
+diff --git a/internal/quotatraffic/cache_test.go b/internal/quotatraffic/cache_test.go
+index c1091fe1..e4e950ce 100644
+--- a/internal/quotatraffic/cache_test.go
++++ b/internal/quotatraffic/cache_test.go
+@@ -1,11 +1,45 @@
+ package quotatraffic
+ 
+ import (
++	"fmt"
+ 	"net/http"
+ 	"testing"
+ 	"time"
+ )
+ 
++func TestCaptureRejectsInvalidFieldsAndKeepsEqualObservation(t *testing.T) {
++	resetCache()
++	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
++	h := headers("Primary", "0")
++	h.Set("X-Codex-Primary-Reset-At", "secret-text")
++	h.Set("X-Codex-Primary-Window-Minutes", "-1")
++	Capture("a", "codex", h, at, "api_response_headers")
++	Capture("a", "codex", headers("Primary", "99"), at, "websocket_event")
++	Capture("a", "codex", headers("Primary", "NaN"), at.Add(time.Hour), "websocket_event")
++	Capture("a", "codex", headers("Primary", "Inf"), at.Add(time.Hour), "websocket_event")
++	Capture("a", "codex", headers("Primary", "-1"), at.Add(time.Hour), "websocket_event")
++	Capture("a", "codex", headers("Primary", "101"), at.Add(time.Hour), "websocket_event")
++	rows := Read(map[string]bool{"a": true})
++	if len(rows) != 1 || rows[0].Headers.Get("X-Codex-Primary-Used-Percent") != "0" || rows[0].Headers.Get("X-Codex-Primary-Reset-At") != "" || rows[0].Headers.Get("X-Codex-Primary-Window-Minutes") != "" || !rows[0].ObservedAt.Equal(at) {
++		t.Fatalf("invalid fields or equal observations changed the cache: %+v", rows)
++	}
++	Capture("b", "claude", http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"1.5"}}, at, "api_response_headers")
++	if len(Read(map[string]bool{"b": true})) != 0 {
++		t.Fatal("Claude utilization outside 0..1 accepted")
++	}
++}
++
++func TestCaptureEvictsOldestAndHonorsReadScope(t *testing.T) {
++	resetCache()
++	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
++	for i := 0; i <= maxObservations; i++ {
++		Capture(fmt.Sprint(i), "codex", headers("Primary", "10"), at.Add(time.Duration(i)*time.Second), "api_response_headers")
++	}
++	if len(cache.items) != maxObservations || len(Read(map[string]bool{"0": true})) != 0 || len(Read(map[string]bool{fmt.Sprint(maxObservations): true})) != 1 || len(Read(nil)) != 0 {
++		t.Fatal("cache eviction or scope is incorrect")
++	}
++}
++
+ func resetCache() { cache.Lock(); cache.items = map[string]Observation{}; cache.Unlock() }
+ func headers(window, used string) http.Header {
+ 	return http.Header{"X-Codex-" + window + "-Used-Percent": {used}, "X-Codex-" + window + "-Window-Minutes": {"300"}, "X-Codex-" + window + "-Reset-After-Seconds": {"120"}, "Authorization": {"must-never-be-reported"}, "Set-Cookie": {"must-never-be-reported"}}
+@@ -75,3 +109,22 @@ func TestQueryAdditionalWindowsAndHeaderAllowlist(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestCaptureRejectsOverflowTimeFields(t *testing.T) {
++	resetCache()
++	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
++	h := headers("Primary", "10")
++	for _, suffix := range []string{"Reset-After-Seconds", "Window-Minutes", "Reset-At"} {
++		h.Set("X-Codex-Primary-"+suffix, "9223372036854775807")
++	}
++	Capture("synthetic", "codex", h, at, "api_response_headers")
++	rows := Read(map[string]bool{"synthetic": true})
++	if len(rows) != 1 {
++		t.Fatal("valid percentage lost")
++	}
++	for _, suffix := range []string{"Reset-After-Seconds", "Window-Minutes", "Reset-At"} {
++		if rows[0].Headers.Get("X-Codex-Primary-"+suffix) != "" {
++			t.Fatal("overflow time retained")
++		}
++	}
++}

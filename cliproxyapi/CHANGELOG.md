@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5
+
+- Place quota refresh age and a small SVG icon after the remaining amount, with provenance in a tooltip; remove corrupted text glyphs.
+- Validate captured quota numbers and discard cache observations from a credential's former provider.
+- Bound shared-name metadata and reject Unicode format characters.
+
 ## 0.1.4
 
 - Place each client-key number beside its display name in Access & Authentication.

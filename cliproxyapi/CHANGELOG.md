@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4
+
+- Place each client-key number beside its display name in Access & Authentication.
+
 ## 0.1.3
 
 - Persist shared client-key names separately from authentication configuration.

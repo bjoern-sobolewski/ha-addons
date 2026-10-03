@@ -24,6 +24,8 @@ COPY patches/cpamc-quota.patch /tmp/cpamc-quota.patch
 RUN git apply --check /tmp/cpamc-quota.patch && git apply /tmp/cpamc-quota.patch
 COPY patches/cpamc-key-names.patch /tmp/cpamc-key-names.patch
 RUN git apply --check /tmp/cpamc-key-names.patch && git apply /tmp/cpamc-key-names.patch
+COPY patches/cpamc-key-layout.patch /tmp/cpamc-key-layout.patch
+RUN git apply --check /tmp/cpamc-key-layout.patch && git apply /tmp/cpamc-key-layout.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/ ./
@@ -40,7 +42,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.3
+ARG BUILD_VERSION=0.1.4
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

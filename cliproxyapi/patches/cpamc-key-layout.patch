@@ -1,0 +1,44 @@
+--- a/src/features/config/components/blocks/ApiKeysCardEditor.tsx
++++ b/src/features/config/components/blocks/ApiKeysCardEditor.tsx
+@@ -170,10 +170,12 @@
+           {apiKeys.map((key, index) => (
+             <div key={renderApiKeyIds[index] ?? `${key}-${index}`} className="item-row">
+               <div className="item-meta">
+-                <div className="pill">#{index + 1}</div>
+-                <div className="item-title">
+-                  {names[nameFingerprints[index]] ||
+-                    t('config_management.visual.api_keys.input_label')}
++                <div className={styles.apiKeyHeading}>
++                  <span className="pill">#{index + 1}</span>
++                  <div className="item-title">
++                    {names[nameFingerprints[index]] ||
++                      t('config_management.visual.api_keys.input_label')}
++                  </div>
+                 </div>
+                 <div className="item-subtitle">{maskApiKey(String(key || ''))}</div>
+               </div>
+--- a/src/features/config/components/blocks/Blocks.module.scss
++++ b/src/features/config/components/blocks/Blocks.module.scss
+@@ -60,6 +60,22 @@
+   transform: none;
+ }
+ 
++.apiKeyHeading {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  min-width: 0;
++
++  :global(.pill) {
++    flex-shrink: 0;
++  }
++
++  :global(.item-title) {
++    min-width: 0;
++    overflow-wrap: anywhere;
++  }
++}
++
+ /* ---------- 通用块布局 ---------- */
+ 
+ .blockHeaderRow {

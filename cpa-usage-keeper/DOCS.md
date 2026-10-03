@@ -61,11 +61,19 @@ cannot replace newer windows. Manual and scheduled provider queries remain
 available for idle accounts and providers without supported traffic metadata.
 
 Quota views read backend caches every ten seconds, without provider queries.
-Polling pauses while hidden, refreshes when visible, and does not overlap. Hover,
-focus or tap the freshness indicator for the source, capture timestamp, relative
-age and account label. Data is stale after fifteen minutes or its reset time.
+Polling pauses while hidden, refreshes when visible, and does not overlap. Focus
+or tap the quota detail control for the source, capture timestamp, relative age
+and account label. Freshness controls follow the remaining amount instead of
+occupying a separate badge column. Data is stale after fifteen minutes or its reset time.
 Cache reads never update capture timestamps. Traffic caches are in memory and
 can be unavailable after restart until traffic or a fallback query arrives.
 
 Reporting never includes credentials. Administrative routes remain private;
 individual-key reporting remains scoped and the all-key role remains read-only.
+
+Overview places Total Requests and cached Usage Limits in equal-width cards,
+stacking them on narrow screens. Its usage auto-refresh setting supports Off,
+10, 30 or 60 seconds and runs only while the page is visible, without overlapping
+usage refreshes or querying provider quota. Existing values and chart samples
+remain visible during background refreshes. A range with one observed bucket
+shows a point at its actual value; missing chart samples remain missing.

@@ -1,11 +1,13 @@
 """Verify selected-account traffic capture, shared caches, and reporting permissions."""
 from pathlib import Path
-import http.cookiejar, json, secrets, tempfile, time
+import http.cookiejar, json, os, secrets, tempfile, time
 import yaml
 from websockets.sync.client import connect
 from smoke import docker, request, eventually
 
 ROOT=Path(__file__).resolve().parents[1]
+CPA_QUOTA_IMAGE=os.environ.get('CPA_QUOTA_IMAGE','ha-cpa-quota:local')
+KEEPER_QUOTA_IMAGE=os.environ.get('KEEPER_QUOTA_IMAGE','ha-keeper-quota:local')
 def main():
  prefix='quota-flow-'+secrets.token_hex(4);network=prefix+'-net'
  names={k:prefix+'-'+k for k in ('mock','cpa','keeper')};volumes=[prefix+'-cpa',prefix+'-keeper']
@@ -23,8 +25,8 @@ def main():
    # The fixture installs its dependency at startup. Do not send failing traffic
    # or let Keeper snapshot partially initialized metadata before it is ready.
    eventually(lambda:json.loads(docker('exec',names['mock'],'python','-c','import urllib.request;print(urllib.request.urlopen("http://localhost:9000/stats").read().decode())'))['calls']==0,timeout=90)
-   docker('create','--name',names['cpa'],'--network',network,'--network-alias','cpa','-v',volumes[0]+':/data','-v',str(config)+':/config:ro','-p','127.0.0.1::8080','-p','127.0.0.1::8317','ha-cpa-quota:local')
-   docker('create','--name',names['keeper'],'--network',network,'-v',volumes[1]+':/data','-p','127.0.0.1::8080','-p','127.0.0.1::8082','ha-keeper-quota:local')
+   docker('create','--name',names['cpa'],'--network',network,'--network-alias','cpa','-v',volumes[0]+':/data','-v',str(config)+':/config:ro','-p','127.0.0.1::8080','-p','127.0.0.1::8317',CPA_QUOTA_IMAGE)
+   docker('create','--name',names['keeper'],'--network',network,'-v',volumes[1]+':/data','-p','127.0.0.1::8080','-p','127.0.0.1::8082',KEEPER_QUOTA_IMAGE)
    for name in ('cpa','keeper'):docker('cp',str(tmp/(name+'.json')),names[name]+':/data/options.json')
    docker('start',names['cpa'])
    api,private=endpoint('cpa',8080),endpoint('cpa',8317)

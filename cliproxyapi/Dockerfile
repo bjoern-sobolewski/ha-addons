@@ -9,11 +9,15 @@ COPY patches/quota-traffic.patch /tmp/quota-traffic.patch
 RUN git apply --check /tmp/quota-traffic.patch && git apply /tmp/quota-traffic.patch
 COPY patches/key-names.patch /tmp/key-names.patch
 RUN git apply --check /tmp/key-names.patch && git apply /tmp/key-names.patch
+COPY patches/oauth-errors.patch /tmp/oauth-errors.patch
+RUN git apply --check /tmp/oauth-errors.patch && git apply /tmp/oauth-errors.patch
+COPY patches/release-review.patch /tmp/release-review.patch
+RUN git apply --check /tmp/release-review.patch && git apply /tmp/release-review.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/ ./
-RUN go test ./internal/quotatraffic ./internal/logging ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
-RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.10-ha.2" -o /out/CLIProxyAPI ./cmd/server
+RUN go test ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
+RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.10-ha.3" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -26,6 +30,10 @@ COPY patches/cpamc-key-names.patch /tmp/cpamc-key-names.patch
 RUN git apply --check /tmp/cpamc-key-names.patch && git apply /tmp/cpamc-key-names.patch
 COPY patches/cpamc-key-layout.patch /tmp/cpamc-key-layout.patch
 RUN git apply --check /tmp/cpamc-key-layout.patch && git apply /tmp/cpamc-key-layout.patch
+COPY patches/cpamc-auth-errors.patch /tmp/cpamc-auth-errors.patch
+RUN git apply --check /tmp/cpamc-auth-errors.patch && git apply /tmp/cpamc-auth-errors.patch
+COPY patches/cpamc-refresh-display.patch /tmp/cpamc-refresh-display.patch
+RUN git apply --check /tmp/cpamc-refresh-display.patch && git apply /tmp/cpamc-refresh-display.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/ ./
@@ -42,7 +50,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.4
+ARG BUILD_VERSION=0.1.5
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

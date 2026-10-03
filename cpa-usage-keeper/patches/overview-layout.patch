@@ -51,7 +51,7 @@ index 0000000..c0e6951
 +import { ApiError, fetchAdminProviderQuota, fetchKeyQuota, fetchReadOnlyQuota, type ViewerQuotaAccount, type ViewerQuotaRow } from '@/lib/api';
 +import { startQuotaPolling } from '@/lib/quotaPolling';
 +import { PortalTooltip, usePortalTooltip } from '@/components/ui/PortalTooltip';
-+import { quotaSourceLabel } from './QuotaFreshness';
++import { quotaSourceLabel } from './quotaSourceLabel';
 +import cardStyles from '@/pages/UsagePage.module.scss';
 +import styles from './OverviewQuotaPanel.module.scss';
 +

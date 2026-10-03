@@ -1,0 +1,601 @@
+diff --git a/web/src/components/dashboard/AutoRefreshControl.module.scss b/web/src/components/dashboard/AutoRefreshControl.module.scss
+new file mode 100644
+index 0000000..bd1af9e
+--- /dev/null
++++ b/web/src/components/dashboard/AutoRefreshControl.module.scss
+@@ -0,0 +1,21 @@
++.control {
++  display: inline-flex;
++  flex: 0 0 auto;
++  align-items: center;
++  > div > button {
++    width: 56px;
++    min-width: 56px;
++    height: 44px;
++    padding: 0 8px;
++    justify-content: center;
++    border: 0;
++    border-radius: 22px;
++    background: transparent;
++    box-shadow: none;
++    font-size: 11px;
++    font-variant-numeric: tabular-nums;
++    color: var(--text-secondary);
++    &:hover { background: var(--toolbar-hover, var(--bg-tertiary)); }
++    &:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
++  }
++}
+diff --git a/web/src/components/dashboard/AutoRefreshControl.tsx b/web/src/components/dashboard/AutoRefreshControl.tsx
+new file mode 100644
+index 0000000..1df42e2
+--- /dev/null
++++ b/web/src/components/dashboard/AutoRefreshControl.tsx
+@@ -0,0 +1,100 @@
++import { useEffect, useRef, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import { Select } from '@/components/ui/Select';
++import styles from './AutoRefreshControl.module.scss';
++
++export const AUTO_REFRESH_STORAGE_KEY = 'keeper-auto-refresh-seconds';
++const INTERVALS = [0, 10, 30, 60] as const;
++
++interface AutoRefreshControlProps {
++  enabled?: boolean;
++  busy?: boolean;
++  onRefresh: () => Promise<unknown>;
++  onError: (error: unknown) => void;
++}
++
++/** Own the clock here so countdown ticks never rerender the charts. */
++export function AutoRefreshControl({ enabled = true, busy = false, onRefresh, onError }: AutoRefreshControlProps) {
++  const { t } = useTranslation();
++  const [seconds, setSeconds] = useState(() => {
++    try {
++      const saved = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
++      const value = saved === null ? 10 : Number(saved);
++      return INTERVALS.some((interval) => interval === value) ? value : 10;
++    } catch { return 10; }
++  });
++  const [remaining, setRemaining] = useState(seconds);
++  const [hidden, setHidden] = useState(document.hidden);
++  const [refreshing, setRefreshing] = useState(false);
++  const current = useRef({ busy, onRefresh, onError });
++  const inFlight = useRef(false);
++
++  useEffect(() => { current.current = { busy, onRefresh, onError }; }, [busy, onRefresh, onError]);
++
++  useEffect(() => {
++    if (!enabled || seconds === 0) return;
++    let disposed = false;
++    let timer: ReturnType<typeof setInterval> | undefined;
++    let deadline = Date.now() + seconds * 1000;
++    const reset = () => {
++      deadline = Date.now() + seconds * 1000;
++      if (!disposed) setRemaining(seconds);
++    };
++    const refresh = async () => {
++      if (inFlight.current || current.current.busy) return;
++      inFlight.current = true;
++      setRefreshing(true);
++      try { await current.current.onRefresh(); }
++      catch (error) { if (!disposed) current.current.onError(error); }
++      finally {
++        inFlight.current = false;
++        if (!disposed) { setRefreshing(false); reset(); }
++      }
++    };
++    const stop = () => { clearInterval(timer); timer = undefined; };
++    const start = () => {
++      stop();
++      reset();
++      timer = setInterval(() => {
++        // A slow request or a manual reload starts a fresh countdown when it finishes.
++        setRefreshing(inFlight.current);
++        if (inFlight.current || current.current.busy) { reset(); return; }
++        const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
++        setRemaining(left);
++        if (left === 0) void refresh();
++      }, 250);
++    };
++    const visibilityChanged = () => {
++      setHidden(document.hidden);
++      if (document.hidden) stop();
++      else { start(); void refresh(); }
++    };
++    setHidden(document.hidden);
++    setRefreshing(inFlight.current);
++    if (!document.hidden) start();
++    document.addEventListener('visibilitychange', visibilityChanged);
++    return () => { disposed = true; stop(); document.removeEventListener('visibilitychange', visibilityChanged); };
++  }, [enabled, seconds]);
++
++  const off = t('auto_refresh.off');
++  const label = seconds === 0 ? off : !enabled || hidden ? t('auto_refresh.paused') : refreshing || busy ? '…' : `${remaining}s`;
++  return (
++    <span className={styles.control} data-auto-refresh title={t('auto_refresh.settings')}>
++      <Select
++        value={String(seconds)}
++        options={INTERVALS.map((interval) => ({ value: String(interval), label: interval === 0 ? off : t('auto_refresh.every', { seconds: interval }) }))}
++        onChange={(value) => {
++          const next = Number(value);
++          setRemaining(next);
++          setSeconds(next);
++          try { localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, value); } catch { /* Session preference still works. */ }
++        }}
++        ariaLabel={t('auto_refresh.settings')}
++        fullWidth={false}
++        dropdownMinWidth={160}
++        showChevron={false}
++        renderValue={() => <span aria-hidden="true">{label}</span>}
++      />
++    </span>
++  );
++}
+diff --git a/web/src/components/dashboard/DashboardToolbar.module.scss b/web/src/components/dashboard/DashboardToolbar.module.scss
+index f868ae4..d097358 100644
+--- a/web/src/components/dashboard/DashboardToolbar.module.scss
++++ b/web/src/components/dashboard/DashboardToolbar.module.scss
+@@ -134,11 +134,11 @@
+ .filter [data-ranking-scope-switch] button[aria-pressed='true'] { color: var(--text-primary); font-weight: 650; }
+ 
+ .host[data-flow='split'] {
+-  .dock { display: grid; width: 100%; grid-template-columns: 44px minmax(0, 1fr) 44px; grid-template-areas: 'collapse navigation refresh' 'filters filters filters'; gap: 4px var(--toolbar-gap); border-radius: 24px; }
++  .dock { display: grid; width: 100%; grid-template-columns: 44px minmax(0, 1fr) auto; grid-template-areas: 'collapse navigation refresh' 'filters filters filters'; gap: 4px var(--toolbar-gap); border-radius: 24px; }
+   .collapse { grid-area: collapse; }
+   .tabs, .pageTrigger { grid-area: navigation; }
+   .pageTrigger { justify-self: start; }
+-  .refresh { grid-area: refresh; }
++  .refreshControls { grid-area: refresh; }
+   .filters {
+     grid-area: filters;
+     display: grid;
+@@ -182,9 +182,11 @@
+   .collapse { display: none; }
+   .filter [data-time-range-trigger] > svg:not(:last-child) { display: none; }
+   .filters { gap: 8px; }
+-  .host[data-flow='split'] .dock { grid-template-columns: minmax(0, 1fr) 44px; grid-template-areas: 'navigation refresh' 'filters filters'; }
++  .host[data-flow='split'] .dock { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'navigation refresh' 'filters filters'; }
+ }
+ @container (max-width: 330px) { .dock { --toolbar-gap: 6px; } }
+ 
+ :global([data-theme='dark']) .host .dock { box-shadow: 0 8px 24px rgb(0 0 0 / 35%), 0 1px 3px rgb(0 0 0 / 25%); }
+ @media (prefers-reduced-motion: reduce) { .selection, .pageTrigger > svg { transition: none; } }
++
++.refreshControls { display: flex; align-items: center; flex: 0 0 auto; position: relative; z-index: 1; }
+diff --git a/web/src/components/dashboard/DashboardToolbar.tsx b/web/src/components/dashboard/DashboardToolbar.tsx
+index 661e535..3fdcca8 100644
+--- a/web/src/components/dashboard/DashboardToolbar.tsx
++++ b/web/src/components/dashboard/DashboardToolbar.tsx
+@@ -22,9 +22,10 @@ interface DashboardToolbarProps<T extends string> {
+   onRefresh: () => void;
+   refreshing?: boolean;
+   refreshDisabled?: boolean;
++  autoRefreshControl?: ReactNode;
+ }
+ 
+-export function DashboardToolbar<T extends string>({ items, activeId, onNavigate, filters = [], onRefresh, refreshing = false, refreshDisabled = false }: DashboardToolbarProps<T>) {
++export function DashboardToolbar<T extends string>({ items, activeId, onNavigate, filters = [], onRefresh, refreshing = false, refreshDisabled = false, autoRefreshControl }: DashboardToolbarProps<T>) {
+   const { t, i18n } = useTranslation();
+   const [collapsed, setCollapsed] = useState(() => {
+     try { return localStorage.getItem(COLLAPSED_STORAGE_KEY) !== 'false'; } catch { return true; }
+@@ -224,9 +225,12 @@ export function DashboardToolbar<T extends string>({ items, activeId, onNavigate
+             {filter}
+           </div>)}
+         </div>}
+-        <button type="button" className={styles.refresh} data-dashboard-refresh aria-label={t('usage_stats.refresh')} aria-busy={refreshing} title={t('usage_stats.refresh')} disabled={refreshDisabled || refreshing} onClick={onRefresh}>
+-          {refreshing ? <LoadingSpinner size={16} /> : <IconRefreshCw size={16} aria-hidden="true" />}
+-        </button>
++        <div className={styles.refreshControls}>
++          <button type="button" className={styles.refresh} data-dashboard-refresh aria-label={t('usage_stats.refresh')} aria-busy={refreshing} title={t('usage_stats.refresh')} disabled={refreshDisabled || refreshing} onClick={onRefresh}>
++            {refreshing ? <LoadingSpinner size={16} /> : <IconRefreshCw size={16} aria-hidden="true" />}
++          </button>
++          {autoRefreshControl}
++        </div>
+       </div>
+         {menuOpen && <div ref={menuRef} id={menuId} className={styles.pageMenu} data-dashboard-page-menu role="menu" aria-label={t('usage_stats.tabs_aria_label')} onKeyDown={(event) => {
+           const choices = Array.from(menuRef.current?.querySelectorAll<HTMLAnchorElement>('a') ?? []);
+diff --git a/web/src/components/dashboard/test/AutoRefreshControl.test.tsx b/web/src/components/dashboard/test/AutoRefreshControl.test.tsx
+new file mode 100644
+index 0000000..1f322ee
+--- /dev/null
++++ b/web/src/components/dashboard/test/AutoRefreshControl.test.tsx
+@@ -0,0 +1,124 @@
++// @vitest-environment happy-dom
++import { act } from 'react';
++import { createRoot, type Root } from 'react-dom/client';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { AUTO_REFRESH_STORAGE_KEY, AutoRefreshControl } from '../AutoRefreshControl';
++
++globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, args?: { seconds: number }) => args ? `Every ${args.seconds}s` : key }) }));
++
++describe('AutoRefreshControl', () => {
++  let root: Root;
++  let container: HTMLDivElement;
++  let hidden: boolean;
++  const refresh = vi.fn<() => Promise<unknown>>();
++  const onError = vi.fn();
++  beforeEach(() => {
++    vi.useFakeTimers();
++    localStorage.clear();
++    vi.clearAllMocks();
++    refresh.mockResolvedValue(undefined);
++    hidden = false;
++    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
++    container = document.createElement('div');
++    document.body.append(container);
++    root = createRoot(container);
++  });
++  afterEach(async () => {
++    await act(async () => root.unmount());
++    document.body.replaceChildren();
++    vi.restoreAllMocks();
++    vi.useRealTimers();
++  });
++  const render = async (busy = false, enabled = true) => act(async () => root.render(<AutoRefreshControl busy={busy} enabled={enabled} onRefresh={refresh} onError={onError} />));
++  const advance = async (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
++  const choose = async (seconds: number) => {
++    await act(async () => container.querySelector<HTMLButtonElement>('button')!.click());
++    const label = seconds === 0 ? 'auto_refresh.off' : `Every ${seconds}s`;
++    const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(node => node.textContent?.includes(label));
++    expect(option).toBeTruthy();
++    await act(async () => option!.click());
++  };
++
++  it('counts down from the existing 10s default and refreshes without remounting the control', async () => {
++    await render();
++    const button = container.querySelector('button');
++    expect(button?.textContent).toContain('10s');
++    await advance(3000);
++    expect(button?.textContent).toContain('7s');
++    await advance(7000);
++    expect(refresh).toHaveBeenCalledTimes(1);
++    expect(container.querySelector('button')).toBe(button);
++    expect(button?.textContent).toContain('10s');
++  });
++
++  it('offers and saves 30s, 60s and Off, and restores the preference on remount', async () => {
++    await render();
++    await choose(30);
++    expect(localStorage.getItem(AUTO_REFRESH_STORAGE_KEY)).toBe('30');
++    await advance(29000);
++    expect(refresh).not.toHaveBeenCalled();
++    await advance(1000);
++    expect(refresh).toHaveBeenCalledTimes(1);
++    await choose(60);
++    await advance(59000);
++    expect(refresh).toHaveBeenCalledTimes(1);
++    await advance(1000);
++    expect(refresh).toHaveBeenCalledTimes(2);
++    await choose(0);
++    await advance(120000);
++    expect(refresh).toHaveBeenCalledTimes(2);
++    await act(async () => root.unmount());
++    root = createRoot(container);
++    await render();
++    expect(container.textContent).toContain('auto_refresh.off');
++    await advance(120000);
++    expect(refresh).toHaveBeenCalledTimes(2);
++  });
++
++  it('pauses while hidden and refreshes immediately on return, with no requests when disabled', async () => {
++    await render();
++    hidden = true;
++    await act(async () => document.dispatchEvent(new Event('visibilitychange')));
++    await advance(60000);
++    expect(refresh).not.toHaveBeenCalled();
++    hidden = false;
++    await act(async () => document.dispatchEvent(new Event('visibilitychange')));
++    expect(refresh).toHaveBeenCalledTimes(1);
++    await advance(10000);
++    expect(refresh).toHaveBeenCalledTimes(2);
++    await render(false, false);
++    await advance(60000);
++    expect(refresh).toHaveBeenCalledTimes(2);
++  });
++
++  it('does not overlap slow requests or manual reloads and retries after an error', async () => {
++    let reject!: (error: unknown) => void;
++    refresh.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
++    await render();
++    await advance(10000);
++    await advance(30000);
++    expect(refresh).toHaveBeenCalledTimes(1);
++    const error = new Error('Network failure');
++    await act(async () => reject(error));
++    expect(onError).toHaveBeenCalledWith(error);
++    await render(true);
++    await advance(20000);
++    expect(refresh).toHaveBeenCalledTimes(1);
++    await render(false);
++    await advance(10000);
++    expect(refresh).toHaveBeenCalledTimes(2);
++  });
++
++  it('does not get stuck refreshing when settings change during a request', async () => {
++    let resolve!: () => void;
++    refresh.mockImplementationOnce(() => new Promise<void>((done) => { resolve = done; }));
++    await render();
++    await advance(10000);
++    await choose(30);
++    await act(async () => resolve());
++    await advance(1000);
++    expect(container.textContent).toContain('29s');
++    expect(refresh).toHaveBeenCalledTimes(1);
++  });
++});
+diff --git a/web/src/components/usage/LatencyScatterChart.tsx b/web/src/components/usage/LatencyScatterChart.tsx
+index 386fffc..e7d1cd8 100644
+--- a/web/src/components/usage/LatencyScatterChart.tsx
++++ b/web/src/components/usage/LatencyScatterChart.tsx
+@@ -382,17 +382,18 @@ function buildLatencyDiagnosticsChartOptions({
+   };
+ }
+ 
+-export function LatencyScatterChart({ diagnostics, isDark, isMobile, labels, formatDuration = formatDurationMs }: {
++export function LatencyScatterChart({ diagnostics, isDark, isMobile, labels, animate = true, formatDuration = formatDurationMs }: {
+   diagnostics: LatencyScatterData;
+   isDark: boolean;
+   isMobile: boolean;
+   labels: LatencyScatterLabels;
++  animate?: boolean;
+   formatDuration?: (value: number) => string;
+ }) {
+   const chartTheme = useMemo(() => getUsageChartTheme(isDark), [isDark]);
+   const colors = useMemo(() => getLatencyColors(isDark), [isDark]);
+   const chartData = useMemo(() => buildLatencyDiagnosticsChartData(diagnostics, labels.samples, colors), [diagnostics, labels.samples, colors]);
+-  const chartOptions = useMemo(() => buildLatencyDiagnosticsChartOptions({ diagnostics, chartTheme, isMobile, labels, colors, formatDuration }), [diagnostics, chartTheme, isMobile, labels, colors, formatDuration]);
++  const chartOptions = useMemo(() => ({ ...buildLatencyDiagnosticsChartOptions({ diagnostics, chartTheme, isMobile, labels, colors, formatDuration }), animation: animate ? undefined : false as const }), [diagnostics, chartTheme, isMobile, labels, colors, formatDuration, animate]);
+   const plugin = useMemo(() => createLatencyDiagnosticsPlugin(formatDuration), [formatDuration]);
+   return <Scatter data={chartData} options={chartOptions} plugins={[plugin]} />;
+ }
+diff --git a/web/src/components/usage/OverviewRealtimePanel.tsx b/web/src/components/usage/OverviewRealtimePanel.tsx
+index 811a36a..7daef74 100644
+--- a/web/src/components/usage/OverviewRealtimePanel.tsx
++++ b/web/src/components/usage/OverviewRealtimePanel.tsx
+@@ -265,6 +265,7 @@ function buildThroughputOptions(
+   return {
+     responsive: true,
+     maintainAspectRatio: false,
++    animation: false,
+     interaction: { mode: 'index', intersect: false },
+     plugins: {
+       legend: {
+@@ -658,7 +659,7 @@ export function OverviewRealtimePanel({ realtime, loading, error, window, onWind
+               className={styles.overviewRealtimeLatencyScatterCard}
+             >
+               <RealtimeChartFrame loading={loading} emptyLabel={latencyEmptyLabel}>
+-                <LatencyScatterChart diagnostics={latencyScatter} isDark={isDark} isMobile={isMobile} labels={latencyLabels} formatDuration={formatRealtimeDuration} />
++                <LatencyScatterChart animate={false} diagnostics={latencyScatter} isDark={isDark} isMobile={isMobile} labels={latencyLabels} formatDuration={formatRealtimeDuration} />
+               </RealtimeChartFrame>
+             </RealtimeCard>
+ 
+diff --git a/web/src/components/usage/hooks/test/useSparklines.refresh.test.tsx b/web/src/components/usage/hooks/test/useSparklines.refresh.test.tsx
+new file mode 100644
+index 0000000..62d3a43
+--- /dev/null
++++ b/web/src/components/usage/hooks/test/useSparklines.refresh.test.tsx
+@@ -0,0 +1,40 @@
++// @vitest-environment happy-dom
++import { act, useEffect } from 'react';
++import { createRoot } from 'react-dom/client';
++import { expect, it, vi } from 'vitest';
++import { Line } from 'react-chartjs-2';
++import { useSparklines, type SparklineBundle } from '../useSparklines';
++import type { UsageOverviewPayload } from '../useUsageData';
++import { sparklineOptions } from '@/utils/usage/chartConfig';
++
++globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++vi.mock('react-chartjs-2', () => ({ Line: () => <canvas /> }));
++
++it('keeps the same chart and data while loading and updates it without animation', async () => {
++  let bundle: SparklineBundle | null = null;
++  const usage = { series: { buckets: ['2026-10-03T10:00:00Z'], requests: [2] } } as UsageOverviewPayload;
++  function Chart({ loading, data }: { loading: boolean; data: UsageOverviewPayload | null }) {
++    const next = useSparklines({ usage: data, loading }).requestsSparkline;
++    useEffect(() => { bundle = next; }, [next]);
++    return next ? <Line data={next.data} options={sparklineOptions} /> : null;
++  }
++  const container = document.createElement('div');
++  const root = createRoot(container);
++  try {
++    await act(async () => root.render(<Chart loading data={null} />));
++    expect(container.querySelector('canvas')).toBeNull();
++    await act(async () => root.render(<Chart loading={false} data={usage} />));
++    const canvas = container.querySelector('canvas');
++    const oldBundle = bundle;
++    await act(async () => root.render(<Chart loading data={usage} />));
++    expect(container.querySelector('canvas')).toBe(canvas);
++    expect(bundle).toBe(oldBundle);
++    // A failed refresh retains the previous data too.
++    await act(async () => root.render(<Chart loading={false} data={usage} />));
++    expect(bundle).toBe(oldBundle);
++    await act(async () => root.render(<Chart loading={false} data={{ ...usage, series: { ...usage.series!, requests: [3] } }} />));
++    expect(container.querySelector('canvas')).toBe(canvas);
++    expect((bundle as SparklineBundle | null)?.data.datasets[0].data).toEqual([3]);
++    expect(sparklineOptions.animation).toBe(false);
++  } finally { await act(async () => root.unmount()); }
++});
+diff --git a/web/src/components/usage/hooks/useSparklines.ts b/web/src/components/usage/hooks/useSparklines.ts
+index fec2532..68fb46c 100644
+--- a/web/src/components/usage/hooks/useSparklines.ts
++++ b/web/src/components/usage/hooks/useSparklines.ts
+@@ -86,7 +86,7 @@ export function buildUsageSparklineSeries({ usage }: Omit<UseSparklinesOptions,
+   };
+ }
+ 
+-export function useSparklines({ usage, loading }: UseSparklinesOptions): UseSparklinesReturn {
++export function useSparklines({ usage }: UseSparklinesOptions): UseSparklinesReturn {
+   const series = useMemo(
+     () => buildUsageSparklineSeries({ usage }),
+     [usage]
+@@ -98,7 +98,7 @@ export function useSparklines({ usage, loading }: UseSparklinesOptions): UseSpar
+       color: string,
+       backgroundColor: string
+     ): SparklineBundle | null => {
+-      if (loading || !input?.data?.length) {
++      if (!input?.data?.length) {
+         return null;
+       }
+       return {
+@@ -118,7 +118,7 @@ export function useSparklines({ usage, loading }: UseSparklinesOptions): UseSpar
+         }
+       };
+     },
+-    [loading]
++    []
+   );
+ 
+   const requestsSparkline = useMemo(
+diff --git a/web/src/components/usage/test/OverviewRealtimePanel.logic.test.tsx b/web/src/components/usage/test/OverviewRealtimePanel.logic.test.tsx
+index 17f4237..ffefaa9 100644
+--- a/web/src/components/usage/test/OverviewRealtimePanel.logic.test.tsx
++++ b/web/src/components/usage/test/OverviewRealtimePanel.logic.test.tsx
+@@ -130,6 +130,8 @@ describe('OverviewRealtimePanel', () => {
+         borderDash: [6, 4],
+       },
+     ]);
++    expect(chartCapture.lineCalls[0].options.animation).toBe(false);
++    expect(chartCapture.scatterCalls[0].options.animation).toBe(false);
+     expect(chartCapture.lineCalls[0].options).toMatchObject({
+       plugins: {
+         legend: {
+diff --git a/web/src/features/key-viewer/KeyViewerShell.tsx b/web/src/features/key-viewer/KeyViewerShell.tsx
+index 75110c7..0b531ab 100644
+--- a/web/src/features/key-viewer/KeyViewerShell.tsx
++++ b/web/src/features/key-viewer/KeyViewerShell.tsx
+@@ -25,6 +25,7 @@ interface KeyViewerShellProps {
+   onRefresh: () => void;
+   refreshing?: boolean;
+   refreshDisabled?: boolean;
++  autoRefreshControl?: ReactNode;
+   children: ReactNode;
+   onNavigate: (path: KeyViewerPath) => void;
+   onAuthRequired?: () => void;
+@@ -39,6 +40,7 @@ export function KeyViewerShell({
+   onRefresh,
+   refreshing,
+   refreshDisabled,
++  autoRefreshControl,
+   children,
+   onNavigate,
+   onAuthRequired,
+@@ -81,6 +83,7 @@ export function KeyViewerShell({
+               onRefresh={onRefresh}
+               refreshing={refreshing}
+               refreshDisabled={refreshDisabled}
++              autoRefreshControl={autoRefreshControl}
+             />
+ 
+             {children}
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index 40b005a..95a33e4 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -21,6 +21,7 @@ const resources = {
+   en: {
+     translation: {
+       read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
++      auto_refresh: { settings: 'Auto-refresh settings', off: 'Off', paused: 'Paused', every: 'Every {{seconds}}s' },
+       common: {
+         loading: 'Loading...',
+         save: 'Save',
+@@ -966,6 +967,7 @@ const resources = {
+   zh: {
+     translation: {
+       read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
++      auto_refresh: { settings: '自动刷新设置', off: '关闭', paused: '已暂停', every: '每 {{seconds}} 秒' },
+       common: {
+         loading: '加载中...',
+         save: '保存',
+@@ -1911,6 +1913,7 @@ const resources = {
+   'zh-TW': {
+     translation: {
+       read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
++      auto_refresh: { settings: '自動重新整理設定', off: '關閉', paused: '已暫停', every: '每 {{seconds}} 秒' },
+       common: {
+         loading: '載入中...',
+         save: '儲存',
+diff --git a/web/src/pages/KeyOverviewPage.tsx b/web/src/pages/KeyOverviewPage.tsx
+index 9d60e3a..92e16ce 100644
+--- a/web/src/pages/KeyOverviewPage.tsx
++++ b/web/src/pages/KeyOverviewPage.tsx
+@@ -1,3 +1,4 @@
++import { AutoRefreshControl } from '@/components/dashboard/AutoRefreshControl';
+ import { UsageComparisonCharts } from '@/components/usage/UsageComparisonCharts';
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+@@ -327,12 +328,6 @@ export function KeyOverviewPage({ page = 'overview', apiKey, readOnly = false, s
+     setError('KEY_OVERVIEW_LOAD_FAILED');
+   }, [onAuthRequired]);
+ 
+-  useEffect(() => scheduleKeyOverviewAutoRefresh({
+-    refreshOverview: () => refreshKeyOverview({ skipIfInFlight: true }),
+-    onRefreshError: handleAutoRefreshError,
+-    intervalMs: KEY_OVERVIEW_AUTO_REFRESH_INTERVAL_MS,
+-  }), [handleAutoRefreshError, refreshKeyOverview]);
+-
+   useEffect(() => {
+     persistKeyViewerTimeRange(timeRangeState);
+   }, [timeRangeState]);
+@@ -392,6 +387,7 @@ export function KeyOverviewPage({ page = 'overview', apiKey, readOnly = false, s
+       onRefresh={() => void handleManualRefresh()}
+       refreshing={manualRefreshLoading}
+       refreshDisabled={refreshDisabled}
++      autoRefreshControl={<AutoRefreshControl busy={manualRefreshLoading} onRefresh={() => refreshKeyOverview({ skipIfInFlight: true })} onError={handleAutoRefreshError} />}
+       onNavigate={onNavigate}
+       onAuthRequired={onAuthRequired}
+     >
+diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
+index dc8ce0c..9564a0e 100644
+--- a/web/src/pages/UsagePage.tsx
++++ b/web/src/pages/UsagePage.tsx
+@@ -54,6 +54,7 @@ import type { Theme } from '@/types';
+ import { BrandLink } from '@/components/BrandLink';
+ import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
+ import { DashboardToolbar } from '@/components/dashboard/DashboardToolbar';
++import { AutoRefreshControl } from '@/components/dashboard/AutoRefreshControl';
+ import { cpamcEmbedSearch, isCPAMCEmbed } from '@/embed/cpamcEmbed';
+ import { RankingPage } from '@/features/ranking/RankingPage';
+ import { RankingScopeSwitch } from '@/features/ranking/components/RankingScopeSwitch';
+@@ -1866,11 +1867,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+     }
+   }, [onAuthRequired, showTopNotice, t]);
+ 
+-  useEffect(() => scheduleOverviewAutoRefresh({
+-    enabled: autoRefreshEnabled,
+-    refreshOverview: refreshAutoRefreshTab,
+-    onRefreshError: handleAutoRefreshError,
+-  }), [autoRefreshEnabled, handleAutoRefreshError, refreshAutoRefreshTab]);
++  const autoRefreshControl = <AutoRefreshControl enabled={autoRefreshEnabled} busy={manualRefreshLoading} onRefresh={refreshAutoRefreshTab} onError={handleAutoRefreshError} />;
+ 
+ 	  useHeaderRefresh(refreshActiveTab);
+ 
+@@ -2199,6 +2196,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+                         </>
+                       )}
+                     </MainActionButton>
++                    {autoRefreshControl}
+                   </div>
+                 </div>
+               </div>
+@@ -2223,6 +2221,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+               ] : showRankingScopeControl ? [<RankingScopeSwitch key="ranking-scope" value={rankingScope} onChange={handleRankingScopeChange} />] : []}
+               onRefresh={() => void handleManualRefresh().catch(() => {})}
+               refreshing={manualRefreshLoading}
++              autoRefreshControl={autoRefreshControl}
+             />}
+ 
+             {activeTab === 'overview' && (error || comparisonsError) && <div className={styles.errorBox}>{(error || comparisonsError) === 'AUTH_REQUIRED' ? t('auth.session_expired') : (error || comparisonsError)}</div>}
+diff --git a/web/src/utils/usage/chartConfig.ts b/web/src/utils/usage/chartConfig.ts
+index c9d675d..5eb09ef 100644
+--- a/web/src/utils/usage/chartConfig.ts
++++ b/web/src/utils/usage/chartConfig.ts
+@@ -96,6 +96,7 @@ export const buildUsageChartTooltipStyle = (chartTheme: UsageChartTheme) => ({
+  * Static sparkline chart options (no dependencies on theme/mobile)
+  */
+ export const sparklineOptions: ChartOptions<'line'> = {
++  animation: false,
+   responsive: true,
+   maintainAspectRatio: false,
+   plugins: { legend: { display: false }, tooltip: { enabled: false } },

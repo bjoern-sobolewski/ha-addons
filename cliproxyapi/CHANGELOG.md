@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.5
+
+- Replace corrupted quota text and separate freshness badges with a small inline refresh icon and age after the remaining amount.
+- Validate quota numeric/time fields, bound cache eviction and shared name metadata, and reject observations from a previous provider.
+- Preserve shared key names and management-only quota access.
+
+- Show an OAuth Login action when Codex refresh tokens expire or are reused, including partial refresh-all failures.
+- Avoid retrying terminal refresh-token failures and keep usable access tokens until their expiry.
+- Record one safe warning per credential/failure condition and a recovery event without token bodies or account names.
+- Ignore management 401s from an earlier CPAMC connection and record focused, credential-free diagnostics for current authentication failures.
+
 ## 0.1.4
 
 - Place each client-key number beside its display name in Access & Authentication.

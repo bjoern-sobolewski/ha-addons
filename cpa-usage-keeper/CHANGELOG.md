@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.16
+
+- Include the approved compact Overview layout and visible-tab automatic usage refresh control.
+- Place a small refresh icon and age after remaining quota; retain keyboard-accessible provenance without a separate badge.
+- Keep traffic quota polling alive after startup and cancel it cleanly on shutdown.
+- Preserve API-provider cache reporting with account/type revalidation and separate OAuth history handling.
+- Harden read-only session migration, report sanitization and CSV exports while preserving existing report filters and historical-key access.
+
+
 ## 0.1.15
 
 - Align each quota window, remaining bar, percentage and info icon on one compact line, with a labeled Window header and a separate reset countdown.

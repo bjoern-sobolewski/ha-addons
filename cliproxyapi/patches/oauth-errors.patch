@@ -1,0 +1,507 @@
+diff --git a/internal/api/handlers/management/auth_files.go b/internal/api/handlers/management/auth_files.go
+index 0a4ed74..fb6a66d 100644
+--- a/internal/api/handlers/management/auth_files.go
++++ b/internal/api/handlers/management/auth_files.go
+@@ -4,6 +4,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
+ 	"os"
+ 	"path/filepath"
+ 	"sort"
+@@ -667,6 +668,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
+ 		"source":         "memory",
+ 		"size":           int64(0),
+ 	}
++	if auth.LastError != nil && refreshdiagnostic.IsReason(auth.LastError.Code) {
++		entry["reauth_required"] = true
++		entry["reauth_reason"] = auth.LastError.Code
++	}
+ 	entry["success"] = auth.Success
+ 	entry["failed"] = auth.Failed
+ 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
+diff --git a/internal/api/handlers/management/auth_files_diagnostic_test.go b/internal/api/handlers/management/auth_files_diagnostic_test.go
+new file mode 100644
+index 0000000..ff3202c
+--- /dev/null
++++ b/internal/api/handlers/management/auth_files_diagnostic_test.go
+@@ -0,0 +1,52 @@
++package management
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++)
++
++type terminalRefreshExecutor struct{ refreshRecordExecutor }
++
++func (e *terminalRefreshExecutor) Refresh(context.Context, *coreauth.Auth) (*coreauth.Auth, error) {
++	return nil, refreshdiagnostic.FromResponse(401, []byte(`{"error":{"code":"refresh_token_expired","message":"secret-fixture"}}`))
++}
++
++func TestRefreshAuthFilesTerminalDiagnosticKeepsManagementStatus(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	manager := coreauth.NewManager(nil, nil, nil)
++	manager.RegisterExecutor(&terminalRefreshExecutor{refreshRecordExecutor{provider: "codex"}})
++	ctx := context.Background()
++	_, err := manager.Register(ctx, &coreauth.Auth{ID: "fixture.json", FileName: "fixture.json", Provider: "codex", Status: coreauth.StatusActive, Metadata: map[string]any{"refresh_token": "fixture"}, Attributes: map[string]string{"path": "fixture.json"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
++	engine := gin.New()
++	engine.POST("/credentials/refresh", handler.RefreshAuthFiles)
++	for _, test := range []struct {
++		body   string
++		status int
++	}{{`{"name":"fixture.json"}`, 500}, {`{"all":true}`, 200}} {
++		response := httptest.NewRecorder()
++		request := httptest.NewRequest(http.MethodPost, "/credentials/refresh", strings.NewReader(test.body))
++		request.Header.Set("Content-Type", "application/json")
++		engine.ServeHTTP(response, request)
++		body := response.Body.String()
++		if response.Code != test.status || !strings.Contains(body, `"reauth_required":true`) || !strings.Contains(body, "refresh_token_expired") || strings.Contains(body, "secret-fixture") {
++			t.Fatalf("response %d %s", response.Code, body)
++		}
++	}
++	auth, _ := manager.GetByID("fixture.json")
++	entry := handler.buildAuthFileEntryLocked(auth)
++	if entry["reauth_required"] != true || entry["reauth_reason"] != "refresh_token_expired" {
++		t.Fatalf("list diagnostic absent: %+v", entry)
++	}
++}
+diff --git a/internal/api/handlers/management/auth_files_refresh.go b/internal/api/handlers/management/auth_files_refresh.go
+index 7955ff1..e00bf62 100644
+--- a/internal/api/handlers/management/auth_files_refresh.go
++++ b/internal/api/handlers/management/auth_files_refresh.go
+@@ -2,6 +2,7 @@ package management
+ 
+ import (
+ 	"errors"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
+ 	"io"
+ 	"net/http"
+ 	"strings"
+@@ -63,6 +64,10 @@ func (h *Handler) RefreshAuthFiles(c *gin.Context) {
+ 
+ 	refreshed, err := h.authManager.ForceRefreshAuth(ctx, targetAuth.ID)
+ 	if err != nil {
++		if reason := refreshdiagnostic.Reason(err); reason != "" {
++			c.JSON(http.StatusInternalServerError, gin.H{"error": refreshdiagnostic.Code, "message": refreshdiagnostic.Message, "provider": "codex", "reason": reason, "reauth_required": true, "retryable": false})
++			return
++		}
+ 		c.JSON(http.StatusInternalServerError, gin.H{
+ 			"error": err.Error(),
+ 		})
+diff --git a/internal/auth/codex/openai_auth.go b/internal/auth/codex/openai_auth.go
+index f676116..ce7c50d 100644
+--- a/internal/auth/codex/openai_auth.go
++++ b/internal/auth/codex/openai_auth.go
+@@ -8,6 +8,7 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
+ 	"io"
+ 	"net/http"
+ 	"net/url"
+@@ -245,7 +246,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
+ 	}
+ 
+ 	if resp.StatusCode != http.StatusOK {
+-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
++		return nil, refreshdiagnostic.FromResponse(resp.StatusCode, body)
+ 	}
+ 
+ 	var tokenResp struct {
+@@ -328,7 +329,6 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
+ 			return tokenData, nil
+ 		}
+ 		if isNonRetryableRefreshErr(err) {
+-			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
+ 			return nil, err
+ 		}
+ 
+@@ -343,8 +343,7 @@ func isNonRetryableRefreshErr(err error) bool {
+ 	if err == nil {
+ 		return false
+ 	}
+-	raw := strings.ToLower(err.Error())
+-	return strings.Contains(raw, "refresh_token_reused")
++	return refreshdiagnostic.Reason(err) != ""
+ }
+ 
+ // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
+diff --git a/internal/auth/codex/openai_auth_test.go b/internal/auth/codex/openai_auth_test.go
+index b0c8667..64c92e2 100644
+--- a/internal/auth/codex/openai_auth_test.go
++++ b/internal/auth/codex/openai_auth_test.go
+@@ -67,6 +67,18 @@ func resetCodexRefreshGroupForTest() {
+ 	codexRefreshGroup = singleflight.Group{}
+ }
+ 
++func TestRefreshTokensWithRetry_ExpiredOnlyAttemptsOnceAndRedactsBody(t *testing.T) {
++	var calls int
++	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
++		calls++
++		return &http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"refresh_token_expired","message":"secret@example.com token-secret"}}`)), Header: make(http.Header), Request: req}, nil
++	})}}
++	_, err := auth.RefreshTokensWithRetry(context.Background(), "fixture-expired", 3)
++	if err == nil || calls != 1 || !strings.Contains(err.Error(), "refresh_token_expired") || strings.Contains(err.Error(), "secret") {
++		t.Fatalf("calls=%d error=%v", calls, err)
++	}
++}
++
+ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
+ 	var calls int32
+ 	auth := &CodexAuth{
+diff --git a/internal/refreshdiagnostic/error.go b/internal/refreshdiagnostic/error.go
+new file mode 100644
+index 0000000..c1b7350
+--- /dev/null
++++ b/internal/refreshdiagnostic/error.go
+@@ -0,0 +1,60 @@
++// Package refreshdiagnostic exposes safe OAuth refresh failure diagnostics.
++package refreshdiagnostic
++
++import (
++	"encoding/json"
++	"errors"
++	"fmt"
++)
++
++const Code = "provider_reauthentication_required"
++const Message = "The provider refresh token is no longer usable. Sign in again through OAuth Login."
++
++type Error struct {
++	Status int
++	Reason string
++}
++
++func (e *Error) Error() string {
++	if e.Reason != "" {
++		return fmt.Sprintf("token refresh failed with status %d: %s; %s", e.Status, e.Reason, Message)
++	}
++	return fmt.Sprintf("token refresh failed with status %d", e.Status)
++}
++func (e *Error) StatusCode() int { return e.Status }
++
++func IsReason(reason string) bool {
++	return reason == "refresh_token_expired" || reason == "refresh_token_reused"
++}
++
++// FromResponse deliberately discards upstream messages and unknown fields.
++func FromResponse(status int, body []byte) error {
++	var response struct {
++		Code  string          `json:"code"`
++		Error json.RawMessage `json:"error"`
++	}
++	result := &Error{Status: status}
++	if json.Unmarshal(body, &response) == nil && (status == 400 || status == 401) {
++		code := response.Code
++		if code == "" {
++			var nested struct {
++				Code string `json:"code"`
++			}
++			if json.Unmarshal(response.Error, &nested) == nil {
++				code = nested.Code
++			}
++		}
++		if IsReason(code) {
++			result.Reason = code
++		}
++	}
++	return result
++}
++
++func Reason(err error) string {
++	var diagnostic *Error
++	if errors.As(err, &diagnostic) && diagnostic != nil && IsReason(diagnostic.Reason) {
++		return diagnostic.Reason
++	}
++	return ""
++}
+diff --git a/internal/refreshdiagnostic/error_test.go b/internal/refreshdiagnostic/error_test.go
+new file mode 100644
+index 0000000..f89bef5
+--- /dev/null
++++ b/internal/refreshdiagnostic/error_test.go
+@@ -0,0 +1,28 @@
++package refreshdiagnostic
++
++import (
++	"fmt"
++	"strings"
++	"testing"
++)
++
++func TestSafeRefreshDiagnostics(t *testing.T) {
++	for _, test := range []struct {
++		status       int
++		body, reason string
++	}{
++		{401, `{"error":{"code":"refresh_token_expired","message":"secret@example.com token-secret"}}`, "refresh_token_expired"},
++		{400, `{"error":"invalid_grant","code":"refresh_token_reused"}`, "refresh_token_reused"},
++		{401, `{"error":{"code":"access_token_expired"}}`, ""},
++		{503, `{"code":"refresh_token_expired"}`, ""},
++		{401, `token-secret`, ""},
++	} {
++		err := FromResponse(test.status, []byte(test.body))
++		if got := Reason(fmt.Errorf("wrapped: %w", err)); got != test.reason {
++			t.Fatalf("reason %q, want %q", got, test.reason)
++		}
++		if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "@") {
++			t.Fatal("upstream details leaked")
++		}
++	}
++}
+diff --git a/sdk/cliproxy/auth/conductor_cooldown.go b/sdk/cliproxy/auth/conductor_cooldown.go
+index 2770295..8454b48 100644
+--- a/sdk/cliproxy/auth/conductor_cooldown.go
++++ b/sdk/cliproxy/auth/conductor_cooldown.go
+@@ -5,6 +5,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
+ 	"io"
+ 	"net"
+ 	"net/http"
+@@ -1669,7 +1670,7 @@ func isUnauthorizedError(err error) bool {
+ 	if err == nil {
+ 		return false
+ 	}
+-	if statusCodeFromError(err) == http.StatusUnauthorized {
++	if refreshdiagnostic.Reason(err) != "" || statusCodeFromError(err) == http.StatusUnauthorized {
+ 		return true
+ 	}
+ 	raw := strings.ToLower(err.Error())
+@@ -1681,7 +1682,7 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
+ 		return false
+ 	}
+ 	if auth.Unavailable && auth.Status == StatusError && auth.NextRefreshAfter.IsZero() &&
+-		(auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized")) {
++		(auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(auth.LastError.Code, "unauthorized") || refreshdiagnostic.IsReason(auth.LastError.Code)) {
+ 		return true
+ 	}
+ 	return false
+@@ -1725,6 +1726,11 @@ func refreshErrorFromError(err error) *Error {
+ 		authErr.Code = "unauthorized"
+ 		authErr.Retryable = false
+ 	}
++	if reason := refreshdiagnostic.Reason(err); reason != "" {
++		authErr.Code = reason
++		authErr.Message = refreshdiagnostic.Message
++		authErr.Retryable = false
++	}
+ 	return authErr
+ }
+ 
+diff --git a/sdk/cliproxy/auth/conductor_refresh.go b/sdk/cliproxy/auth/conductor_refresh.go
+index 6112a5f..0075052 100644
+--- a/sdk/cliproxy/auth/conductor_refresh.go
++++ b/sdk/cliproxy/auth/conductor_refresh.go
+@@ -2,9 +2,11 @@ package auth
+ 
+ import (
+ 	"context"
++	"crypto/sha256"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
+ 	"net/http"
+ 	"strconv"
+ 	"strings"
+@@ -382,7 +384,9 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
+ }
+ 
+ type authRefreshLock struct {
+-	mu sync.Mutex
++	mu               sync.Mutex
++	diagnosticReason string
++	diagnosticEpoch  uint64
+ }
+ 
+ func authAccessToken(auth *Auth) string {
+@@ -615,6 +619,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+ 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
+ 	now := time.Now()
+ 	if err != nil {
++		reauthReason := refreshdiagnostic.Reason(err)
+ 		unauthorized := isUnauthorizedError(err)
+ 		invalidGrant := isInvalidGrantError(err)
+ 		shouldReschedule := false
+@@ -626,6 +631,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+ 				m.mu.Unlock()
+ 				return nil, err
+ 			}
++			if reauthReason != "" && (lock.diagnosticReason != reauthReason || lock.diagnosticEpoch != current.RegistrationEpoch) {
++				fingerprint := sha256.Sum256([]byte(current.ID))
++				log.WithFields(log.Fields{"provider": "codex", "credential_ref": fmt.Sprintf("%x", fingerprint[:6]), "upstream_status": statusCodeFromError(err), "reason": reauthReason, "reauth_required": true, "retryable": false}).Warn("OAuth refresh requires sign-in; use OAuth Login")
++				lock.diagnosticReason = reauthReason
++				lock.diagnosticEpoch = current.RegistrationEpoch
++			}
+ 			current.Generation++
+ 			current.UpdatedAt = now
+ 			current.LastError = refreshErrorFromError(err)
+@@ -677,13 +688,21 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+ 				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && nextRetry.After(exp) {
+ 					nextRetry = exp
+ 				}
++				// A terminal refresh token cannot recover through repeated scheduled
++				// refreshes. Keep the usable access token until its known expiry.
++				if exp, ok := current.AccessTokenExpirationTime(); reauthReason != "" && ok && exp.After(now) {
++					nextRetry = exp
++				}
+ 				current.NextRefreshAfter = nextRetry
+ 				shouldReschedule = true
+ 
+-				if !current.Unavailable {
++				if !current.Unavailable && reauthReason == "" {
+ 					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
+ 				}
+ 			}
++			if reauthReason != "" {
++				current.StatusMessage = refreshdiagnostic.Message
++			}
+ 			m.auths[id] = current
+ 			if m.scheduler != nil {
+ 				m.scheduler.upsertAuth(current.Clone())
+@@ -728,6 +747,13 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+ 	if saved == nil {
+ 		return nil, fmt.Errorf("auth %s not found", id)
+ 	}
++	if lock.diagnosticReason != "" {
++		if lock.diagnosticEpoch == saved.RegistrationEpoch {
++			fingerprint := sha256.Sum256([]byte(saved.ID))
++			log.WithFields(log.Fields{"provider": "codex", "credential_ref": fmt.Sprintf("%x", fingerprint[:6])}).Info("OAuth refresh recovered")
++		}
++		lock.diagnosticReason = ""
++	}
+ 	targetAuth := saved
+ 	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
+ 	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))
+@@ -767,9 +793,12 @@ func (m *Manager) refreshWorkers() int {
+ 
+ // ForceRefreshResult records the outcome of a forced refresh for one credential.
+ type ForceRefreshResult struct {
+-	ID      string `json:"id"`
+-	Success bool   `json:"success"`
+-	Error   string `json:"error,omitempty"`
++	ID             string `json:"id"`
++	Success        bool   `json:"success"`
++	Error          string `json:"error,omitempty"`
++	ErrorCode      string `json:"error_code,omitempty"`
++	Reason         string `json:"reason,omitempty"`
++	ReauthRequired bool   `json:"reauth_required,omitempty"`
+ }
+ 
+ // ForceRefreshAll triggers an immediate refresh for all credentials that have refresh tokens or custom refresh evaluators.
+@@ -832,6 +861,12 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
+ 				res := ForceRefreshResult{ID: job.authID, Success: err == nil}
+ 				if err != nil {
+ 					res.Error = err.Error()
++					if reason := refreshdiagnostic.Reason(err); reason != "" {
++						res.Error = refreshdiagnostic.Message
++						res.ErrorCode = refreshdiagnostic.Code
++						res.Reason = reason
++						res.ReauthRequired = true
++					}
+ 				}
+ 				results[job.index] = res
+ 			}
+diff --git a/sdk/cliproxy/auth/refresh_diagnostic_test.go b/sdk/cliproxy/auth/refresh_diagnostic_test.go
+new file mode 100644
+index 0000000..9498be0
+--- /dev/null
++++ b/sdk/cliproxy/auth/refresh_diagnostic_test.go
+@@ -0,0 +1,79 @@
++package auth
++
++import (
++	"context"
++	"fmt"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
++	log "github.com/sirupsen/logrus"
++)
++
++func TestTerminalRefreshDiagnosticDedupAndRecovery(t *testing.T) {
++	hook := setupTestLoggerHook(t)
++	log.SetLevel(log.InfoLevel)
++	manager := NewManager(nil, nil, nil)
++	executor := &mockOAuthErrorExecutor{id: "codex", errToReturn: refreshdiagnostic.FromResponse(401, []byte(`{"error":{"code":"refresh_token_expired","message":"secret"}}`))}
++	manager.RegisterExecutor(executor)
++	ctx := context.Background()
++	_, err := manager.Register(ctx, &Auth{ID: "private@example.com.json", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"refresh_token": "fixture", "access_token": "fixture", "expired": time.Now().Add(-time.Hour).Format(time.RFC3339)}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for i := 0; i < 2; i++ {
++		_, _ = manager.ForceRefreshAuth(ctx, "private@example.com.json")
++	}
++	failures := 0
++	for _, entry := range hook.AllEntries() {
++		if entry.Message == "OAuth refresh requires sign-in; use OAuth Login" {
++			failures++
++			if strings.Contains(fmt.Sprint(entry.Data), "private") || strings.Contains(fmt.Sprint(entry.Data), "secret") {
++				t.Fatal("identity or token logged")
++			}
++		}
++	}
++	if failures != 1 {
++		t.Fatalf("warning count %d", failures)
++	}
++	results := manager.ForceRefreshAll(ctx)
++	if len(results) != 1 || !results[0].ReauthRequired || results[0].Reason != "refresh_token_expired" {
++		t.Fatalf("results %+v", results)
++	}
++	auth, ok := manager.GetByID("private@example.com.json")
++	if !ok || !hasUnauthorizedAuthFailure(auth) || manager.shouldRefresh(auth, time.Now()) {
++		t.Fatal("terminal credential keeps refreshing")
++	}
++	executor.errToReturn = nil
++	_, err = manager.ForceRefreshAuth(ctx, "private@example.com.json")
++	if err != nil {
++		t.Fatal(err)
++	}
++	recovered := 0
++	for _, entry := range hook.AllEntries() {
++		if entry.Message == "OAuth refresh recovered" {
++			recovered++
++		}
++	}
++	if recovered != 1 {
++		t.Fatalf("recovery count %d", recovered)
++	}
++}
++
++func TestTerminalRefreshRetainsUsableAccessTokenUntilExpiry(t *testing.T) {
++	manager := NewManager(nil, nil, nil)
++	executor := &mockOAuthErrorExecutor{id: "codex", errToReturn: refreshdiagnostic.FromResponse(400, []byte(`{"code":"refresh_token_reused"}`))}
++	manager.RegisterExecutor(executor)
++	expiry := time.Now().Add(time.Hour).Truncate(time.Second)
++	ctx := context.Background()
++	_, err := manager.Register(ctx, &Auth{ID: "fixture.json", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"access_token": "fixture", "refresh_token": "fixture", "expired": expiry.Format(time.RFC3339)}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	_, _ = manager.ForceRefreshAuth(ctx, "fixture.json")
++	auth, _ := manager.GetByID("fixture.json")
++	if auth.Unavailable || auth.Status != StatusActive || !auth.NextRefreshAfter.Equal(expiry) {
++		t.Fatalf("usable token disabled or refresh scheduled early: %+v", auth)
++	}
++}

@@ -20,12 +20,18 @@ def main():
    docker('network','create',network)
    for v in volumes:docker('volume','create',v)
    docker('run','-d','--name',names['mock'],'--network',network,'--network-alias','mock','-v',f'{ROOT / "tests"}:/test:ro','python:3.13-alpine','sh','-c','pip install -q aiohttp==3.13.3 && python /test/quota_mock.py')
+   # The fixture installs its dependency at startup. Do not send failing traffic
+   # or let Keeper snapshot partially initialized metadata before it is ready.
+   eventually(lambda:json.loads(docker('exec',names['mock'],'python','-c','import urllib.request;print(urllib.request.urlopen("http://localhost:9000/stats").read().decode())'))['calls']==0,timeout=90)
    docker('create','--name',names['cpa'],'--network',network,'--network-alias','cpa','-v',volumes[0]+':/data','-v',str(config)+':/config:ro','-p','127.0.0.1::8080','-p','127.0.0.1::8317','ha-cpa-quota:local')
    docker('create','--name',names['keeper'],'--network',network,'-v',volumes[1]+':/data','-p','127.0.0.1::8080','-p','127.0.0.1::8082','ha-keeper-quota:local')
-   for name in ('cpa','keeper'):docker('cp',str(tmp/(name+'.json')),names[name]+':/data/options.json');docker('start',names[name])
-   api,private,keeper,gateway=endpoint('cpa',8080),endpoint('cpa',8317),endpoint('keeper',8080),endpoint('keeper',8082)
+   for name in ('cpa','keeper'):docker('cp',str(tmp/(name+'.json')),names[name]+':/data/options.json')
+   docker('start',names['cpa'])
+   api,private=endpoint('cpa',8080),endpoint('cpa',8317)
    auth={'Authorization':'Bearer '+key};admin={'Authorization':'Bearer '+management}
    eventually(lambda:request(api+'/v1/models',auth)[0]==200)
+   docker('start',names['keeper'])
+   keeper,gateway=endpoint('keeper',8080),endpoint('keeper',8082)
    body=lambda account:{'model':account+'/quota-test','input':'Reply briefly.','stream':False}
    # Configure WebSocket-capable runtime API credentials in the isolated configuration.
    for account in ('a','b'):
@@ -73,6 +79,11 @@ def main():
    assert times==[r['captured_at'] for a in view() for r in a['rows']],'reads refreshed capture time'
    print('PASS: HTTP headers and WebSocket events update separate accounts and windows in CPA and Keeper; capture time, cache reads, sanitization, roles, and routing verified',flush=True)
   except Exception:
+   # Only counts/type/eligibility flags: never dump credential metadata or keys.
+   try:
+    counts=docker('exec',names['keeper'],'python3','-c','import sqlite3,json;c=sqlite3.connect("file:/data/app.db?mode=ro",uri=True);print(json.dumps(c.execute("SELECT auth_type,type,is_deleted,disabled,count(*) FROM usage_identities GROUP BY auth_type,type,is_deleted,disabled").fetchall()))')
+    print('Keeper synthetic identity eligibility counts: '+counts,flush=True)
+   except Exception:pass
    for name in names.values():
     logs=docker('logs',name,check=False)
     for secret in (key,management,password,readonly):logs=logs.replace(secret,'[test credential]')

@@ -106,15 +106,16 @@ def main():
             assert request(viewer_gateway + '/keeper/')[0] == 404
             assert request(keeper + '/api/v1/key-quota', opener=opener)[0] == 404
             # Enable explicitly and preserve the same database across restart.
-            (temp / 'keeper.json').write_text(json.dumps({'cpa_base_url': 'http://cpa:8317', 'management_key': management, 'login_password': password, 'viewer_quota_enabled': True, 'viewer_dashboard_enabled': True, 'viewer_api_gateway_enabled': True}))
+            viewer_path = "/viewer-" + secrets.token_hex(12)
+            (temp / 'keeper.json').write_text(json.dumps({'cpa_base_url': 'http://cpa:8317', 'management_key': management, 'login_password': password, 'viewer_base_path': viewer_path, 'viewer_quota_enabled': True, 'viewer_dashboard_enabled': True, 'viewer_api_gateway_enabled': True}))
             docker('cp', str(temp / 'keeper.json'), names['keeper'] + ':/data/options.json')
             docker('restart', names['keeper'])
             keeper = endpoint(names['keeper'], 8080)
             viewer_gateway = endpoint(names['keeper'], 8082)
             eventually(lambda: request(keeper + '/healthz')[0] == 200)
             assert int(docker('exec', names['keeper'], 'python3', '-c', query)) >= count
-            page_status, page = request(viewer_gateway + '/keeper/')
-            assert page_status == 200 and b'window.__KEEPER_VIEWER_ONLY__ = true' in page and b'"/keeper"' in page
+            page_status, page = request(viewer_gateway + viewer_path + '/')
+            assert page_status == 200 and b'window.__KEEPER_VIEWER_ONLY__ = true' in page and json.dumps(viewer_path).encode() in page
             assert request(viewer_gateway + '/v1/models', auth)[0] == 200
             assert request(viewer_gateway + '/v1/models')[0] == 401
             assert request(viewer_gateway + '/v1/chat/completions', auth, body)[0] == 200
@@ -145,24 +146,25 @@ def main():
             # Assets load below the same prefix; all admin paths stay blocked.
             import re
             asset = re.search(rb'src="\./(assets/[^"]+)"', page).group(1).decode()
-            assert request(viewer_gateway + '/keeper/' + asset)[0] == 200
-            for path in ('/api/v1/usage/overview', '/keeper/api/v1/usage/overview', '/keeper/api/v1/auth/sessions', '/keeper/api/v1/quota/cache', '/keeper/../api/v1/usage/overview', '/keeper/%2e%2e/api/v1/usage/overview', '/keeper/api/v1/key-quota/../quota/cache'):
+            assert request(viewer_gateway + viewer_path + '/' + asset)[0] == 200
+            assert request(viewer_gateway + '/keeper/')[0] == 404
+            for path in ('/api/v1/usage/overview', f'{viewer_path}/api/v1/usage/overview', f'{viewer_path}/api/v1/auth/sessions', f'{viewer_path}/api/v1/quota/cache', f'{viewer_path}/../api/v1/usage/overview', f'{viewer_path}/%2e%2e/api/v1/usage/overview', f'{viewer_path}/api/v1/key-quota/../quota/cache'):
                 assert request(viewer_gateway + path, opener=opener)[0] == 404, path
-            for path in ('/keeper/api/v1/auth/login', '/keeper/api/v1/quota/refresh', '/keeper/api/v1/quota/reset', '/keeper/api/v1/key-quota'):
+            for path in (f'{viewer_path}/api/v1/auth/login', f'{viewer_path}/api/v1/quota/refresh', f'{viewer_path}/api/v1/quota/reset', f'{viewer_path}/api/v1/key-quota'):
                 assert request(viewer_gateway + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'password': password}, opener=opener)[0] == 404, path
-            assert request(viewer_gateway + '/keeper/api/v1/key-quota')[0] == 401
+            assert request(viewer_gateway + viewer_path + '/api/v1/key-quota')[0] == 401
             cookies = http.cookiejar.CookieJar()
             viewer_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
-            eventually(lambda: request(viewer_gateway + '/keeper/api/v1/auth/api-key-login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'apiKey': key}, opener=viewer_opener)[0] in (200, 204))
-            assert all(cookie.path == '/keeper/' for cookie in cookies)
-            session_status, session_body = request(viewer_gateway + '/keeper/api/v1/auth/session', opener=viewer_opener)
+            eventually(lambda: request(viewer_gateway + viewer_path + '/api/v1/auth/api-key-login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'apiKey': key}, opener=viewer_opener)[0] in (200, 204))
+            assert all(cookie.path == f'{viewer_path}/' for cookie in cookies)
+            session_status, session_body = request(viewer_gateway + viewer_path + '/api/v1/auth/session', opener=viewer_opener)
             session = json.loads(session_body)
             assert session_status == 200 and session['role'] == 'api_key_viewer' and session['api_key']['quota_enabled'] is True
-            quota_status, quota_body = request(viewer_gateway + '/keeper/api/v1/key-quota?auth_indexes=private', opener=viewer_opener)
+            quota_status, quota_body = request(viewer_gateway + viewer_path + '/api/v1/key-quota?auth_indexes=private', opener=viewer_opener)
             assert quota_status == 200 and isinstance(json.loads(quota_body)['accounts'], list)
             for secret in (key, management, password, 'fake-upstream-test-key', 'auth_index', 'base_url'):
                 assert secret.encode() not in quota_body
-            assert request(keeper + '/api/v1/usage/overview', opener=viewer_opener)[0] == 401  # cookie confined to /keeper/
+            assert request(keeper + '/api/v1/usage/overview', opener=viewer_opener)[0] == 401  # cookie confined to viewer_path
             print('PASS: disabled defaults, viewer login, quota serialization and public gateway method/path isolation', flush=True)
             # Exercise the same persisted client-key setting as the management UI.
             management_auth = {'Authorization': 'Bearer ' + management}
@@ -172,7 +174,7 @@ def main():
             eventually(lambda: request(api + '/v1/models', rotated_auth)[0] == 200)
             assert request(keys_url, management_auth, body=[rotated_key], method='PUT')[0] == 200
             eventually(lambda: request(api + '/v1/models', auth)[0] == 401)
-            eventually(lambda: request(viewer_gateway + '/keeper/api/v1/key-quota', opener=viewer_opener)[0] == 401, timeout=90)
+            eventually(lambda: request(viewer_gateway + viewer_path + '/api/v1/key-quota', opener=viewer_opener)[0] == 401, timeout=90)
             print('PASS: revoked client token loses viewer quota access', flush=True)
             # Clear stale HA keys after switching to management ownership.
             (temp / 'cpa.json').write_text(json.dumps({'api_key_source': 'management_ui', 'api_keys': [], 'management_key': management}))

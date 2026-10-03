@@ -1,5 +1,5 @@
 name: CPA Usage Keeper
-version: "0.1.1"
+version: "0.1.2"
 slug: cpa_usage_keeper
 description: Persistent usage, cost and quota dashboard for CLIProxyAPI
 url: https://github.com/bjoern-sobolewski/ha-addons/tree/main/cpa-usage-keeper
@@ -16,7 +16,7 @@ ports:
   8082/tcp: null
 ports_description:
   8080/tcp: Password-protected Keeper dashboard on your trusted LAN
-  8082/tcp: Optional viewer-only dashboard at /keeper/ (for a tunnel or trusted LAN)
+  8082/tcp: Optional viewer-only dashboard at viewer_base_path (for a tunnel or trusted LAN)
 webui: http://[HOST]:[PORT:8080]
 backup: cold
 timeout: 30
@@ -30,6 +30,7 @@ options:
   backup_retention_days: 7
   viewer_quota_enabled: false
   viewer_dashboard_enabled: false
+  viewer_base_path: /keeper
   viewer_api_gateway_enabled: false
 schema:
   cpa_base_url: str
@@ -40,4 +41,5 @@ schema:
   backup_retention_days: int(1,90)
   viewer_quota_enabled: bool
   viewer_dashboard_enabled: bool
+  viewer_base_path: str
   viewer_api_gateway_enabled: bool

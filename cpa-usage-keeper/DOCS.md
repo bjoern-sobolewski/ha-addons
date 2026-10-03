@@ -20,6 +20,8 @@ The view reads Keeper's existing quota cache. It shows remaining amounts/percent
 
 Enable `viewer_dashboard_enabled` to start the restricted dashboard at container port **8082**, under `/keeper/`. Both options default to false. Leave the 8082 host mapping disabled when your tunnel can use add-on DNS directly. This listener only forwards client-token login/logout, session/version, viewer reads and frontend assets. Admin password login, admin APIs, and all other paths/methods return 404, even with an admin cookie. The full LAN dashboard continues to use its current root path.
 
+Set `viewer_base_path` to choose another prefix, for example `/viewer-RANDOM_VALUE`. Use a single segment starting with a letter or digit and containing at most 64 letters, digits, hyphens or underscores, with no trailing slash. `/v1` is reserved. Generate a random value locally and save it in HA options rather than committing your deployed path to a public repository. The prefix is applied to pages, assets, allowed APIs and session cookies. Only the selected prefix is served; `/keeper/` returns 404 when another prefix is selected. Keep client-token authentication enabled regardless of the path's randomness.
+
 For a locally managed Cloudflare tunnel, insert a path-specific ingress rule **before** the hostname's API rule:
 
 ```yaml
@@ -28,10 +30,10 @@ For a locally managed Cloudflare tunnel, insert a path-specific ingress rule **b
   service: http://YOUR_KEEPER_ADDON_DNS:8082
 ```
 
-Keep the path prefix intact; the viewer listener handles it. Preserve `/v1` routing to the API gateway. Tunnel/add-on UIs must support path routing; a hostname-only additional-host entry cannot express this rule.
+Keep the path prefix intact; the viewer listener handles it. Replace `/keeper` in the example with your `viewer_base_path` when customized. Preserve `/v1` routing to the API gateway. Tunnel/add-on UIs must support path routing; a hostname-only additional-host entry cannot express this rule.
 
 For the HA Cloudflared app's hostname-only **Additional Hosts**, instead enable `viewer_api_gateway_enabled` and point the API hostname's service to `http://YOUR_KEEPER_ADDON_DNS:8082`. This combined restricted listener serves `/keeper/` and forwards only `/v1/` to the companion CPA app's API-only port 8080 on the same host as `cpa_base_url`. It preserves WebSocket upgrades and unbuffered streaming, and blocks management paths. CPA does not need restarting. The three gateway/quota options are independent and default to false.
 
-If an existing WAF rule requires a Bearer header for the entire API hostname, narrow that rule to API paths or exclude `/keeper` and `/keeper/…`; browsers log in with a POSTed key and then an HttpOnly session cookie. Keep API header protection in place and verify anonymous quota requests remain 401. Use HTTPS for remote access. Do not route the hostname directly to the full Keeper listener. Routing `/v1/` through Keeper makes that API hostname depend on Keeper being up; restoring its original CPA API gateway service bypasses this extra hop if Keeper is unavailable.
+If an existing WAF rule requires a Bearer header for the entire API hostname, narrow that rule to API paths or exclude the exact `viewer_base_path` and paths starting with `viewer_base_path + "/"`; browsers log in with a POSTed key and then an HttpOnly session cookie. Remove any exception for the old prefix when changing it. Keep API header protection in place and verify anonymous quota requests remain 401. Use HTTPS for remote access. Do not route the hostname directly to the full Keeper listener. Routing `/v1/` through Keeper makes that API hostname depend on Keeper being up; restoring its original CPA API gateway service bypasses this extra hop if Keeper is unavailable.
 
 This HA build applies a reviewed local patch to upstream Keeper 1.15.9 at commit `3f1b29aa5b0b5284b75ec53573b5146cd50fea1b`, builds its embedded frontend and binary, and retains the upstream runtime and `/data` database layout.

@@ -129,6 +129,23 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             KEEPER.api_gateway_location({'cpa_base_url': 'http://host;directive:8317', 'viewer_api_gateway_enabled': True})
 
+    def test_keeper_custom_viewer_prefix_updates_routes_assets_and_cookies(self):
+        self.assertEqual(KEEPER.viewer_base_path({}), '/keeper')
+        self.assertNotIn('proxy_pass', KEEPER.viewer_gateway_locations({'viewer_base_path': '/private-view'}))
+        locations = KEEPER.viewer_gateway_locations({'viewer_base_path': '/private-view', 'viewer_dashboard_enabled': True})
+        self.assertIn('proxy_cookie_path / /private-view/;', locations)
+        self.assertIn('location = /private-view ', locations)
+        self.assertIn('^/private-view/assets/', locations)
+        self.assertIn('^/private-view/api/v1/', locations)
+        self.assertIn('window.__APP_BASE_PATH__ = "/private-view";', locations)
+        self.assertNotIn('/keeper', locations)
+        self.assertNotIn('__VIEWER_PATH__', locations)
+
+    def test_keeper_refuses_unsafe_or_colliding_viewer_prefixes(self):
+        for path in ('', '/', '/v1', '/a/b', '/a/', '/..', '/a.b', '/a?b', '/a";}', '/a\\b', '/é', '/_', '/'+'a'*65, None):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                KEEPER.viewer_base_path({'viewer_base_path': path})
+
     def test_manifests_have_matching_options_and_schema(self):
         for app in ('cliproxyapi', 'cpa-usage-keeper'):
             config = yaml.safe_load((ROOT / app / 'config.yaml').read_text())

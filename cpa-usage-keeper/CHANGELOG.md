@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- Add `viewer_base_path` for a custom public viewer URL prefix, retaining `/keeper` as the default.
+- Apply the selected prefix to pages, assets, allowed APIs and session cookies; other prefixes remain closed.
+- Reject invalid prefixes and the reserved `/v1` API path.
+
 ## 0.1.1
 
 - Add an optional read-only provider quota tab to existing client-token sessions.

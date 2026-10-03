@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 
 def environment(options):
+    viewer_base_path(options)
     url = options.get('cpa_base_url', '').rstrip('/')
     parsed = urlsplit(url)
     if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.path not in ('', '/') or parsed.query or parsed.fragment or parsed.username:
@@ -37,6 +38,20 @@ def environment(options):
         'CPA_REQUEST_LOG_ACCESS_ENABLED': 'false',
         'TLS_SKIP_VERIFY': 'false',
     }
+
+
+def viewer_base_path(options):
+    path = options.get('viewer_base_path', '/keeper')
+    if not isinstance(path, str) or not re.fullmatch(r'/[A-Za-z0-9][A-Za-z0-9_-]{0,63}', path) or path == '/v1':
+        raise ValueError('Set viewer_base_path to one URL segment of 1-64 letters, digits, underscores or hyphens, starting with a letter or digit; /v1 is reserved.')
+    return path
+
+
+def viewer_gateway_locations(options):
+    path = viewer_base_path(options)
+    if options.get('viewer_dashboard_enabled', False) is not True:
+        return '# Viewer dashboard disabled\n'
+    return Path(__file__).with_name('viewer-locations.conf').read_text().replace('__VIEWER_PATH__', path)
 
 
 def api_gateway_location(options):
@@ -77,7 +92,7 @@ if __name__ == '__main__':
         stage = 'preparing gateway configuration'
         gateway_dir = Path('/run/keeper-gateway')
         gateway_dir.mkdir(mode=0o700, exist_ok=True)
-        locations = Path('/opt/ha/viewer-locations.conf').read_text() if options.get('viewer_dashboard_enabled', False) is True else '# Viewer dashboard disabled\n'
+        locations = viewer_gateway_locations(options)
         (gateway_dir / 'viewer.conf').write_text(locations)
         (gateway_dir / 'api.conf').write_text(api_gateway_location(options))
         stage = 'starting gateway'

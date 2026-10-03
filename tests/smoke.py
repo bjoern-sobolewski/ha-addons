@@ -151,6 +151,15 @@ def main():
             import re
             asset = re.search(rb'src="\./(assets/[^"]+)"', page).group(1).decode()
             assert request(viewer_gateway + viewer_path + '/' + asset)[0] == 200
+            # Reloads at nested routes must resolve the same asset under the viewer prefix.
+            from urllib.parse import urljoin
+            for route in ('read-only/quota', 'read-only/events', 'read-only/auth-files', 'key-quota'):
+                status, nested_page = request(viewer_gateway + viewer_path + '/' + route)
+                assert status == 200
+                asset_base = re.search(rb'<base href="([^"]+)">', nested_page).group(1).decode()
+                asset_url = urljoin(urljoin(viewer_gateway + viewer_path + '/' + route, asset_base), './' + asset)
+                assert asset_url == viewer_gateway + viewer_path + '/' + asset
+                assert request(asset_url)[0] == 200
             assert request(viewer_gateway + '/keeper/')[0] == 404
             for path in ('/api/v1/usage/overview', f'{viewer_path}/api/v1/usage/overview', f'{viewer_path}/api/v1/auth/sessions', f'{viewer_path}/api/v1/quota/cache', f'{viewer_path}/../api/v1/usage/overview', f'{viewer_path}/%2e%2e/api/v1/usage/overview', f'{viewer_path}/api/v1/key-quota/../quota/cache'):
                 assert request(viewer_gateway + path, opener=opener)[0] == 404, path

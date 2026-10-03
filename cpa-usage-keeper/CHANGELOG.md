@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.13
+
+- Keep viewer assets rooted at the configured gateway prefix so reloading nested read-only pages loads the dashboard correctly.
+
 ## 0.1.12
 
 - Add a Stay signed in checkbox to browser login forms: seven-day persistent cookies when checked, browser-session cookies otherwise.

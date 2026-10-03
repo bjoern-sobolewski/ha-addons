@@ -42,7 +42,7 @@ COPY run.sh bootstrap.py nginx.conf viewer-locations.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 ENV WORK_DIR=/data TZ=Europe/Berlin
 EXPOSE 8082
-ARG BUILD_VERSION=0.1.12
+ARG BUILD_VERSION=0.1.13
 LABEL io.hass.name="CPA Usage Keeper" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

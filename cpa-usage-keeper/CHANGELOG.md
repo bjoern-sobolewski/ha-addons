@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.14
+
+- Put Total Requests and a compact, scrollable Usage Limits table in the top row; show average RPM beside the request count and enlarge its graph.
+- Show individual provider accounts, reported remaining quotas, reset countdowns and per-window freshness tooltips; omit reserve quota from Overview.
+- Remove Daily Average and the separate RPM card; order the lower cards as TPM, Total Tokens, Cache Rate and Total Cost.
+- Move Recent Activity below Usage Distribution in admin, individual-key and read-only overviews.
+
 ## 0.1.13
 
 - Keep viewer assets rooted at the configured gateway prefix so reloading nested read-only pages loads the dashboard correctly.

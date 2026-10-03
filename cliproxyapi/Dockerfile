@@ -15,6 +15,8 @@ COPY patches/release-review.patch /tmp/release-review.patch
 RUN git apply --check /tmp/release-review.patch && git apply /tmp/release-review.patch
 COPY patches/oauth-compatibility.patch /tmp/oauth-compatibility.patch
 RUN git apply --check /tmp/oauth-compatibility.patch && git apply /tmp/oauth-compatibility.patch
+COPY patches/session-cache-test.patch /tmp/session-cache-test.patch
+RUN git apply --check /tmp/session-cache-test.patch && git apply /tmp/session-cache-test.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/ ./

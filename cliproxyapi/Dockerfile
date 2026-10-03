@@ -13,11 +13,13 @@ COPY patches/oauth-errors.patch /tmp/oauth-errors.patch
 RUN git apply --check /tmp/oauth-errors.patch && git apply /tmp/oauth-errors.patch
 COPY patches/release-review.patch /tmp/release-review.patch
 RUN git apply --check /tmp/release-review.patch && git apply /tmp/release-review.patch
+COPY patches/oauth-compatibility.patch /tmp/oauth-compatibility.patch
+RUN git apply --check /tmp/oauth-compatibility.patch && git apply /tmp/oauth-compatibility.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/ ./
 RUN go test ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
-RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.10-ha.3" -o /out/CLIProxyAPI ./cmd/server
+RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.10-ha.4" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -34,6 +36,8 @@ COPY patches/cpamc-auth-errors.patch /tmp/cpamc-auth-errors.patch
 RUN git apply --check /tmp/cpamc-auth-errors.patch && git apply /tmp/cpamc-auth-errors.patch
 COPY patches/cpamc-refresh-display.patch /tmp/cpamc-refresh-display.patch
 RUN git apply --check /tmp/cpamc-refresh-display.patch && git apply /tmp/cpamc-refresh-display.patch
+COPY patches/cpamc-native-quota.patch /tmp/cpamc-native-quota.patch
+RUN git apply --check /tmp/cpamc-native-quota.patch && git apply /tmp/cpamc-native-quota.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/ ./
@@ -50,7 +54,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.5
+ARG BUILD_VERSION=0.1.6
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

@@ -1,0 +1,1057 @@
+diff --git a/src/features/authFiles/components/AuthFileQuotaSection.tsx b/src/features/authFiles/components/AuthFileQuotaSection.tsx
+index 21d4559..2a89eae 100644
+--- a/src/features/authFiles/components/AuthFileQuotaSection.tsx
++++ b/src/features/authFiles/components/AuthFileQuotaSection.tsx
+@@ -1,4 +1,3 @@
+-import { QuotaFreshness } from '@/features/quota/QuotaFreshness';
+ import { useTrafficQuota } from '@/features/quota/useTrafficQuota';
+ import { normalizeAuthIndex } from '@/utils/authIndex';
+ import { TrafficQuotaBody } from '@/features/quota/TrafficQuotaBody';
+@@ -82,7 +81,11 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+       commitIfQuotaCacheCurrent(cacheGeneration, () => {
+         updateQuotaState((prev) => ({
+           ...prev,
+-          [cacheKey]: {...adapter.buildSuccessState(data),capturedAt:new Date().toISOString(),source:'manual_provider_query'},
++          [cacheKey]: {
++            ...adapter.buildSuccessState(data),
++            capturedAt: new Date().toISOString(),
++            source: 'manual_provider_query',
++          },
+         }));
+         showNotification(t('auth_files.quota_refresh_success', { name: file.name }), 'success');
+       });
+@@ -134,7 +137,11 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+           commitIfQuotaCacheCurrent(cacheGeneration, () => {
+             updateQuotaState((prev) => ({
+               ...prev,
+-              [cacheKey]: {...adapter.buildSuccessState(data),capturedAt:new Date().toISOString(),source:'manual_provider_query'},
++              [cacheKey]: {
++                ...adapter.buildSuccessState(data),
++                capturedAt: new Date().toISOString(),
++                source: 'manual_provider_query',
++              },
+             }));
+             showNotification(t('codex_quota.reset_success', { name: file.name }), 'success');
+           });
+@@ -190,8 +197,9 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+ 
+   return (
+     <div className={styles.quotaSection}>
+-      
+-      {hasTraffic ? <TrafficQuotaBody file={file} /> : quotaStatus === 'loading' ? (
++      {hasTraffic ? (
++        <TrafficQuotaBody file={file} classes={compactQuotaClasses} />
++      ) : quotaStatus === 'loading' ? (
+         <div className={styles.quotaMessage}>{t(`${adapter.i18nPrefix}.loading`)}</div>
+       ) : quotaStatus === 'idle' ? (
+         <button
+@@ -209,7 +217,15 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+           })}
+         </div>
+       ) : quota ? (
+-        <adapter.Body quota={quota} freshness={<QuotaFreshness capturedAt={quota.capturedAt} source={quota.source} account={`${quotaType} account`} />} classes={compactQuotaClasses} />
++        <adapter.Body
++          quota={quota}
++          freshness={{
++            capturedAt: quota.capturedAt,
++            source: quota.source,
++            account: `${quotaType} account`,
++          }}
++          classes={compactQuotaClasses}
++        />
+       ) : (
+         <div className={styles.quotaMessage}>{t(`${adapter.i18nPrefix}.idle`)}</div>
+       )}
+diff --git a/src/features/quota/QuotaFreshness.tsx b/src/features/quota/QuotaFreshness.tsx
+deleted file mode 100644
+index 1224c83..0000000
+--- a/src/features/quota/QuotaFreshness.tsx
++++ /dev/null
+@@ -1,30 +0,0 @@
+-import { useId, useState } from 'react';
+-import { useNow } from '@/hooks/useNow';
+-import { IconRefreshCw } from '@/components/ui/icons';
+-
+-const quotaSourceLabel = (source?: string) => ({
+-  api_response_headers: 'API response headers', usage_header: 'API response headers',
+-  websocket_event: 'WebSocket event', scheduled: 'Scheduled provider query',
+-  scheduled_provider_query: 'Scheduled provider query', manual: 'Manual provider query',
+-  manual_provider_query: 'Manual provider query', inspection: 'Manual provider query',
+-  cache_backfill: 'Scheduled provider query',
+-}[source ?? ''] ?? 'Unknown source');
+-
+-export function QuotaFreshness({ capturedAt, source, account, resetAt, stale }: {
+-  capturedAt?: string; source?: string; account: string; resetAt?: string; stale?: boolean;
+-}) {
+-  const [open, setOpen] = useState(false);
+-  const now = useNow();
+-  const tooltipId = useId();
+-  const at = capturedAt ? Date.parse(capturedAt) : NaN;
+-  const seconds = Math.max(0, Math.floor((now - at) / 1000));
+-  const age = Number.isFinite(at) ? seconds < 60 ? `${seconds}s ago` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : `${Math.floor(seconds / 3600)}h ago` : 'Unknown age';
+-  const old = Boolean(stale || !Number.isFinite(at) || seconds > 900 || (resetAt && Date.parse(resetAt) <= now));
+-  const details = `${account}\n${quotaSourceLabel(source)}\n${Number.isFinite(at) ? new Date(at).toLocaleString() : 'Capture time unavailable'}\n${old ? 'Stale observation' : 'Cached observation'}`;
+-  return <span style={{ display: 'inline-flex', position: 'relative', marginInlineStart: 6, verticalAlign: 'baseline' }} onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+-    <button type="button" aria-label={`Last quota refresh: ${age}${old ? ', stale' : ''}`} aria-describedby={open ? tooltipId : undefined} onFocus={() => setOpen(true)} onBlur={() => setOpen(false)} onClick={() => setOpen(true)} onKeyDown={event => { if (event.key === 'Escape') setOpen(false); }} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, font: 'inherit', fontSize: '0.8em', fontWeight: 400, color: old ? 'var(--amber-text, var(--text-primary, #b45309))' : 'var(--text-secondary, inherit)', opacity: 1, background: 'transparent', border: 0, padding: 0, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+-      <IconRefreshCw size={12} aria-hidden="true" /><span>{age}</span>
+-    </button>
+-    {open && <span id={tooltipId} role="tooltip" style={{ display: 'block', whiteSpace: 'pre-line', position: 'absolute', zIndex: 30, bottom: '100%', insetInlineEnd: 0, minWidth: 210, maxWidth: 'min(300px, 80vw)', padding: 10, borderRadius: 6, background: '#172033', color: 'white', fontSize: 12, fontWeight: 400, boxShadow: '0 2px 10px #0005' }}>{details}</span>}
+-  </span>;
+-}
+diff --git a/src/features/quota/QuotaWindowLabel.module.scss b/src/features/quota/QuotaWindowLabel.module.scss
+new file mode 100644
+index 0000000..570c673
+--- /dev/null
++++ b/src/features/quota/QuotaWindowLabel.module.scss
+@@ -0,0 +1,39 @@
++.label {
++  display: inline;
++  margin: 0;
++  padding: 0;
++  border: 0;
++  background: transparent;
++  font: inherit;
++  font-weight: inherit;
++  color: inherit;
++  line-height: inherit;
++  text-align: start;
++  cursor: pointer;
++  text-decoration: underline dotted;
++  text-decoration-color: var(--text-quaternary);
++  text-underline-offset: 3px;
++  &:hover {
++    color: var(--text-primary);
++  }
++  &:focus-visible {
++    outline: 2px solid var(--primary-color);
++    outline-offset: 2px;
++  }
++}
++.tooltip {
++  position: fixed;
++  z-index: 1000;
++  max-width: min(300px, calc(100vw - 16px));
++  padding: 10px 12px;
++  border: 1px solid var(--border-color);
++  border-radius: 8px;
++  background: var(--bg-primary);
++  color: var(--text-primary);
++  box-shadow: 0 6px 24px rgb(0 0 0 / 18%);
++  font-size: 12px;
++  line-height: 1.5;
++  white-space: pre-line;
++  overflow-wrap: anywhere;
++  pointer-events: none;
++}
+diff --git a/src/features/quota/QuotaWindowLabel.tsx b/src/features/quota/QuotaWindowLabel.tsx
+new file mode 100644
+index 0000000..0fa3c84
+--- /dev/null
++++ b/src/features/quota/QuotaWindowLabel.tsx
+@@ -0,0 +1,129 @@
++import { useEffect, useId, useRef, useState } from 'react';
++import { createPortal } from 'react-dom';
++import { useTranslation } from 'react-i18next';
++import styles from './QuotaWindowLabel.module.scss';
++
++import { quotaObservationState, type QuotaObservationDetails } from './quotaObservation';
++
++export function QuotaWindowLabel({
++  label,
++  className,
++  details,
++  resetAtMs,
++  title,
++}: {
++  label: string;
++  className: string;
++  details?: QuotaObservationDetails;
++  resetAtMs?: number | null;
++  title?: string;
++}) {
++  const { t } = useTranslation();
++  const [now, setNow] = useState(Date.now);
++  const [open, setOpen] = useState(false);
++  const [position, setPosition] = useState({ left: 0, top: 0 });
++  const anchor = useRef<HTMLButtonElement>(null);
++  const popup = useRef<HTMLSpanElement>(null);
++  const tooltipId = useId();
++  useEffect(() => {
++    if (!open) return;
++    const button = anchor.current;
++    if (!button) return;
++    const bounds = button.getBoundingClientRect();
++    const height = popup.current?.getBoundingClientRect().height ?? 150;
++    setPosition({
++      left: Math.max(8, Math.min(bounds.left, window.innerWidth - 308)),
++      top:
++        bounds.bottom + height + 14 <= window.innerHeight
++          ? bounds.bottom + 6
++          : Math.max(8, bounds.top - height - 6),
++    });
++    setNow(Date.now());
++    const timer = window.setInterval(() => {
++      if (!document.hidden) setNow(Date.now());
++    }, 1000);
++    const dismissOutside = (event: PointerEvent) => {
++      if (!button.contains(event.target as Node)) setOpen(false);
++    };
++    const dismiss = () => setOpen(false);
++    document.addEventListener('pointerdown', dismissOutside);
++    window.addEventListener('resize', dismiss);
++    window.addEventListener('scroll', dismiss, true);
++    return () => {
++      window.clearInterval(timer);
++      document.removeEventListener('pointerdown', dismissOutside);
++      window.removeEventListener('resize', dismiss);
++      window.removeEventListener('scroll', dismiss, true);
++    };
++  }, [open]);
++  if (!details)
++    return (
++      <span className={className} title={title}>
++        {label}
++      </span>
++    );
++  const state = quotaObservationState(details, now, resetAtMs);
++  const age =
++    state.elapsed === null
++      ? t('quota_observation.unknown')
++      : t('quota_observation.age', {
++          minutes: Math.floor(state.elapsed / 60),
++          seconds: String(state.elapsed % 60).padStart(2, '0'),
++        });
++  const sourceKey: Record<string, string> = {
++    api_response_headers: 'traffic',
++    usage_header: 'traffic',
++    websocket_event: 'websocket',
++    scheduled: 'scheduled',
++    scheduled_provider_query: 'scheduled',
++    cache_backfill: 'scheduled',
++    manual: 'manual',
++    manual_provider_query: 'manual',
++    inspection: 'manual',
++  };
++  const content = [
++    label,
++    details.account,
++    `${t('quota_observation.observed')}: ${Number.isFinite(state.captured) ? new Date(state.captured).toLocaleString() : t('quota_observation.unknown')}`,
++    age,
++    `${t('quota_observation.source')}: ${t(`quota_observation.${sourceKey[details.source ?? ''] ?? 'unknown'}`)}`,
++    t(`quota_observation.${state.stale ? 'stale' : 'cached'}`),
++  ].join('\n');
++  return (
++    <>
++      <button
++        ref={anchor}
++        type="button"
++        className={`${className} ${styles.label}`}
++        title={title}
++        aria-label={t('quota_observation.details', { window: label })}
++        aria-expanded={open}
++        aria-describedby={open ? tooltipId : undefined}
++        onFocus={() => setOpen(true)}
++        onBlur={() => setOpen(false)}
++        onClick={() => setOpen(true)}
++        onKeyDown={(event) => {
++          if (event.key === 'Escape') {
++            event.stopPropagation();
++            setOpen(false);
++          }
++        }}
++      >
++        {label}
++      </button>
++      {open &&
++        createPortal(
++          <span
++            ref={popup}
++            id={tooltipId}
++            role="tooltip"
++            className={styles.tooltip}
++            style={position}
++          >
++            {content}
++          </span>,
++          document.body
++        )}
++    </>
++  );
++}
+diff --git a/src/features/quota/TrafficQuotaBody.tsx b/src/features/quota/TrafficQuotaBody.tsx
+index dc942f1..3337be1 100644
+--- a/src/features/quota/TrafficQuotaBody.tsx
++++ b/src/features/quota/TrafficQuotaBody.tsx
+@@ -1,26 +1,73 @@
+-import type {AuthFileItem} from '@/types';
+-import {normalizeAuthIndex} from '@/utils/authIndex';
+-import {useTrafficQuota} from './useTrafficQuota';
+-import {QuotaFreshness} from './QuotaFreshness';
+-export function TrafficQuotaBody({file}:{file:AuthFileItem}) {
+- const items=useTrafficQuota(normalizeAuthIndex(file.auth_index)??'');
+- if(!items.length)return null;
+- return <div>{items.map(item=>{
+-  const entries=Object.entries(item.headers);
+-  const value=(suffix:string)=>entries.find(([key])=>key.toLowerCase().endsWith(suffix))?.[1]?.[0];
+-  const raw=value('-used-percent')??value('-utilization');
+-  const used=raw===undefined?NaN:Number(raw)*(item.provider==='claude'?100:1);
+-  if(!Number.isFinite(used))return null;
+-  const resetRaw=value('-reset-at')??value('-reset');
+-  const after=value('-reset-after-seconds');
+-  const resetMillis=resetRaw?Number(resetRaw)*1000:after?Date.parse(item.observed_at)+Number(after)*1000:NaN;
+-  const resetAt=Number.isFinite(resetMillis)&&Math.abs(resetMillis)<8.64e15?new Date(resetMillis).toISOString():undefined;
+-  const limitName=value('-limit-name');
+-  const label=limitName ? `${limitName} ${item.window.endsWith('secondary')?'secondary':'primary'}` : item.window.replace(/^x-codex-/, '').replace(/^claude-/, '').replace(/-/g,' ');
+-  return <div key={item.window} style={{padding:'8px 0'}}>
+-   <div>{label} · {Math.max(0,100-used).toFixed(1)}% remaining <QuotaFreshness capturedAt={item.observed_at} source={item.source} account={item.accountLabel} resetAt={resetAt}/></div>
+-   <progress max={100} value={Math.max(0,Math.min(100,100-used))} style={{width:'100%'}} aria-label={`${label} remaining`} />
+-   {resetAt&&<div>Resets {new Date(resetAt).toLocaleString()}</div>}
+-  </div>;
+- })}</div>;
++import { useTranslation } from 'react-i18next';
++import type { AuthFileItem } from '@/types';
++import { normalizeAuthIndex } from '@/utils/authIndex';
++import { useNow } from '@/hooks/useNow';
++import { buildResetDisplay } from '@/utils/quota';
++import { useTrafficQuota } from './useTrafficQuota';
++import { trafficWindow } from './trafficWindows';
++import { QuotaWindowLabel } from './QuotaWindowLabel';
++import { QuotaMeter } from './components/QuotaMeter';
++import { QuotaResetLabel } from './components/QuotaResetLabel';
++import type { QuotaClassMap } from './types';
++
++export function TrafficQuotaBody({
++  file,
++  classes,
++}: {
++  file: AuthFileItem;
++  classes: QuotaClassMap;
++}) {
++  const items = useTrafficQuota(normalizeAuthIndex(file.auth_index) ?? '');
++  const { t, i18n } = useTranslation();
++  const now = useNow();
++  const windows = items
++    .map((item) => trafficWindow(item, t))
++    .filter((window) => window != null)
++    .sort(
++      (a, b) =>
++        (a.duration ?? Infinity) - (b.duration ?? Infinity) || a.label.localeCompare(b.label)
++    );
++  const nextReset = Math.min(
++    ...windows.flatMap((window) =>
++      window.resetAtMs != null && window.resetAtMs > now ? [window.resetAtMs] : []
++    )
++  );
++  return (
++    <>
++      {windows.map((window, index) => {
++        const reset = buildResetDisplay(null, window.resetAtMs, now, i18n.resolvedLanguage);
++        return (
++          <div key={window.id} className={classes.quotaRow}>
++            <div className={classes.quotaRowHeader}>
++              <QuotaWindowLabel
++                label={window.label}
++                className={classes.quotaModel}
++                details={window.details}
++                resetAtMs={window.resetAtMs}
++              />
++              <div className={classes.quotaMeta}>
++                <span className={classes.quotaPercent}>{Math.round(window.remaining)}%</span>
++                {reset && (
++                  <QuotaResetLabel
++                    display={reset}
++                    classes={classes}
++                    soon={window.resetAtMs === nextReset && nextReset - now <= 3600000}
++                  />
++                )}
++              </div>
++            </div>
++            <div
++              role="meter"
++              aria-label={window.label}
++              aria-valuemin={0}
++              aria-valuemax={100}
++              aria-valuenow={window.remaining}
++            >
++              <QuotaMeter percent={window.remaining} classes={classes} index={index} />
++            </div>
++          </div>
++        );
++      })}
++    </>
++  );
+ }
+diff --git a/src/features/quota/components/QuotaCard.tsx b/src/features/quota/components/QuotaCard.tsx
+index f6079f1..0b66490 100644
+--- a/src/features/quota/components/QuotaCard.tsx
++++ b/src/features/quota/components/QuotaCard.tsx
+@@ -1,4 +1,3 @@
+-import { QuotaFreshness } from '@/features/quota/QuotaFreshness';
+ import { useTrafficQuota } from '@/features/quota/useTrafficQuota';
+ import { normalizeAuthIndex } from '@/utils/authIndex';
+ import { TrafficQuotaBody } from '@/features/quota/TrafficQuotaBody';
+@@ -118,7 +117,6 @@ export function QuotaCard(props: QuotaCardProps) {
+       </header>
+ 
+       <div className={styles.body}>
+-        
+         {!hasTraffic && entry.type === 'claude' && status === 'success' && (
+           <>
+             <div className={quotaClasses.codexPlan}>
+@@ -134,7 +132,9 @@ export function QuotaCard(props: QuotaCardProps) {
+             )}
+           </>
+         )}
+-        {hasTraffic ? <TrafficQuotaBody file={file} /> : status === 'idle' ? (
++        {hasTraffic ? (
++          <TrafficQuotaBody file={file} classes={quotaClasses} />
++        ) : status === 'idle' ? (
+           <button
+             type="button"
+             className={styles.idleBody}
+@@ -159,7 +159,15 @@ export function QuotaCard(props: QuotaCardProps) {
+             {t(`${adapter.i18nPrefix}.load_failed`, { message: errorMessage })}
+           </div>
+         ) : quota ? (
+-          <adapter.Body quota={quota} freshness={<QuotaFreshness capturedAt={quota.capturedAt} source={quota.source} account={`${entry.type} account`} />} classes={quotaClasses} />
++          <adapter.Body
++            quota={quota}
++            freshness={{
++              capturedAt: quota.capturedAt,
++              source: quota.source,
++              account: `${entry.type} account`,
++            }}
++            classes={quotaClasses}
++          />
+         ) : (
+           <div className={styles.idleHint}>{t(`${adapter.i18nPrefix}.idle`)}</div>
+         )}
+diff --git a/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx b/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx
+index b0021b6..2eddc65 100644
+--- a/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx
++++ b/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { QuotaWindowLabel } from '../../QuotaWindowLabel';
+ /**
+  * Antigravity 额度渲染体：套餐 chip 行（ultra/ultra-lite=金卡）+ 分组水位条。
+  */
+@@ -108,7 +109,11 @@ const getAntigravityPlanLabel = (
+   );
+ };
+ 
+-export function AntigravityQuotaBody({ quota, classes, freshness }: QuotaBodyProps<AntigravityQuotaState>) {
++export function AntigravityQuotaBody({
++  quota,
++  classes,
++  freshness,
++}: QuotaBodyProps<AntigravityQuotaState>) {
+   const { t } = useTranslation();
+   const groups = quota.groups ?? [];
+   const planLabel = getAntigravityPlanLabel(quota.subscription, t);
+@@ -210,11 +215,15 @@ export function AntigravityQuotaBody({ quota, classes, freshness }: QuotaBodyPro
+                 return (
+                   <div key={bucket.id} className={classes.quotaRow}>
+                     <div className={classes.quotaRowHeader}>
+-                      <span className={classes.quotaModel} title={bucketDescription}>
+-                        {bucketLabel}
+-                      </span>
++                      <QuotaWindowLabel
++                        label={bucketLabel}
++                        title={bucketDescription}
++                        className={classes.quotaModel}
++                        details={freshness}
++                        resetAtMs={bucket.resetTime ? Date.parse(bucket.resetTime) : null}
++                      />
+                       <div className={classes.quotaMeta}>
+-                        <span className={classes.quotaPercent}>{percentLabel}</span>{freshness}
++                        <span className={classes.quotaPercent}>{percentLabel}</span>
+                         <span
+                           className={
+                             soon
+diff --git a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
+index 30fda04..530a563 100644
+--- a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
++++ b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { QuotaWindowLabel } from '../../QuotaWindowLabel';
+ /**
+  * Claude 额度渲染体：套餐/额外用量 chip 行 + 用量窗口水位条。
+  */
+@@ -65,9 +66,14 @@ export function ClaudeQuotaBody({ quota, classes, freshness }: QuotaBodyProps<Cl
+               title={soon ? t('quota_management.soonest_row_hint') : undefined}
+             >
+               <div className={classes.quotaRowHeader}>
+-                <span className={classes.quotaModel}>{windowLabel}</span>
++                <QuotaWindowLabel
++                  label={windowLabel}
++                  className={classes.quotaModel}
++                  details={freshness}
++                  resetAtMs={window.resetAtMs}
++                />
+                 <div className={classes.quotaMeta}>
+-                  <span className={classes.quotaPercent}>{percentLabel}</span>{freshness}
++                  <span className={classes.quotaPercent}>{percentLabel}</span>
+                   {resetDisplay && (
+                     <QuotaResetLabel display={resetDisplay} classes={classes} soon={soon} />
+                   )}
+diff --git a/src/features/quota/providers/codex/CodexQuotaBody.tsx b/src/features/quota/providers/codex/CodexQuotaBody.tsx
+index 08066db..2e32de6 100644
+--- a/src/features/quota/providers/codex/CodexQuotaBody.tsx
++++ b/src/features/quota/providers/codex/CodexQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { QuotaWindowLabel } from '../../QuotaWindowLabel';
+ /**
+  * Codex 额度渲染体：套餐 chip 行（elite=Pro 20x 液态铂金 / premium=金卡）、
+  * 重置积分明细、用量窗口水位条。
+@@ -194,9 +195,14 @@ export function CodexQuotaBody({ quota, classes, freshness }: QuotaBodyProps<Cod
+               title={soon ? t('quota_management.soonest_row_hint') : undefined}
+             >
+               <div className={classes.quotaRowHeader}>
+-                <span className={classes.quotaModel}>{windowLabel}</span>
++                <QuotaWindowLabel
++                  label={windowLabel}
++                  className={classes.quotaModel}
++                  details={freshness}
++                  resetAtMs={window.resetAtMs}
++                />
+                 <div className={classes.quotaMeta}>
+-                  <span className={classes.quotaPercent}>{percentLabel}</span>{freshness}
++                  <span className={classes.quotaPercent}>{percentLabel}</span>
+                   {resetDisplay && (
+                     <QuotaResetLabel display={resetDisplay} classes={classes} soon={soon} />
+                   )}
+diff --git a/src/features/quota/providers/devin/DevinQuotaBody.tsx b/src/features/quota/providers/devin/DevinQuotaBody.tsx
+index 8732b82..7894fa7 100644
+--- a/src/features/quota/providers/devin/DevinQuotaBody.tsx
++++ b/src/features/quota/providers/devin/DevinQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { QuotaWindowLabel } from '../../QuotaWindowLabel';
+ import { useTranslation } from 'react-i18next';
+ import type { DevinQuotaState } from '@/types';
+ import { useNow } from '@/hooks/useNow';
+@@ -39,13 +40,18 @@ export function DevinQuotaBody({ quota, classes, freshness }: QuotaBodyProps<Dev
+         return (
+           <div key={window.id} className={classes.quotaRow}>
+             <div className={classes.quotaRowHeader}>
+-              <span className={classes.quotaModel}>{label}</span>
++              <QuotaWindowLabel
++                label={label}
++                className={classes.quotaModel}
++                details={freshness}
++                resetAtMs={window.resetAtMs}
++              />
+               <div className={classes.quotaMeta}>
+                 <span className={classes.quotaPercent}>
+                   {window.remainingPercent === null
+                     ? t('devin_quota.unavailable')
+                     : `${window.remainingPercent}%`}
+-                </span>{freshness}
++                </span>
+                 {reset ? (
+                   <QuotaResetLabel display={reset} classes={classes} soon={soon} />
+                 ) : (
+diff --git a/src/features/quota/providers/kimi/KimiQuotaBody.tsx b/src/features/quota/providers/kimi/KimiQuotaBody.tsx
+index b8d8752..fd19a7e 100644
+--- a/src/features/quota/providers/kimi/KimiQuotaBody.tsx
++++ b/src/features/quota/providers/kimi/KimiQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { QuotaWindowLabel } from '../../QuotaWindowLabel';
+ /**
+  * Kimi 额度渲染体：用量行水位条。
+  */
+@@ -56,9 +57,14 @@ export function KimiQuotaBody({ quota, classes, freshness }: QuotaBodyProps<Kimi
+             title={soon ? t('quota_management.soonest_row_hint') : undefined}
+           >
+             <div className={classes.quotaRowHeader}>
+-              <span className={classes.quotaModel}>{rowLabel}</span>
++              <QuotaWindowLabel
++                label={rowLabel}
++                className={classes.quotaModel}
++                details={freshness}
++                resetAtMs={row.resetAtMs}
++              />
+               <div className={classes.quotaMeta}>
+-                <span className={classes.quotaPercent}>{percentLabel}</span>{freshness}
++                <span className={classes.quotaPercent}>{percentLabel}</span>
+                 {resetDisplay && (
+                   <QuotaResetLabel display={resetDisplay} classes={classes} soon={soon} />
+                 )}
+diff --git a/src/features/quota/providers/meta/MetaQuotaBody.tsx b/src/features/quota/providers/meta/MetaQuotaBody.tsx
+index 2646faa..98e911c 100644
+--- a/src/features/quota/providers/meta/MetaQuotaBody.tsx
++++ b/src/features/quota/providers/meta/MetaQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { QuotaWindowLabel } from '../../QuotaWindowLabel';
+ import { useMemo } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import type { MetaQuotaState } from '@/types';
+@@ -54,13 +55,18 @@ export function MetaQuotaBody({ quota, classes, freshness }: QuotaBodyProps<Meta
+         return (
+           <div key={window.id} className={classes.quotaRow}>
+             <div className={classes.quotaRowHeader}>
+-              <span className={classes.quotaModel}>{label}</span>
++              <QuotaWindowLabel
++                label={label}
++                className={classes.quotaModel}
++                details={freshness}
++                resetAtMs={window.resetAt === undefined ? null : window.resetAt * 1000}
++              />
+               <div className={classes.quotaMeta}>
+                 <span className={classes.quotaPercent}>
+                   {remaining === null
+                     ? t('meta_quota.unknown')
+                     : t('meta_quota.remaining', { percent: Number(remaining.toFixed(1)) })}
+-                </span>{freshness}
++                </span>
+                 {resetDisplay && (
+                   <QuotaResetLabel display={resetDisplay} classes={classes} soon={soon} />
+                 )}
+diff --git a/src/features/quota/providers/xai/XaiQuotaBody.tsx b/src/features/quota/providers/xai/XaiQuotaBody.tsx
+index 3722a10..ad08696 100644
+--- a/src/features/quota/providers/xai/XaiQuotaBody.tsx
++++ b/src/features/quota/providers/xai/XaiQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { QuotaWindowLabel } from '../../QuotaWindowLabel';
+ /**
+  * xAI 额度渲染体：套餐 chip 行（SuperGrok Heavy / 付费档=金卡）、
+  * 周/月账单水位条、按量付费余额。
+@@ -203,13 +204,18 @@ export function XaiQuotaBody({ quota, classes, freshness }: QuotaBodyProps<XaiQu
+           title={weeklySoon ? t('quota_management.soonest_row_hint') : undefined}
+         >
+           <div className={classes.quotaRowHeader}>
+-            <span className={classes.quotaModel}>{t('xai_quota.weekly_limit')}</span>
++            <QuotaWindowLabel
++              label={t('xai_quota.weekly_limit')}
++              className={classes.quotaModel}
++              details={freshness}
++              resetAtMs={billing.resetAtMs}
++            />
+             <div className={classes.quotaMeta}>
+               <span className={classes.quotaPercent}>
+                 {weeklyUsed === null
+                   ? t('xai_quota.usage_unavailable')
+                   : t('xai_quota.used_percent', { percent: formatXaiPercent(weeklyUsed) })}
+-              </span>{freshness}
++              </span>
+               {weeklyResetDisplay && (
+                 <QuotaResetLabel display={weeklyResetDisplay} classes={classes} soon={weeklySoon} />
+               )}
+@@ -227,15 +233,17 @@ export function XaiQuotaBody({ quota, classes, freshness }: QuotaBodyProps<XaiQu
+         return (
+           <div key={`product-${item.product}`} className={classes.quotaRow}>
+             <div className={classes.quotaRowHeader}>
+-              <span className={classes.quotaModel}>
+-                {t('xai_quota.product_usage', { product: item.product })}
+-              </span>
++              <QuotaWindowLabel
++                label={t('xai_quota.product_usage', { product: item.product })}
++                className={classes.quotaModel}
++                details={freshness}
++              />
+               <div className={classes.quotaMeta}>
+                 <span className={classes.quotaPercent}>
+                   {t('xai_quota.used_percent', {
+                     percent: formatXaiPercent(used),
+                   })}
+-                </span>{freshness}
++                </span>
+               </div>
+             </div>
+             <QuotaMeter percent={remainingPercent} classes={classes} index={index + 1} />
+@@ -245,9 +253,13 @@ export function XaiQuotaBody({ quota, classes, freshness }: QuotaBodyProps<XaiQu
+       {onDemandCap > 0 ? (
+         <div className={classes.quotaRow}>
+           <div className={classes.quotaRowHeader}>
+-            <span className={classes.quotaModel}>{t('xai_quota.pay_as_you_go_label')}</span>
++            <QuotaWindowLabel
++              label={t('xai_quota.pay_as_you_go_label')}
++              className={classes.quotaModel}
++              details={freshness}
++            />
+             <div className={classes.quotaMeta}>
+-              <span className={classes.quotaPercent}>{onDemandPercentLabel}</span>{freshness}
++              <span className={classes.quotaPercent}>{onDemandPercentLabel}</span>
+               <span className={classes.quotaAmount}>{onDemandAmountLabel}</span>
+             </div>
+           </div>
+@@ -266,9 +278,13 @@ export function XaiQuotaBody({ quota, classes, freshness }: QuotaBodyProps<XaiQu
+       {hasMonthlyData && (
+         <div className={classes.quotaRow}>
+           <div className={classes.quotaRowHeader}>
+-            <span className={classes.quotaModel}>{t('xai_quota.monthly_credits')}</span>
++            <QuotaWindowLabel
++              label={t('xai_quota.monthly_credits')}
++              className={classes.quotaModel}
++              details={freshness}
++            />
+             <div className={classes.quotaMeta}>
+-              <span className={classes.quotaPercent}>{percentLabel}</span>{freshness}
++              <span className={classes.quotaPercent}>{percentLabel}</span>
+               <span className={classes.quotaAmount}>{amountLabel}</span>
+               {monthlyResetDisplay && (
+                 <QuotaResetLabel display={monthlyResetDisplay} classes={classes} />
+diff --git a/src/features/quota/quotaObservation.ts b/src/features/quota/quotaObservation.ts
+new file mode 100644
+index 0000000..d374d15
+--- /dev/null
++++ b/src/features/quota/quotaObservation.ts
+@@ -0,0 +1,24 @@
++export interface QuotaObservationDetails {
++  capturedAt?: string;
++  source?: string;
++  account: string;
++  stale?: boolean;
++}
++
++export function quotaObservationState(
++  details: QuotaObservationDetails,
++  now: number,
++  resetAtMs?: number | null
++) {
++  const captured = details.capturedAt ? Date.parse(details.capturedAt) : NaN;
++  const elapsed = Number.isFinite(captured)
++    ? Math.max(0, Math.floor((now - captured) / 1000))
++    : null;
++  return {
++    captured,
++    elapsed,
++    stale: Boolean(
++      details.stale || elapsed === null || elapsed > 900 || (resetAtMs != null && resetAtMs <= now)
++    ),
++  };
++}
+diff --git a/src/features/quota/trafficWindows.ts b/src/features/quota/trafficWindows.ts
+new file mode 100644
+index 0000000..3e7ba41
+--- /dev/null
++++ b/src/features/quota/trafficWindows.ts
+@@ -0,0 +1,65 @@
++import type { TFunction } from 'i18next';
++import type { TrafficQuota } from './useTrafficQuota';
++
++export function trafficWindow(item: TrafficQuota & { accountLabel: string }, t: TFunction) {
++  const entries = Object.entries(item.headers);
++  const value = (suffix: string) =>
++    entries.find(([name]) => name.toLowerCase().endsWith(suffix))?.[1]?.[0];
++  const number = (text: string | undefined) =>
++    text === undefined || text.trim() === '' ? NaN : Number(text);
++  const used =
++    number(value('-used-percent') ?? value('-utilization')) *
++    (item.provider === 'claude' ? 100 : 1);
++  if (!Number.isFinite(used)) return null;
++  const minutes = number(value('-window-minutes'));
++  const seconds = number(value('-limit-window-seconds') ?? value('-window-seconds'));
++  const encoded = /(?:^|[-_])(\d+)(h|d)(?:[-_]|$)/i.exec(item.window);
++  const rawDuration =
++    Number.isFinite(minutes) && minutes > 0
++      ? minutes * 60
++      : Number.isFinite(seconds) && seconds > 0
++        ? seconds
++        : encoded
++          ? Number(encoded[1]) * (encoded[2].toLowerCase() === 'd' ? 86400 : 3600)
++          : null;
++  const duration =
++    rawDuration != null && Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null;
++  const limitName = value('-limit-name');
++  const period =
++    duration === 18000
++      ? t('codex_quota.primary_window')
++      : duration === 604800
++        ? t('codex_quota.secondary_window')
++        : duration != null
++          ? duration % 86400 === 0
++            ? t('quota_observation.days', { count: duration / 86400 })
++            : duration % 3600 === 0
++              ? t('quota_observation.hours', { count: duration / 3600 })
++              : t('quota_observation.minutes', { count: duration / 60 })
++          : item.window
++              .replace(/^x-codex-/, '')
++              .replace(/^claude-/, '')
++              .replace(/[-_]/g, ' ');
++  const label = limitName ? `${limitName} · ${period}` : period;
++  const rawReset = value('-reset-at') ?? value('-reset');
++  const resetSeconds = number(rawReset);
++  const observed = Date.parse(item.observed_at);
++  const after = number(value('-reset-after-seconds'));
++  const candidate =
++    rawReset != null
++      ? Number.isFinite(resetSeconds)
++        ? resetSeconds * 1000
++        : Date.parse(rawReset)
++      : Number.isFinite(observed) && Number.isFinite(after) && after >= 0
++        ? observed + after * 1000
++        : NaN;
++  const resetAtMs = Number.isFinite(candidate) && Math.abs(candidate) <= 8.64e15 ? candidate : null;
++  return {
++    id: item.window,
++    label,
++    duration,
++    resetAtMs,
++    remaining: Math.max(0, Math.min(100, 100 - used)),
++    details: { capturedAt: item.observed_at, source: item.source, account: item.accountLabel },
++  };
++}
+diff --git a/src/features/quota/types.ts b/src/features/quota/types.ts
+index c19ad4e..d25d337 100644
+--- a/src/features/quota/types.ts
++++ b/src/features/quota/types.ts
+@@ -1,4 +1,4 @@
+-import type { ReactNode } from 'react';
++import type { QuotaObservationDetails } from './quotaObservation';
+ /**
+  * 额度渲染层的类型化样式契约。
+  *
+@@ -99,6 +99,6 @@ export function bindQuotaClasses(module: Record<string, string>, source: string)
+ 
+ export interface QuotaBodyProps<TState> {
+   quota: TState;
+-  freshness?: ReactNode;
++  freshness?: QuotaObservationDetails;
+   classes: QuotaClassMap;
+ }
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index a9c8606..ef9af20 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -2228,5 +2228,21 @@
+     "unavailable": "Resets are currently unavailable.",
+     "rate_limited": "Request rate limited.",
+     "auth_error": "Authorization was refused."
++  },
++  "quota_observation": {
++    "details": "Observation details for {{window}}",
++    "observed": "Last observed",
++    "age": "{{minutes}}m {{seconds}}s ago",
++    "source": "Source",
++    "unknown": "Unavailable",
++    "traffic": "API response headers",
++    "websocket": "WebSocket event",
++    "scheduled": "Scheduled provider query",
++    "manual": "Manual provider query",
++    "stale": "Stale observation",
++    "cached": "Cached observation",
++    "days": "{{count}}-day limit",
++    "hours": "{{count}}-hour limit",
++    "minutes": "{{count}}-minute limit"
+   }
+ }
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index a0b4ca4..4c32119 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -2222,5 +2222,21 @@
+     "unavailable": "Сбросы временно недоступны.",
+     "rate_limited": "Слишком много запросов.",
+     "auth_error": "Авторизация отклонена."
++  },
++  "quota_observation": {
++    "details": "Данные наблюдения для {{window}}",
++    "observed": "Последнее наблюдение",
++    "age": "{{minutes}} мин {{seconds}} с назад",
++    "source": "Источник",
++    "unknown": "Недоступно",
++    "traffic": "Заголовки ответа API",
++    "websocket": "Событие WebSocket",
++    "scheduled": "Запланированный запрос",
++    "manual": "Ручной запрос",
++    "stale": "Устаревшее наблюдение",
++    "cached": "Наблюдение из кэша",
++    "days": "Лимит на {{count}} дн.",
++    "hours": "Лимит на {{count}} ч",
++    "minutes": "Лимит на {{count}} мин"
+   }
+ }
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index 22535b5..1d2e53c 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -2226,5 +2226,21 @@
+     "unavailable": "重置暂不可用。",
+     "rate_limited": "请求过于频繁。",
+     "auth_error": "授权被拒绝。"
++  },
++  "quota_observation": {
++    "details": "{{window}} 的观测详情",
++    "observed": "最近观测",
++    "age": "{{minutes}} 分 {{seconds}} 秒前",
++    "source": "来源",
++    "unknown": "不可用",
++    "traffic": "API 响应头",
++    "websocket": "WebSocket 事件",
++    "scheduled": "定时提供商查询",
++    "manual": "手动提供商查询",
++    "stale": "观测已过期",
++    "cached": "缓存观测",
++    "days": "{{count}} 天限额",
++    "hours": "{{count}} 小时限额",
++    "minutes": "{{count}} 分钟限额"
+   }
+ }
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index 89a26e7..8c81537 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -2252,5 +2252,21 @@
+     "unavailable": "重置暫不可用。",
+     "rate_limited": "請求過於頻繁。",
+     "auth_error": "授權遭拒。"
++  },
++  "quota_observation": {
++    "details": "{{window}} 的觀測詳情",
++    "observed": "最近觀測",
++    "age": "{{minutes}} 分 {{seconds}} 秒前",
++    "source": "來源",
++    "unknown": "無法取得",
++    "traffic": "API 回應標頭",
++    "websocket": "WebSocket 事件",
++    "scheduled": "排程提供者查詢",
++    "manual": "手動提供者查詢",
++    "stale": "觀測已過期",
++    "cached": "快取觀測",
++    "days": "{{count}} 天限額",
++    "hours": "{{count}} 小時限額",
++    "minutes": "{{count}} 分鐘限額"
+   }
+ }
+diff --git a/tests/trafficQuotaWindows.test.tsx b/tests/trafficQuotaWindows.test.tsx
+new file mode 100644
+index 0000000..9a4a061
+--- /dev/null
++++ b/tests/trafficQuotaWindows.test.tsx
+@@ -0,0 +1,136 @@
++import { expect, test } from 'bun:test';
++import { createElement } from 'react';
++import { renderToStaticMarkup } from 'react-dom/server';
++import i18n from '../src/i18n';
++import { trafficWindow } from '../src/features/quota/trafficWindows';
++import { QuotaWindowLabel } from '../src/features/quota/QuotaWindowLabel';
++import { quotaObservationState } from '../src/features/quota/quotaObservation';
++import { QuotaMeter } from '../src/features/quota/components/QuotaMeter';
++import type { QuotaClassMap } from '../src/features/quota/types';
++
++const fixture = {
++  auth_index: 'fixture',
++  provider: 'codex',
++  window: 'x-codex-primary',
++  observed_at: '2026-10-03T12:00:00Z',
++  source: 'api_response_headers',
++  accountLabel: 'Codex account 1',
++};
++const t = i18n.getFixedT('en');
++test('classifies primary and secondary by duration, retaining custom and named windows', () => {
++  const weekly = trafficWindow(
++    {
++      ...fixture,
++      headers: {
++        'x-codex-primary-used-percent': ['10'],
++        'x-codex-primary-window-minutes': ['10080'],
++      },
++    },
++    t
++  )!;
++  expect(weekly.label).toBe('Weekly limit');
++  expect(weekly.remaining).toBe(90);
++  const short = trafficWindow(
++    {
++      ...fixture,
++      window: 'x-codex-secondary',
++      headers: {
++        'x-codex-secondary-used-percent': ['80'],
++        'x-codex-secondary-window-minutes': ['300'],
++      },
++    },
++    t
++  )!;
++  expect(short.label).toBe('5-hour limit');
++  const custom = trafficWindow(
++    {
++      ...fixture,
++      headers: {
++        'x-codex-primary-used-percent': ['25'],
++        'x-codex-primary-window-minutes': ['90'],
++        'x-codex-limit-name': ['custom'],
++      },
++    },
++    t
++  )!;
++  expect(custom.label).toBe('custom · 90-minute limit');
++  const unknown = trafficWindow(
++    { ...fixture, headers: { 'x-codex-primary-used-percent': ['25'] } },
++    t
++  )!;
++  expect(unknown.label).toBe('primary');
++  expect(unknown.label).not.toBe('5-hour limit');
++});
++test('Claude ISO resets and relative resets preserve the actual observation time', () => {
++  const item = trafficWindow(
++    {
++      ...fixture,
++      provider: 'claude',
++      window: 'claude-7d',
++      headers: {
++        'anthropic-ratelimit-unified-7d-utilization': ['0.4'],
++        'anthropic-ratelimit-unified-7d-reset': ['2026-10-04T12:00:00Z'],
++      },
++    },
++    t
++  )!;
++  expect(item.label).toBe('Weekly limit');
++  expect(item.remaining).toBe(60);
++  expect(item.resetAtMs).toBe(Date.parse('2026-10-04T12:00:00Z'));
++  const relative = trafficWindow(
++    {
++      ...fixture,
++      headers: {
++        'x-codex-primary-used-percent': ['10'],
++        'x-codex-primary-reset-after-seconds': ['30'],
++      },
++    },
++    t
++  )!;
++  expect(relative.resetAtMs).toBe(Date.parse(fixture.observed_at) + 30000);
++  expect(
++    trafficWindow({ ...fixture, headers: { 'x-codex-primary-used-percent': ['Infinity'] } }, t)
++  ).toBeNull();
++});
++test('unknown, old and expired observations stay explicit without advancing captures', () => {
++  const now = Date.parse('2026-10-03T12:10:00Z');
++  expect(
++    quotaObservationState({ account: 'fixture', capturedAt: fixture.observed_at }, now).elapsed
++  ).toBe(600);
++  expect(
++    quotaObservationState({ account: 'fixture', capturedAt: fixture.observed_at }, now, now - 1)
++      .stale
++  ).toBe(true);
++  expect(quotaObservationState({ account: 'fixture' }, now).stale).toBe(true);
++  expect(
++    quotaObservationState({ account: 'fixture', capturedAt: '2026-10-03T13:00:00Z' }, now).elapsed
++  ).toBe(0);
++});
++test('window labels expose observation controls and native meters retain the three fill bands', () => {
++  const label = renderToStaticMarkup(
++    createElement(QuotaWindowLabel, {
++      label: 'Weekly limit',
++      className: 'quotaModel',
++      details: { account: 'fixture', capturedAt: fixture.observed_at },
++    })
++  );
++  expect(label).toContain('<button');
++  expect(label).toContain('aria-expanded="false"');
++  expect(label).not.toContain('<svg');
++  const classes = {
++    quotaBar: 'native-meter',
++    quotaBarFill: 'fill',
++    quotaBarFillHigh: 'green',
++    quotaBarFillMedium: 'amber',
++    quotaBarFillLow: 'red',
++  } as QuotaClassMap;
++  for (const [percent, color] of [
++    [90, 'green'],
++    [50, 'amber'],
++    [10, 'red'],
++  ] as const) {
++    const html = renderToStaticMarkup(createElement(QuotaMeter, { percent, classes }));
++    expect(html).toContain(`fill ${color}`);
++    expect(html).not.toContain('<progress');
++  }
++});

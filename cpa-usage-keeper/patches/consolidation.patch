@@ -63,6 +63,22 @@ index ee65379..28a955e 100644
          credentials_refresh_status_queued: '排隊中',
          credentials_refresh_status_running: '執行中',
          credentials_refresh_status_completed: '已完成',
+diff --git a/web/src/pages/UsagePage.module.scss b/web/src/pages/UsagePage.module.scss
+index 932697e..9a0f9d4 100644
+--- a/web/src/pages/UsagePage.module.scss
++++ b/web/src/pages/UsagePage.module.scss
+@@ -4676,9 +4676,9 @@
+ 
+ .overviewPrimaryRow {
+   display: grid;
+-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
++  grid-template-columns: repeat(2, minmax(0, 1fr));
+   gap: 14px;
+-  > .statCard { height: 234px; min-height: 234px; box-sizing: border-box; }
++  > .statCard { min-width: 0; height: 234px; min-height: 234px; box-sizing: border-box; }
+   @media (max-width: 820px) { grid-template-columns: minmax(0, 1fr); }
+ }
+ .overviewValueRow { display: flex; align-items: baseline; flex-wrap: wrap; gap: 18px; }
 diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
 index 18bbf7e..9a153e4 100644
 --- a/web/src/pages/UsagePage.tsx

@@ -1,0 +1,58 @@
+--- a/internal/refreshdiagnostic/error.go
++++ b/internal/refreshdiagnostic/error.go
+@@ -11,11 +11,15 @@
+ const Message = "The provider refresh token is no longer usable. Sign in again through OAuth Login."
+ 
+ type Error struct {
+-	Status int
+-	Reason string
++	Status       int
++	Reason       string
++	InvalidGrant bool
+ }
+ 
+ func (e *Error) Error() string {
++	if e.InvalidGrant {
++		return fmt.Sprintf("token refresh failed with status %d: invalid_grant", e.Status)
++	}
+ 	if e.Reason != "" {
+ 		return fmt.Sprintf("token refresh failed with status %d: %s; %s", e.Status, e.Reason, Message)
+ 	}
+@@ -43,7 +47,11 @@
+ 			if json.Unmarshal(response.Error, &nested) == nil {
+ 				code = nested.Code
+ 			}
++			if code == "" {
++				_ = json.Unmarshal(response.Error, &code)
++			}
+ 		}
++		result.InvalidGrant = code == "invalid_grant"
+ 		if IsReason(code) {
+ 			result.Reason = code
+ 		}
+--- a/internal/refreshdiagnostic/error_test.go
++++ b/internal/refreshdiagnostic/error_test.go
+@@ -26,3 +26,12 @@
+ 		}
+ 	}
+ }
++
++func TestInvalidGrantRemainsClassifiableWithoutLeakingDetails(t *testing.T) {
++	for _, body := range []string{`{"error":"invalid_grant","error_description":"secret"}`, `{"error":{"code":"invalid_grant","message":"secret"}}`} {
++		err := FromResponse(400, []byte(body))
++		if !strings.Contains(err.Error(), "invalid_grant") || strings.Contains(err.Error(), "secret") || Reason(err) != "" {
++			t.Fatalf("unexpected diagnostic: %v", err)
++		}
++	}
++}
+--- a/internal/auth/codex/openai_auth.go
++++ b/internal/auth/codex/openai_auth.go
+@@ -343,7 +343,7 @@
+ 	if err == nil {
+ 		return false
+ 	}
+-	return refreshdiagnostic.Reason(err) != ""
++	return refreshdiagnostic.Reason(err) != "" || strings.Contains(strings.ToLower(err.Error()), "invalid_grant")
+ }
+ 
+ // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.

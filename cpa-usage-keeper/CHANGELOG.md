@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.18
+
+- Give Total Requests and Usage Limits equal widths, preventing the quota table from expanding its card.
+- Preserve 234px top cards, compact quota rows, expanded sparkline and narrow-screen stacking across all reporting roles.
+
 ## 0.1.17
 
 - Give each account's quota refresh button a translated, account-specific accessible label in all supported languages.

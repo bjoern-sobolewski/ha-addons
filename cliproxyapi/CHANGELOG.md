@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6
+
+- Restore native quota typography, spacing and 6px green/amber/red meters.
+- Show cached observation details through accessible quota window labels, without refresh badges or visible age text.
+- Identify short, weekly and custom windows from duration metadata instead of primary/secondary order.
+- Preserve sanitized invalid_grant classification and retry behavior.
+
 ## 0.1.5
 
 - Replace corrupted quota text and separate freshness badges with a small inline refresh icon and age after the remaining amount.

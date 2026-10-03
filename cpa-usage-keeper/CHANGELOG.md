@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.15
+
+- Align each quota window, remaining bar, percentage and info icon on one compact line, with a labeled Window header and a separate reset countdown.
+- Include minutes in multi-day resets; show browser-local reset dates and live minutes/seconds since each window was last observed in its tooltip.
+
 ## 0.1.14
 
 - Put Total Requests and a compact, scrollable Usage Limits table in the top row; show average RPM beside the request count and enlarge its graph.

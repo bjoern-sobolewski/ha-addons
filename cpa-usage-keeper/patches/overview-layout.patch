@@ -1,9 +1,9 @@
 diff --git a/web/src/components/usage/OverviewQuotaPanel.module.scss b/web/src/components/usage/OverviewQuotaPanel.module.scss
 new file mode 100644
-index 0000000..88ca19d
+index 0000000..41f24a8
 --- /dev/null
 +++ b/web/src/components/usage/OverviewQuotaPanel.module.scss
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,36 @@
 +.panel {
 +  --accent: #8b5cf6;
 +  --accent-soft: rgba(139, 92, 246, 0.12);
@@ -16,21 +16,22 @@ index 0000000..88ca19d
 +.scroll { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--border-color) transparent; }
 +.scroll table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; font-variant-numeric: tabular-nums; }
 +.scroll th { text-align: left; font-size: 11px; font-weight: 500; color: var(--text-tertiary); position: sticky; top: 0; background: var(--bg-primary); z-index: 1; padding: 3px 0 7px; }
-+.scroll th:first-child { width: 34%; }
-+.scroll th:nth-child(2) { width: 42%; }
-+.scroll th:last-child { width: 24%; padding-left: 12px; }
++.scroll th:first-child { width: 30%; }
++.scroll th:nth-child(2) { width: 48%; }
++.scroll th:last-child { width: 22%; padding-left: 12px; }
 +.scroll td { vertical-align: top; border-top: 1px solid var(--border-color); padding: 9px 10px 9px 0; }
 +.scroll td:last-child { padding-right: 0; padding-left: 12px; }
 +.account { display: block; overflow-wrap: anywhere; font-weight: 650; }
 +.scroll tr.continuation td { border-top: 0; padding-top: 0; }
-+.limit, .reset { min-height: 35px; }
-+.caption { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
++.limit, .reset { min-height: 22px; }
++.limit { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 6px; align-items: center; }
++.quotaHeading { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 6px; }
 +.window { color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
 +.metric { font-size: 10px; }
 +.value { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 +.info { border: 0; padding: 0; background: transparent; color: var(--text-tertiary); font: inherit; cursor: pointer; }
 +.stale { color: var(--warning-color, #d97706); }
-+.limit progress { display: block; width: 100%; height: 4px; margin: 5px 0 0; border: 0; border-radius: 3px; overflow: hidden; appearance: none; background: var(--bg-tertiary); }
++.limit progress { display: block; width: 100%; min-width: 0; height: 4px; margin: 0; border: 0; border-radius: 3px; overflow: hidden; appearance: none; background: var(--bg-tertiary); }
 +.limit progress::-webkit-progress-bar { background: var(--bg-tertiary); }
 +.limit progress::-webkit-progress-value { background: #22c55e; border-radius: 3px; }
 +.limit progress::-moz-progress-bar { background: #22c55e; border-radius: 3px; }
@@ -41,10 +42,10 @@ index 0000000..88ca19d
 +@media (max-width: 820px) { .panel { height: 234px; } }
 diff --git a/web/src/components/usage/OverviewQuotaPanel.tsx b/web/src/components/usage/OverviewQuotaPanel.tsx
 new file mode 100644
-index 0000000..94784dc
+index 0000000..c0e6951
 --- /dev/null
 +++ b/web/src/components/usage/OverviewQuotaPanel.tsx
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,133 @@
 +import { useEffect, useState } from 'react';
 +import { useTranslation } from 'react-i18next';
 +import { ApiError, fetchAdminProviderQuota, fetchKeyQuota, fetchReadOnlyQuota, type ViewerQuotaAccount, type ViewerQuotaRow } from '@/lib/api';
@@ -72,13 +73,24 @@ index 0000000..94784dc
 +  if (!Number.isFinite(reset)) return null;
 +  const minutes = Math.ceil((reset - now) / 60_000);
 +  if (minutes <= 0) return '0m';
-+  if (minutes >= 1440) return `${Math.floor(minutes / 1440)}d ${Math.floor(minutes % 1440 / 60)}h`;
++  if (minutes >= 1440) return `${Math.floor(minutes / 1440)}d ${Math.floor(minutes % 1440 / 60)}h ${minutes % 60}m`;
 +  if (minutes >= 60) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 +  return `${minutes}m`;
 +}
 +
 +function windowLabel(label: string): string {
 +  return label.replace(/Weekly/gi, '7d').replace(/Monthly/gi, '30d');
++}
++
++export function observationAge(captured: number, now: number): { minutes: number; seconds: string } {
++  const seconds = Math.max(0, Math.floor((now - captured) / 1000));
++  return { minutes: Math.floor(seconds / 60), seconds: String(seconds % 60).padStart(2, '0') };
++}
++
++export function localizedResetDate(reset: number): string {
++  return new Intl.DateTimeFormat(undefined, {
++    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
++  }).format(new Date(reset));
 +}
 +
 +export function OverviewQuotaPanel({ scope = 'admin', onAuthRequired }: {
@@ -102,7 +114,7 @@ index 0000000..94784dc
 +    }
 +  }), [scope, onAuthRequired]);
 +  useEffect(() => {
-+    const timer = window.setInterval(() => { if (!document.hidden) setNow(Date.now()); }, 60_000);
++    const timer = window.setInterval(() => { if (!document.hidden) setNow(Date.now()); }, 1000);
 +    return () => window.clearInterval(timer);
 +  }, []);
 +  return <OverviewQuotaTable accounts={accounts} now={now} notice={error ? t('key_quota.error') : !loaded ? t('common.loading') : undefined} />;
@@ -113,12 +125,13 @@ index 0000000..94784dc
 +}) {
 +  const { t } = useTranslation();
 +  const { tooltip, showOnMouseEnter, hideOnMouseLeave, showOnFocus, hideOnBlur, dismiss } = usePortalTooltip();
++  const tooltipDetails = new Map<string, string[]>();
 +  return <section className={`${cardStyles.statCard} ${styles.panel}`} aria-label={t('overview_limits.title')}>
 +    <div className={cardStyles.statCardHeader}><span className={cardStyles.statLabel}>{t('overview_limits.title')}</span></div>
 +    {notice && <span className={styles.notice} role="status">{notice}</span>}
 +    <div className={styles.scroll} role="region" aria-label={t('overview_limits.title')} tabIndex={0}>
 +      <table>
-+        <thead><tr><th>{t('overview_limits.account')}</th><th>{t('overview_limits.remaining')}</th><th>{t('overview_limits.resets')}</th></tr></thead>
++        <thead><tr><th>{t('overview_limits.account')}</th><th><div className={styles.quotaHeading}><span>{t('overview_limits.window')}</span><span>{t('overview_limits.remaining')}</span></div></th><th>{t('overview_limits.resets')}</th></tr></thead>
 +        <tbody>{accounts.flatMap(account => {
 +          const rows = overviewQuotaRows(account);
 +          if (rows.length === 0) return [<tr key={`${account.kind}:${account.label}`}>
@@ -132,24 +145,26 @@ index 0000000..94784dc
 +              const reset = row.reset_at ? Date.parse(row.reset_at) : NaN;
 +              const stale = row.stale || !Number.isFinite(captured) || now - captured > 900_000 || reset <= now;
 +              const label = windowLabel(row.label);
-+              const details = [account.label, label, quotaSourceLabel(row.source),
-+                Number.isFinite(captured) ? `${t('key_quota.updated')}: ${new Date(captured).toLocaleString()}` : t('overview_limits.capture_unknown'),
-+                ...(Number.isFinite(reset) ? [`${t('key_quota.resets')}: ${new Date(reset).toLocaleString()}`] : []),
++              const tooltipKey = `${account.kind}:${account.provider}:${account.label}:${index}`;
++              const details = [account.label, `${t('overview_limits.window')}: ${label}`,
++                ...(Number.isFinite(reset) ? [`${t('key_quota.resets')}: ${localizedResetDate(reset)}`] : []),
++                Number.isFinite(captured) ? `${t('key_quota.updated')}: ${t('overview_limits.observed_ago', observationAge(captured, now))}` : t('overview_limits.capture_unknown'),
++                quotaSourceLabel(row.source),
 +                ...(stale ? [t('overview_limits.stale')] : []),
 +              ];
++              tooltipDetails.set(tooltipKey, details);
 +              const value = percent != null ? `${percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`
 +                : row.remaining != null ? `${row.remaining.toLocaleString(undefined, { maximumFractionDigits: 2 })}${row.limit != null ? ` / ${row.limit.toLocaleString()}` : ''}` : '—';
 +              return <tr key={`${account.kind}:${account.label}:${index}`} className={index > 0 ? styles.continuation : undefined}>
 +                {index === 0 && <td rowSpan={rows.length}><strong className={styles.account}>{account.label}</strong></td>}
 +                <td><div className={styles.limit}>
-+                <div className={styles.caption}><span className={styles.window}>{label}{row.metric && row.metric !== 'window' && <span className={styles.metric}> · {row.metric}</span>}</span>
++                <span className={styles.window}>{label}{row.metric && row.metric !== 'window' && <span className={styles.metric}> · {row.metric}</span>}</span>
++                {percent != null ? <progress className={percent < 25 || row.limit_reached ? styles.low : undefined} max={100} value={percent} aria-label={`${account.label} ${label}: ${t('overview_limits.remaining')}`} /> : <span />}
 +                  <span className={styles.value}><strong>{value}</strong><button type="button" className={`${styles.info} ${stale ? styles.stale : ''}`}
 +                    aria-label={`${t('overview_limits.info')}: ${details.join(' · ')}`}
-+                    onMouseEnter={event => showOnMouseEnter(details, event.currentTarget)} onMouseLeave={event => hideOnMouseLeave(event.currentTarget)}
-+                    onFocus={event => showOnFocus(details, event.currentTarget)} onBlur={event => hideOnBlur(event.currentTarget)}
-+                    onClick={event => showOnFocus(details, event.currentTarget)} onKeyDown={event => { if (event.key === 'Escape') dismiss(); }}>ⓘ</button></span>
-+                </div>
-+                {percent != null && <progress className={percent < 25 || row.limit_reached ? styles.low : undefined} max={100} value={percent} aria-label={`${account.label} ${label}: ${t('overview_limits.remaining')}`} />}
++                    onMouseEnter={event => showOnMouseEnter([tooltipKey], event.currentTarget)} onMouseLeave={event => hideOnMouseLeave(event.currentTarget)}
++                    onFocus={event => showOnFocus([tooltipKey], event.currentTarget)} onBlur={event => hideOnBlur(event.currentTarget)}
++                    onClick={event => showOnFocus([tooltipKey], event.currentTarget)} onKeyDown={event => { if (event.key === 'Escape') dismiss(); }}>ⓘ</button></span>
 +              </div></td>
 +            <td><div className={styles.reset}
 +              aria-label={`${windowLabel(row.label)}: ${t('overview_limits.resets')}`}>
@@ -161,7 +176,7 @@ index 0000000..94784dc
 +      </table>
 +      {!notice && accounts.length === 0 && <span className={styles.notice}>{t('key_quota.empty')}</span>}
 +    </div>
-+    <PortalTooltip tooltip={tooltip} />
++    <PortalTooltip tooltip={tooltip && tooltipDetails.has(tooltip.lines[0]) ? { ...tooltip, lines: tooltipDetails.get(tooltip.lines[0])! } : null} />
 +  </section>;
 +}
 diff --git a/web/src/components/usage/StatCards.tsx b/web/src/components/usage/StatCards.tsx
@@ -265,10 +280,10 @@ index f4e6cdb..d927936 100644
        </div>
 diff --git a/web/src/components/usage/test/OverviewQuotaPanel.test.tsx b/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
 new file mode 100644
-index 0000000..73b776c
+index 0000000..5712080
 --- /dev/null
 +++ b/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,106 @@
 +// @vitest-environment happy-dom
 +import React, { act } from 'react';
 +import { createRoot } from 'react-dom/client';
@@ -277,7 +292,7 @@ index 0000000..73b776c
 +import type { ViewerQuotaAccount } from '@/lib/api';
 +const api = vi.hoisted(() => ({ fetchAdminProviderQuota: vi.fn(), fetchKeyQuota: vi.fn(), fetchReadOnlyQuota: vi.fn() }));
 +vi.mock('@/lib/api', async original => ({ ...await original<typeof import('@/lib/api')>(), ...api }));
-+import { OverviewQuotaPanel, OverviewQuotaTable, remainingPercent, resetCountdown } from '../OverviewQuotaPanel';
++import { OverviewQuotaPanel, OverviewQuotaTable, remainingPercent, resetCountdown, observationAge, localizedResetDate } from '../OverviewQuotaPanel';
 +
 +const now = Date.parse('2026-10-03T15:00:00Z');
 +const accounts: ViewerQuotaAccount[] = [
@@ -306,8 +321,13 @@ index 0000000..73b776c
 +    expect(remainingPercent({ label: 'Invalid', remaining: 10, limit: 0 })).toBeNull();
 +    expect(remainingPercent({ label: 'Invalid', remaining_percent: NaN })).toBeNull();
 +    expect(resetCountdown('2026-10-03T17:18:00Z', now)).toBe('2h 18m');
-+    expect(resetCountdown('2026-10-09T21:00:00Z', now)).toBe('6d 6h');
++    expect(resetCountdown('2026-10-09T21:00:00Z', now)).toBe('6d 6h 0m');
++    expect(resetCountdown('2026-10-09T21:34:00Z', now)).toBe('6d 6h 34m');
++    expect(resetCountdown('2026-10-04T15:00:00Z', now)).toBe('1d 0h 0m');
++    expect(resetCountdown('2026-10-03T14:00:00Z', now)).toBe('0m');
 +    expect(resetCountdown(undefined, now)).toBeNull();
++    expect(observationAge(now - 123_000, now)).toEqual({ minutes: 2, seconds: '03' });
++    expect(observationAge(now + 1_000, now)).toEqual({ minutes: 0, seconds: '00' });
 +  });
 +
 +  it('hides reserve, aligns windows with resets, and presents each window’s actual source in an unclipped tooltip', async () => {
@@ -315,11 +335,11 @@ index 0000000..73b776c
 +    try {
 +      await act(async () => root.render(<OverviewQuotaTable accounts={accounts} now={now} />));
 +      expect(container.textContent).not.toContain('Reserve');
-+      expect([...container.querySelectorAll('th')].map(th => th.textContent)).toEqual(['Provider / account', 'Remaining', 'Resets in']);
++      expect([...container.querySelectorAll('th')].map(th => th.textContent)).toEqual(['Provider / account', 'WindowRemaining', 'Resets in']);
 +      const first = container.querySelector('tbody tr')!;
 +      expect(first.textContent).toContain('0%');
 +      expect(first.textContent).toContain('2h 18m');
-+      expect(first.nextElementSibling?.textContent).toContain('6d 6h');
++      expect(first.nextElementSibling?.textContent).toContain('6d 6h 0m');
 +      expect(first.querySelector('td')?.rowSpan).toBe(2);
 +      expect(container.querySelectorAll('progress')).toHaveLength(3);
 +      expect(container.textContent).toContain('Awaiting update');
@@ -332,9 +352,26 @@ index 0000000..73b776c
 +      const tooltip = document.querySelector('[role="tooltip"]')!;
 +      expect(tooltip.textContent).toContain('Codex account 1');
 +      expect(tooltip.textContent).toContain('API response headers');
-+      expect(tooltip.textContent).toContain(new Date(accounts[0].rows[1].captured_at!).toLocaleString());
++      expect(tooltip.textContent).toContain('Window: 7d');
++      expect(tooltip.textContent).toContain('Last observed: 2m 00s ago');
++      expect(tooltip.textContent).not.toContain(new Date(accounts[0].rows[1].captured_at!).toLocaleString());
++      expect(tooltip.textContent).toContain(localizedResetDate(Date.parse(accounts[0].rows[1].reset_at!)));
 +      expect(container.contains(tooltip)).toBe(false);
 +    } finally { await act(async () => root.unmount()); container.remove(); }
++  });
++
++  it('updates a focused tooltip every second without fetching provider quota again', async () => {
++    vi.useFakeTimers(); vi.setSystemTime(now);
++    const container = document.createElement('div'); document.body.append(container); const root = createRoot(container);
++    try {
++      await act(async () => root.render(<OverviewQuotaPanel />));
++      await act(async () => container.querySelectorAll('button')[1].focus());
++      expect(document.querySelector('[role="tooltip"]')?.textContent).toContain('Last observed: 2m 00s ago');
++      await act(async () => vi.advanceTimersByTimeAsync(3_000));
++      expect(document.querySelector('[role="tooltip"]')?.textContent).toContain('Last observed: 2m 03s ago');
++      expect(api.fetchAdminProviderQuota).toHaveBeenCalledTimes(1);
++    } finally { await act(async () => root.unmount()); container.remove(); }
++    expect(vi.getTimerCount()).toBe(0);
 +  });
 +
 +  it.each(['admin', 'key', 'readOnly'] as const)('only calls the %s cached endpoint and keeps last good data after an error', async scope => {
@@ -354,20 +391,20 @@ index 0000000..73b776c
 +  });
 +});
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index 40b005a..0ef1c47 100644
+index 40b005a..b8bbe0e 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -22,2 +22,3 @@ const resources = {
      translation: {
-+      overview_limits: { title: 'Usage Limits', account: 'Provider / account', remaining: 'Remaining', resets: 'Resets in', unavailable: 'Quota unavailable', capture_unknown: 'Capture time unavailable', stale: 'Stale observation', awaiting: 'Awaiting update', info: 'Quota details', rpm_avg: 'RPM avg' },
++      overview_limits: { window: 'Window', observed_ago: '{{minutes}}m {{seconds}}s ago', title: 'Usage Limits', account: 'Provider / account', remaining: 'Remaining', resets: 'Resets in', unavailable: 'Quota unavailable', capture_unknown: 'Capture time unavailable', stale: 'Stale observation', awaiting: 'Awaiting update', info: 'Quota details', rpm_avg: 'RPM avg' },
        read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
 @@ -967,2 +968,3 @@ const resources = {
      translation: {
-+      overview_limits: { title: '用量限额', account: '提供商 / 账号', remaining: '剩余', resets: '重置倒计时', unavailable: '限额不可用', capture_unknown: '采集时间不可用', stale: '数据已过期', awaiting: '等待更新', info: '限额详情', rpm_avg: 'RPM 平均' },
++      overview_limits: { window: '窗口', observed_ago: '{{minutes}}分 {{seconds}}秒前', title: '用量限额', account: '提供商 / 账号', remaining: '剩余', resets: '重置倒计时', unavailable: '限额不可用', capture_unknown: '采集时间不可用', stale: '数据已过期', awaiting: '等待更新', info: '限额详情', rpm_avg: 'RPM 平均' },
        read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
 @@ -1912,2 +1914,3 @@ const resources = {
      translation: {
-+      overview_limits: { title: '用量限額', account: '供應商 / 帳號', remaining: '剩餘', resets: '重置倒數', unavailable: '限額不可用', capture_unknown: '擷取時間不可用', stale: '資料已過期', awaiting: '等待更新', info: '限額詳情', rpm_avg: 'RPM 平均' },
++      overview_limits: { window: '時段', observed_ago: '{{minutes}}分 {{seconds}}秒前', title: '用量限額', account: '供應商 / 帳號', remaining: '剩餘', resets: '重置倒數', unavailable: '限額不可用', capture_unknown: '擷取時間不可用', stale: '資料已過期', awaiting: '等待更新', info: '限額詳情', rpm_avg: 'RPM 平均' },
        read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
 diff --git a/web/src/pages/KeyOverviewPage.tsx b/web/src/pages/KeyOverviewPage.tsx
 index 9d60e3a..ff66065 100644

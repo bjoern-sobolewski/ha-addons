@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4
+
+- Clarify that overview login requires the separate read-only password.
+
 ## 0.1.3
 
 - Add an optional separate read-only password for usage across all client keys and shared provider quota.

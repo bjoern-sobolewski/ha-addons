@@ -646,14 +646,14 @@ index 8a5c49b..fe49e25 100644
      return session.alias || t('usage_stats.session_settings_admin_label');
    }
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index a8c1332..f02fa12 100644
+index a8c1332..53702f3 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -20,6 +20,7 @@ const getInitialLanguage = (): SupportedLanguage => {
  const resources = {
    en: {
      translation: {
-+      read_only: {sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
++      read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
        common: {
          loading: 'Loading...',
          save: 'Save',
@@ -661,7 +661,7 @@ index a8c1332..f02fa12 100644
    },
    zh: {
      translation: {
-+      read_only: {sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
++      read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
        common: {
          loading: '加载中...',
          save: '保存',
@@ -669,7 +669,7 @@ index a8c1332..f02fa12 100644
    },
    'zh-TW': {
      translation: {
-+      read_only: {sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
++      read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
        common: {
          loading: '載入中...',
          save: '儲存',
@@ -761,7 +761,7 @@ index 6f8cf57..37265ee 100644
 +    </Card>)}</div>;
  }
 diff --git a/web/src/pages/LoginPage.tsx b/web/src/pages/LoginPage.tsx
-index 1fd3365..a2b2eb6 100644
+index 1fd3365..dce5f8d 100644
 --- a/web/src/pages/LoginPage.tsx
 +++ b/web/src/pages/LoginPage.tsx
 @@ -9,7 +9,7 @@ import type { Theme } from '@/types';
@@ -827,15 +827,17 @@ index 1fd3365..a2b2eb6 100644
            </div>
  
            <form className={styles.form} onSubmit={(event) => void handleSubmit(event)}>
-@@ -131,7 +140,7 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+@@ -131,8 +140,8 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
                <Input
                  type="password"
                  autoComplete="current-password"
 -                label={t('auth.password_label')}
+-                placeholder={t('auth.password_placeholder')}
 +                label={t(mode === 'read_only' ? 'read_only.password' : 'auth.password_label')}
-                 placeholder={t('auth.password_placeholder')}
++                placeholder={t(mode === 'read_only' ? 'read_only.password_placeholder' : 'auth.password_placeholder')}
                  value={password}
                  onChange={(event) => setPassword(event.target.value)}
+                 error={activeError || undefined}
 @@ -140,7 +149,7 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
                />
              )}
@@ -957,10 +959,10 @@ index a124f06..90d8393 100644
      expect(container.textContent).toContain('Shared provider quota');
 diff --git a/web/src/pages/test/ReadOnlyLogin.test.tsx b/web/src/pages/test/ReadOnlyLogin.test.tsx
 new file mode 100644
-index 0000000..a941c86
+index 0000000..cd37c45
 --- /dev/null
 +++ b/web/src/pages/test/ReadOnlyLogin.test.tsx
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,24 @@
 +// @vitest-environment happy-dom
 +import React,{act} from 'react';
 +import {createRoot} from 'react-dom/client';
@@ -979,6 +981,7 @@ index 0000000..a941c86
 +    await act(async()=>readOnly!.click());
 +    expect(element.textContent).toContain('Read-only password');
 +    expect(element.textContent).toContain('Open overview');
++    expect(element.querySelector('input')?.placeholder).toBe('Enter read-only password');
 +    expect(getLoginErrorForMode('read_only',{adminError:'admin',readOnlyError:'read-only'})).toBe('read-only');
 +    await act(async () => root.render(<LoginPage onPasswordSubmit={vi.fn()} onAPIKeySubmit={vi.fn()}/>));
 +    expect(Array.from(element.querySelectorAll('button[role="tab"]')).some(tab=>tab.textContent==='Read-only overview')).toBe(false);

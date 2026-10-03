@@ -35,6 +35,87 @@ index d44898c..22e76d9 100644
      expect(fetchUsageQuotaCache).toHaveBeenCalledOnce()
      await act(async () => vi.advanceTimersByTimeAsync(1))
      expect(fetchUsageQuotaCache).toHaveBeenCalledTimes(2)
+diff --git a/web/src/components/usage/hooks/test/useSparklines.test.ts b/web/src/components/usage/hooks/test/useSparklines.test.ts
+index 21f0d7a..f9e3155 100644
+--- a/web/src/components/usage/hooks/test/useSparklines.test.ts
++++ b/web/src/components/usage/hooks/test/useSparklines.test.ts
+@@ -1,5 +1,8 @@
++// @vitest-environment happy-dom
+ import { describe, expect, it } from 'vitest';
+-import { buildUsageSparklineSeries } from '../useSparklines';
++import { act, createElement } from 'react';
++import { createRoot } from 'react-dom/client';
++import { buildUsageSparklineSeries, useSparklines } from '../useSparklines';
+ import type { UsageOverviewPayload } from '../useUsageData';
+ 
+ const usageWithBackendSeries: UsageOverviewPayload = {
+@@ -87,3 +90,43 @@ describe('buildUsageSparklineSeries', () => {
+     expect(series.cacheReadRate).toEqual([0]);
+   });
+ });
++
++async function renderSparklines(usage: UsageOverviewPayload) {
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++  const container = document.createElement('div');
++  document.body.append(container);
++  const root = createRoot(container);
++  function Harness() {
++    const result = useSparklines({ usage, loading: false });
++    return createElement('pre', null, JSON.stringify(result));
++  }
++  try {
++    await act(async () => root.render(createElement(Harness)));
++    return JSON.parse(container.textContent!) as ReturnType<typeof useSparklines>;
++  } finally {
++    await act(async () => root.unmount());
++    container.remove();
++  }
++}
++
++describe('useSparklines', () => {
++  it('shows a marker for a single bucket without inventing historical samples', async () => {
++    const usage = {
++      ...usageWithBackendSeries,
++      series: { ...usageWithBackendSeries.series!, buckets: ['2026-04-23T10:00:00Z'] },
++    };
++    const result = await renderSparklines(usage);
++    const requests = result.requestsSparkline!.data;
++    expect(requests.labels).toEqual(['2026-04-23T10:00:00Z']);
++    expect(requests.datasets[0].data).toEqual([2]);
++    expect(requests.datasets[0].pointRadius).toBe(2);
++    expect(requests.datasets[0].pointBackgroundColor).toBe(requests.datasets[0].borderColor);
++  });
++
++  it('shows an isolated known cache-rate point while keeping full series as lines', async () => {
++    const result = await renderSparklines(usageWithBackendSeries);
++    expect(result.cacheReadRateSparkline!.data.datasets[0].data).toEqual([25, null]);
++    expect(result.cacheReadRateSparkline!.data.datasets[0].pointRadius).toBe(2);
++    expect(result.requestsSparkline!.data.datasets[0].pointRadius).toBe(0);
++  });
++});
+diff --git a/web/src/components/usage/hooks/useSparklines.ts b/web/src/components/usage/hooks/useSparklines.ts
+index 68fb46c..89734f6 100644
+--- a/web/src/components/usage/hooks/useSparklines.ts
++++ b/web/src/components/usage/hooks/useSparklines.ts
+@@ -11,6 +11,7 @@ export interface SparklineData {
+       fill: boolean;
+       tension: number;
+       pointRadius: number;
++      pointBackgroundColor: string;
+       borderWidth: number;
+     }
+   ];
+@@ -111,7 +112,9 @@ export function useSparklines({ usage }: UseSparklinesOptions): UseSparklinesRet
+               backgroundColor,
+               fill: true,
+               tension: 0.45,
+-              pointRadius: 0,
++              // A lone observed bucket has no line segment; keep its real value visible.
++              pointRadius: input.data.filter((value) => value !== null).length === 1 ? 2 : 0,
++              pointBackgroundColor: color,
+               borderWidth: 2
+             }
+           ]
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
 index ee65379..28a955e 100644
 --- a/web/src/i18n/index.ts

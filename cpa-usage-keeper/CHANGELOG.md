@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.19
+
+- Show a visible sparkline marker when a range contains only one observed bucket, including isolated known cache-rate points.
+- Preserve actual samples and missing values without inventing historical chart data.
+
 ## 0.1.18
 
 - Give Total Requests and Usage Limits equal widths, preventing the quota table from expanding its card.

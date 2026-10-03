@@ -198,8 +198,21 @@ def main():
                 assert request(report_url)[0] == 401
                 assert request(report_url, opener=viewer_opener)[0] == 403
                 assert request(report_url, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={}, opener=read_only_opener)[0] == 404
-            for page in ('read-only', 'read-only/realtime', 'read-only/analysis', 'read-only/quota'):
+            for page in ('read-only', 'read-only/realtime', 'read-only/analysis', 'read-only/quota', 'read-only/events', 'read-only/auth-files', 'read-only/ai-provider', 'read-only/ranking'):
                 assert request(viewer_gateway + viewer_path + '/' + page)[0] == 200
+
+            for report in ('events?range=today', 'events/filters?range=today', 'events/export?range=today&format=json', 'events/export?range=today&format=csv', 'accounts?page=1&page_size=10', 'accounts/quota-cache', 'ranking/local/leaderboards?period=today&metric=total_tokens'):
+                reporting_url = viewer_gateway + viewer_path + '/api/v1/read-only/' + report
+                status, body = request(reporting_url, opener=read_only_opener)
+                assert status == 200, (report, status)
+                for secret in (key, management, password, read_only_password, 'fake-upstream-test-key'):
+                    assert secret.encode() not in body
+                assert request(reporting_url)[0] == 401
+                assert request(reporting_url, opener=viewer_opener)[0] == 403
+                for method in ('POST', 'PATCH', 'PUT', 'DELETE'):
+                    assert request(reporting_url, headers={'X-CPA-Usage-Keeper-Request':'fetch'}, body={}, method=method, opener=read_only_opener)[0] == 404
+            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/events/1/request-log', opener=read_only_opener)[0] == 404
+            print('PASS: sanitized read-only requests, accounts, local ranking and CSV/JSON export through gateway', flush=True)
 
             keys_route = viewer_gateway + viewer_path + '/api/v1/read-only/keys'
             keys_status, keys_body = request(keys_route, opener=read_only_opener)

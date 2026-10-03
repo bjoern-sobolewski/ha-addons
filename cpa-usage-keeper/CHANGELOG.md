@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.8
+
+- Add Request Events, Auth Files, AI Provider details and Local Ranking to the read-only dashboard.
+- Reuse the existing request table and account drill-downs with credential edits, raw logs and administrative actions removed.
+- Export sanitized request reporting as CSV or JSON with the selected time, key, model, account and result filters.
+- Include historical and revoked keys in reporting filters without restoring authentication access.
+
 ## 0.1.6
 
 - Add an API key dropdown to read-only Overview, Realtime and Analysis, defaulting to All API Keys.

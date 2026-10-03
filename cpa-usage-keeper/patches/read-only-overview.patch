@@ -87,7 +87,7 @@ index 8020994..e1f567e 100644
  			continue
  		}
 diff --git a/internal/api/key_quota.go b/internal/api/key_quota.go
-index 5c38d93..b7bb07f 100644
+index 5c38d93..ee29a97 100644
 --- a/internal/api/key_quota.go
 +++ b/internal/api/key_quota.go
 @@ -16,6 +16,9 @@ import (
@@ -100,7 +100,18 @@ index 5c38d93..b7bb07f 100644
  	Label            string   `json:"label"`
  	Metric           string   `json:"metric,omitempty"`
  	Remaining        *float64 `json:"remaining,omitempty"`
-@@ -57,7 +60,11 @@ func viewerProviderName(identity entities.UsageIdentity) string {
+@@ -37,6 +40,10 @@ func viewerProviderName(identity entities.UsageIdentity) string {
+ 	switch strings.ToLower(strings.TrimSpace(identity.Type)) {
+ 	case "codex":
+ 		return "Codex"
++	case "openai":
++		return "OpenAI"
++	case "vertex", "vertex-ai":
++		return "Vertex AI"
+ 	case "claude":
+ 		return "Claude"
+ 	case "gemini", "gemini-cli":
+@@ -57,7 +64,11 @@ func viewerProviderName(identity entities.UsageIdentity) string {
  }
  
  func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityProvider, provider QuotaProvider) {
@@ -113,7 +124,7 @@ index 5c38d93..b7bb07f 100644
  		setNoStoreHeaders(c)
  		if identities == nil || provider == nil {
  			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Quota data is unavailable"})
-@@ -115,6 +122,11 @@ func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityP
+@@ -115,6 +126,11 @@ func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityP
  						label = "Quota window"
  					}
  					safe := viewerQuotaRow{Label: label, Metric: row.Metric, Remaining: row.Remaining, Limit: row.Limit, ResetAt: row.ResetAt, LimitReached: row.LimitReached}
@@ -290,18 +301,18 @@ index 0000000..e349523
 +}
 diff --git a/internal/api/read_only_dashboard.go b/internal/api/read_only_dashboard.go
 new file mode 100644
-index 0000000..27a3415
+index 0000000..8998623
 --- /dev/null
 +++ b/internal/api/read_only_dashboard.go
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,285 @@
 +package api
 +
 +import (
 +	"crypto/sha256"
 +	"fmt"
 +	"net/http"
++	"net/url"
 +	"sort"
-+	"strconv"
 +	"time"
 +
 +	"cpa-usage-keeper/internal/service"
@@ -320,12 +331,12 @@ index 0000000..27a3415
 +func loadReadOnlyDashboardLabels(c *gin.Context, keys service.CPAAPIKeyProvider, identities service.UsageIdentityProvider) (readOnlyDashboardLabels, error) {
 +	result := readOnlyDashboardLabels{keys: map[string]analysisAPIKeyInfo{}, keyLabels: map[string]string{}, accounts: map[string]string{}}
 +	if keys != nil {
-+		rows, err := keys.ListCPAAPIKeys(c.Request.Context())
++		rows, err := listReadOnlyKeys(c, keys)
 +		if err != nil {
 +			return result, err
 +		}
 +		for _, row := range rows {
-+			id, label := strconv.FormatInt(row.ID, 10), fmt.Sprintf("Client key %d", row.ID)
++			id, label := row.ID, readOnlyKeyLabel(row)
 +			result.keys[row.APIKey] = analysisAPIKeyInfo{ID: id, Label: label}
 +			result.keyLabels[id] = label
 +		}
@@ -338,10 +349,14 @@ index 0000000..27a3415
 +		sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 +		counts := map[string]int{}
 +		for _, row := range rows {
-+			if row.IsDeleted || (row.Disabled != nil && *row.Disabled) {
++			if row.IsDeleted {
 +				continue
 +			}
 +			name := viewerProviderName(row)
++			if row.Disabled != nil && *row.Disabled {
++				result.accounts[row.Identity] = fmt.Sprintf("%s account %d (disabled)", name, row.ID)
++				continue
++			}
 +			counts[name]++
 +			result.accounts[row.Identity] = fmt.Sprintf("%s account %d", name, counts[name])
 +		}
@@ -424,6 +439,14 @@ index 0000000..27a3415
 +	}
 +}
 +
++func readOnlyTimeRequest(c *gin.Context) *http.Request {
++	request := c.Request.Clone(c.Request.Context())
++	query := c.Request.URL.Query()
++	query.Del("api_key_id")
++	request.URL = &url.URL{RawQuery: query.Encode()}
++	return request
++}
++
 +func registerReadOnlyDashboardRoutes(router *gin.RouterGroup, provider service.UsageProvider, keys service.CPAAPIKeyProvider, identities service.UsageIdentityProvider) {
 +	// Only explicit GET routes are registered. Admin middleware/routes remain
 +	// unchanged, so this role cannot reach a write even via the LAN listener.
@@ -435,14 +458,14 @@ index 0000000..27a3415
 +			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Usage data is unavailable"})
 +			return
 +		}
-+		rows, err := keys.ListCPAAPIKeys(c.Request.Context())
++		rows, err := listReadOnlyKeys(c, keys)
 +		if err != nil {
 +			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Usage data is unavailable"})
 +			return
 +		}
 +		sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 +		for _, row := range rows {
-+			options = append(options, gin.H{"id": strconv.FormatInt(row.ID, 10), "label": fmt.Sprintf("Client key %d", row.ID)})
++			options = append(options, gin.H{"id": row.ID, "label": readOnlyKeyLabel(row)})
 +		}
 +		c.JSON(http.StatusOK, gin.H{"keys": options})
 +	})
@@ -460,13 +483,13 @@ index 0000000..27a3415
 +			var err error
 +			switch route {
 +			case "/key-overview/realtime":
-+				filter, err = parseKeyUsageRealtimeFilterQuery(c.Request, now)
++				filter, err = parseKeyUsageRealtimeFilterQuery(readOnlyTimeRequest(c), now)
 +			case "/key-activity":
-+				filter, err = parseKeyUsageActivityFilterQuery(c.Request, now)
++				filter, err = parseKeyUsageActivityFilterQuery(readOnlyTimeRequest(c), now)
 +			case "/key-analysis", "/key-analysis/latency":
-+				filter, err = parseKeyUsageAnalysisTimeFilterQuery(c.Request, now)
++				filter, err = parseKeyUsageAnalysisTimeFilterQuery(readOnlyTimeRequest(c), now)
 +			default:
-+				filter, err = parseKeyUsageOverviewTimeFilterQuery(c.Request, now)
++				filter, err = parseKeyUsageOverviewTimeFilterQuery(readOnlyTimeRequest(c), now)
 +			}
 +			if err != nil {
 +				writeUsageFilterParseError(c, err)
@@ -474,21 +497,14 @@ index 0000000..27a3415
 +			}
 +			// Only this reporting role accepts an optional key scope. Individual
 +			// key viewers continue to receive their session scope on separate routes.
-+			filter.APIKeyID, err = parseUsageAPIKeyID(c.Query("api_key_id"))
-+			if err != nil {
-+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid api_key_id"})
-+				return
-+			}
++
 +			labels, err := loadReadOnlyDashboardLabels(c, keys, identities)
 +			if err != nil {
 +				unavailable()
 +				return
 +			}
-+			if filter.APIKeyID != "" {
-+				if _, exists := labels.keyLabels[filter.APIKeyID]; !exists {
-+					c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
-+					return
-+				}
++			if !applyReadOnlyKeyFilter(c, &filter, labels) {
++				return
 +			}
 +			switch route {
 +			case "/key-overview":
@@ -574,6 +590,475 @@ index 0000000..27a3415
 +		})
 +	}
 +}
+diff --git a/internal/api/read_only_reporting.go b/internal/api/read_only_reporting.go
+new file mode 100644
+index 0000000..f0d5bcb
+--- /dev/null
++++ b/internal/api/read_only_reporting.go
+@@ -0,0 +1,463 @@
++package api
++
++import (
++	"encoding/csv"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/url"
++	"os"
++	"regexp"
++	"strconv"
++	"strings"
++	"time"
++
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++	"cpa-usage-keeper/internal/ranking"
++	rankingapi "cpa-usage-keeper/internal/ranking/httpapi"
++	"cpa-usage-keeper/internal/service"
++	servicedto "cpa-usage-keeper/internal/service/dto"
++	"github.com/gin-gonic/gin"
++)
++
++func listReadOnlyKeys(c *gin.Context, keys service.CPAAPIKeyProvider) ([]service.ReportingAPIKey, error) {
++	if reader, ok := keys.(service.ReportingAPIKeyProvider); ok {
++		return reader.ListReportingAPIKeys(c.Request.Context())
++	}
++	rows, err := keys.ListCPAAPIKeys(c.Request.Context())
++	result := []service.ReportingAPIKey{}
++	for _, row := range rows {
++		result = append(result, service.ReportingAPIKey{ID: strconv.FormatInt(row.ID, 10), APIKey: row.APIKey, Historical: row.IsDeleted})
++	}
++	return result, err
++}
++
++func readOnlyKeyLabel(row service.ReportingAPIKey) string {
++	if row.Historical {
++		if strings.HasPrefix(row.ID, "historical:") {
++			return "Historical key " + strings.TrimPrefix(row.ID, "historical:")[:12]
++		}
++		return "Historical key " + row.ID
++	}
++	return "Client key " + row.ID
++}
++
++func applyReadOnlyKeyFilter(c *gin.Context, filter *servicedto.UsageFilter, labels readOnlyDashboardLabels) bool {
++	id := strings.TrimSpace(c.Query("api_key_id"))
++	if id == "" {
++		return true
++	}
++	if _, err := parseUsageAPIKeyID(id); err != nil && !regexp.MustCompile(`^historical:[a-f0-9]{24}$`).MatchString(id) {
++		c.JSON(400, gin.H{"error": "invalid api_key_id"})
++		return false
++	}
++	for raw, key := range labels.keys {
++		if key.ID == id {
++			if !strings.HasPrefix(id, "historical:") {
++				filter.APIKeyID = id
++			}
++			filter.ReportingAPIGroupKey = raw
++			return true
++		}
++	}
++	c.JSON(404, gin.H{"error": "API key not found"})
++	return false
++}
++
++func safeReadOnlyIdentity(row entities.UsageIdentity, health *service.UsageCredentialHealthSnapshot, labels readOnlyDashboardLabels) usageIdentityResponse {
++	// Sanitize the entity before the shared mapper, so future DTO fields cannot
++	// accidentally reintroduce stored credential metadata.
++	safe, label := labels.account(row.Identity)
++	row.Name = label
++	row.Alias = nil
++	row.Identity = safe
++	row.LookupKey = ""
++	row.Prefix = ""
++	row.BaseURL = ""
++	row.FileName = nil
++	row.FilePath = nil
++	row.Note = nil
++	row.AccountID = nil
++	row.ProjectID = nil
++	row.XAIUserID = nil
++	row.Provider = viewerProviderName(row)
++	row.Priority = nil
++	row.PlanType = nil
++	row.AuthTypeName = "API provider"
++	if row.AuthType == entities.UsageIdentityAuthTypeAuthFile {
++		row.AuthTypeName = "Auth file"
++	}
++	payload := mapUsageIdentityResponseWithHealth(row, health)
++	payload.Subscription = nil
++	return payload
++}
++
++func safeReadOnlyEvents(rows []servicedto.UsageEventRecord, labels readOnlyDashboardLabels) []usageEventPayload {
++	result := make([]usageEventPayload, 0, len(rows))
++	for _, row := range rows {
++		labels.includeKey(row.APIGroupKey)
++		key := labels.keys[row.APIGroupKey].Label
++		account, label := labels.account(row.AuthIndex)
++		result = append(result, usageEventPayload{ID: strconv.FormatInt(row.ID, 10), Timestamp: row.Timestamp.Format(time.RFC3339Nano), APIKey: key,
++			Model: row.Model, ModelAlias: row.ModelAlias, ResponseModel: row.ResponseModel, ReasoningEffort: row.ReasoningEffort, ServiceTier: row.ServiceTier, ResponseServiceTier: row.ResponseServiceTier,
++			Source: label, SourceRaw: account, Failed: row.Failed, StatusCode: row.StatusCode, Stream: row.Stream, LatencyMS: row.LatencyMS, TTFTMS: row.TTFTMS, SpeedTPS: usageEventSpeedTPS(row),
++			Tokens: usageEventTokenPayload{InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, ReasoningTokens: row.ReasoningTokens, CacheReadTokens: row.CacheReadTokens, CacheCreationTokens: row.CacheCreationTokens, TotalTokens: row.TotalTokens}, CostUSD: row.CostUSD, CostAvailable: row.CostAvailable})
++	}
++	return result
++}
++
++func readOnlyEventsFilter(c *gin.Context, labels readOnlyDashboardLabels, identities service.UsageIdentityProvider) (servicedto.UsageFilter, bool) {
++	request := readOnlyTimeRequest(c)
++	query := request.URL.Query()
++	query.Del("source")
++	query.Del("auth_index")
++	query.Del("auth_type")
++	if query.Get("range") == "" {
++		query.Set("range", "30d")
++	}
++	request.URL = &url.URL{RawQuery: query.Encode()}
++	filter, err := parseUsageFilterQuery(request, time.Now())
++	if err != nil {
++		writeUsageFilterParseError(c, err)
++		return filter, false
++	}
++	if !applyReadOnlyKeyFilter(c, &filter, labels) {
++		return filter, false
++	}
++	source := strings.TrimSpace(c.Query("source"))
++	if source != "" {
++		if identities == nil {
++			c.JSON(503, gin.H{"error": "Account data unavailable"})
++			return filter, false
++		}
++		rows, err := identities.ListUsageIdentities(c.Request.Context())
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Account data unavailable"})
++			return filter, false
++		}
++		found := false
++		for _, row := range rows {
++			safe, _ := labels.account(row.Identity)
++			if safe == source {
++				filter.AuthIndex = row.Identity
++				filter.AuthType = strconv.Itoa(int(row.AuthType))
++				found = true
++				break
++			}
++		}
++		if !found {
++			c.JSON(404, gin.H{"error": "Account not found"})
++			return filter, false
++		}
++	}
++	return filter, true
++}
++
++func registerReadOnlyReportingRoutes(router *gin.RouterGroup, usage service.UsageProvider, keys service.CPAAPIKeyProvider, identities service.UsageIdentityProvider, quotas QuotaProvider, local rankingapi.LocalProvider) {
++	group := router.Group("/read-only")
++	labelsFor := func(c *gin.Context) (readOnlyDashboardLabels, bool) {
++		setNoStoreHeaders(c)
++		labels, err := loadReadOnlyDashboardLabels(c, keys, identities)
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Reporting data unavailable"})
++			return labels, false
++		}
++		return labels, true
++	}
++	group.GET("/accounts", func(c *gin.Context) {
++		labels, ok := labelsFor(c)
++		if !ok {
++			return
++		}
++		if identities == nil {
++			c.JSON(503, gin.H{"error": "Account data unavailable"})
++			return
++		}
++		req, ok := parseUsageIdentitiesPageRequest(c)
++		if !ok {
++			return
++		}
++		page, err := identities.ListActiveUsageIdentitiesPage(c.Request.Context(), req)
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Account data unavailable"})
++			return
++		}
++		items := []usageIdentityResponse{}
++		for i, row := range page.Items {
++			var health *service.UsageCredentialHealthSnapshot
++			if i < len(page.CredentialHealth) {
++				health = &page.CredentialHealth[i]
++			}
++			items = append(items, safeReadOnlyIdentity(row, health, labels))
++		}
++		counts := []usageIdentityTypeCount{}
++		for _, row := range page.TypeCounts {
++			counts = append(counts, usageIdentityTypeCount{Type: row.Type, Count: row.Count})
++		}
++		c.JSON(200, usageIdentitiesPageResponse{Identities: items, TotalCount: page.Total, Page: req.Page, PageSize: req.PageSize, TotalPages: int((page.Total + int64(req.PageSize) - 1) / int64(req.PageSize)), TypeCounts: counts})
++	})
++	group.GET("/accounts/:id", func(c *gin.Context) {
++		labels, ok := labelsFor(c)
++		if !ok {
++			return
++		}
++		reader, ok := identities.(service.UsageIdentityReader)
++		if !ok {
++			c.JSON(503, gin.H{"error": "Account data unavailable"})
++			return
++		}
++		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
++		if err != nil || id <= 0 {
++			c.JSON(400, gin.H{"error": "Invalid account"})
++			return
++		}
++		detail, err := reader.GetUsageIdentity(c.Request.Context(), id)
++		if err != nil {
++			c.JSON(404, gin.H{"error": "Account not found"})
++			return
++		}
++		c.JSON(200, safeReadOnlyIdentity(detail.Identity, &detail.CredentialHealth, labels))
++	})
++	group.GET("/accounts/quota-cache", func(c *gin.Context) {
++		labels, ok := labelsFor(c)
++		if !ok {
++			return
++		}
++		if identities == nil || quotas == nil {
++			c.JSON(503, gin.H{"error": "Quota unavailable"})
++			return
++		}
++		rows, err := identities.ListActiveUsageIdentities(c.Request.Context())
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Quota unavailable"})
++			return
++		}
++		indexes := []string{}
++		for _, row := range rows {
++			if row.AuthType == entities.UsageIdentityAuthTypeAuthFile {
++				indexes = append(indexes, row.Identity)
++			}
++		}
++		if len(indexes) == 0 { c.JSON(200, gin.H{"items": []gin.H{}}); return }
++		cache, err := quotas.GetCachedQuota(c.Request.Context(), quota.CacheRequest{AuthIndexes: indexes})
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Quota unavailable"})
++			return
++		}
++		items := []gin.H{}
++		for _, item := range cache.Items {
++			safe, _ := labels.account(item.AuthIndex)
++			windows := []quota.QuotaRow{}
++			if item.Quota != nil {
++				for i, row := range item.Quota.Quota {
++					windows = append(windows, quota.QuotaRow{Key: fmt.Sprintf("window-%d", i), Label: row.Label, Metric: row.Metric, Used: row.Used, Limit: row.Limit, Remaining: row.Remaining, UsedPercent: row.UsedPercent, RemainingFraction: row.RemainingFraction, Allowed: row.Allowed, LimitReached: row.LimitReached, Window: row.Window, ResetAt: row.ResetAt, ResetAfterSeconds: row.ResetAfterSeconds, CapturedAt: row.CapturedAt, Source: row.Source})
++				}
++			}
++			items = append(items, gin.H{"auth_index": safe, "status": item.Status, "refreshed_at": item.RefreshedAt, "quota": gin.H{"quota": windows}})
++		}
++		c.JSON(200, gin.H{"items": items})
++	})
++	group.GET("/events/filters", func(c *gin.Context) {
++		labels, ok := labelsFor(c)
++		if !ok {
++			return
++		}
++		if usage == nil {
++			c.JSON(503, gin.H{"error": "Usage unavailable"})
++			return
++		}
++		filter, ok := readOnlyEventsFilter(c, labels, identities)
++		if !ok {
++			return
++		}
++		options, err := usage.ListUsageEventFilterOptions(c.Request.Context(), filter)
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Usage unavailable"})
++			return
++		}
++		sources := []usageSourceFilterOption{}
++		if identities != nil {
++			rows, err := identities.ListUsageIdentities(c.Request.Context())
++			if err != nil {
++				c.JSON(503, gin.H{"error": "Accounts unavailable"})
++				return
++			}
++			for _, row := range rows {
++				id, label := labels.account(row.Identity)
++				sources = append(sources, usageSourceFilterOption{Value: id, Label: label, DisplayName: label})
++			}
++		}
++		models := []string{}
++		if options != nil {
++			models = options.Models
++		}
++		c.JSON(200, usageEventFilterOptionsResponse{Models: models, Sources: sources})
++	})
++	group.GET("/events", func(c *gin.Context) {
++		labels, ok := labelsFor(c)
++		if !ok {
++			return
++		}
++		if usage == nil {
++			c.JSON(503, gin.H{"error": "Usage unavailable"})
++			return
++		}
++		filter, ok := readOnlyEventsFilter(c, labels, identities)
++		if !ok {
++			return
++		}
++		page, err := usage.ListUsageEvents(c.Request.Context(), filter)
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Usage unavailable"})
++			return
++		}
++		next := ""
++		if page.HasMore && len(page.Events) > 0 {
++			last := page.Events[len(page.Events)-1]
++			next = encodeUsageEventsCursor(last.Timestamp, last.ID)
++		}
++		c.JSON(200, usageEventsResponse{Events: safeReadOnlyEvents(page.Events, labels), TotalCount: page.TotalCount, Page: page.Page, PageSize: page.PageSize, TotalPages: page.TotalPages, HasMore: page.HasMore, NextCursor: next})
++	})
++	slots := make(chan struct{}, 2)
++	group.GET("/events/export", func(c *gin.Context) {
++		labels, ok := labelsFor(c)
++		if !ok {
++			return
++		}
++		if usage == nil {
++			c.JSON(503, gin.H{"error": "Usage unavailable"})
++			return
++		}
++		filter, ok := readOnlyEventsFilter(c, labels, identities)
++		if !ok {
++			return
++		}
++		format := c.DefaultQuery("format", "csv")
++		if format != "csv" && format != "json" {
++			c.JSON(400, gin.H{"error": "Invalid export format"})
++			return
++		}
++		select {
++		case slots <- struct{}{}:
++			defer func() { <-slots }()
++		default:
++			c.JSON(429, gin.H{"error": "Export capacity full"})
++			return
++		}
++		output, err := os.CreateTemp("", "keeper-reporting-*")
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Export unavailable"})
++			return
++		}
++		defer os.Remove(output.Name())
++		defer output.Close()
++		contentType := "text/csv; charset=utf-8"
++
++		if format == "json" {
++			contentType = "application/json"
++			output.WriteString("[")
++			first := true
++			err = usage.StreamUsageEvents(c.Request.Context(), filter, func(row servicedto.UsageEventRecord) error {
++				if !first {
++					if _, err := output.WriteString(","); err != nil {
++						return err
++					}
++				}
++				first = false
++				return json.NewEncoder(output).Encode(safeReadOnlyEvents([]servicedto.UsageEventRecord{row}, labels)[0])
++			})
++			if err == nil {
++				_, err = output.WriteString("]")
++			}
++		} else {
++			writer := csv.NewWriter(output)
++			writer.Write([]string{"timestamp", "api_key", "account", "model", "model_alias", "failed", "status_code", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_creation_tokens", "total_tokens", "cost_usd", "cost_available", "latency_ms", "ttft_ms"})
++			err = usage.StreamUsageEvents(c.Request.Context(), filter, func(row servicedto.UsageEventRecord) error {
++				safe := safeReadOnlyEvents([]servicedto.UsageEventRecord{row}, labels)[0]
++				status, ttft := "", ""
++				if safe.StatusCode != nil {
++					status = strconv.Itoa(*safe.StatusCode)
++				}
++				if safe.TTFTMS != nil {
++					ttft = fmt.Sprint(*safe.TTFTMS)
++				}
++				return writer.Write([]string{safe.Timestamp, safe.APIKey, safe.Source, safeCSVValue(safe.Model), safeCSVValue(safe.ModelAlias), fmt.Sprint(safe.Failed), status, fmt.Sprint(safe.Tokens.InputTokens), fmt.Sprint(safe.Tokens.OutputTokens), fmt.Sprint(safe.Tokens.ReasoningTokens), fmt.Sprint(safe.Tokens.CacheReadTokens), fmt.Sprint(safe.Tokens.CacheCreationTokens), fmt.Sprint(safe.Tokens.TotalTokens), fmt.Sprint(safe.CostUSD), fmt.Sprint(safe.CostAvailable), fmt.Sprint(safe.LatencyMS), ttft})
++			})
++			writer.Flush()
++			if err == nil {
++				err = writer.Error()
++			}
++		}
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Export unavailable"})
++			return
++		}
++		info, err := output.Stat()
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Export unavailable"})
++			return
++		}
++		if _, err = output.Seek(0, 0); err != nil {
++			c.JSON(503, gin.H{"error": "Export unavailable"})
++			return
++		}
++		c.Header("Content-Disposition", `attachment; filename="keeper-reporting.`+format+`"`)
++		c.DataFromReader(200, info.Size(), contentType, output, nil)
++	})
++	group.GET("/ranking/local/leaderboards", func(c *gin.Context) {
++		labels, ok := labelsFor(c)
++		if !ok {
++			return
++		}
++		if local == nil {
++			c.JSON(503, gin.H{"error": "Local ranking unavailable"})
++			return
++		}
++		period := ranking.LeaderboardPeriod(c.Query("period"))
++		metric := ranking.LeaderboardMetric(c.Query("metric"))
++		if !readOnlyRankingSelection(period, metric) {
++			c.JSON(400, gin.H{"error": "Invalid leaderboard selection"})
++			return
++		}
++		board, err := local.Leaderboard(c.Request.Context(), period, metric)
++		if err != nil {
++			c.JSON(400, gin.H{"error": "Invalid leaderboard selection"})
++			return
++		}
++		safe := board
++		safe.Entries = append([]ranking.LeaderboardEntry{}, board.Entries...)
++		safe.ScoreExplanation = nil
++		for i := range safe.Entries {
++			entry := &safe.Entries[i]
++			id := strings.TrimPrefix(entry.ParticipantID, "key:")
++			label := labels.keyLabels[id]
++			if label == "" {
++				_, label = labels.key(entry.ParticipantID)
++			}
++			entry.DisplayName = label
++			entry.KeyAlias = ""
++		}
++		c.JSON(http.StatusOK, safe)
++	})
++}
++
++func safeCSVValue(value string) string {
++	if strings.ContainsAny(strings.TrimLeft(value, " \t\r\n")[:min(1, len(strings.TrimLeft(value, " \t\r\n")))], "=+-@") {
++		return "'" + value
++	}
++	return value
++}
++
++func readOnlyRankingSelection(period ranking.LeaderboardPeriod, metric ranking.LeaderboardMetric) bool {
++	switch period {
++	case ranking.LeaderboardToday, ranking.LeaderboardYesterday, ranking.LeaderboardCurrentMonth, ranking.LeaderboardPreviousMonth:
++	default:
++		return false
++	}
++	switch metric {
++	case ranking.MetricOverall, ranking.MetricTotalTokens, ranking.MetricRequestCount, ranking.MetricCacheReadRate, ranking.MetricTTFTAverage, ranking.MetricLatencyAverage, ranking.MetricPeakTPM, ranking.MetricPeakRPM:
++		return true
++	}
++	return false
++}
 diff --git a/internal/api/request_limits.go b/internal/api/request_limits.go
 index 4b3ba41..d76591e 100644
 --- a/internal/api/request_limits.go
@@ -590,10 +1075,10 @@ index 4b3ba41..d76591e 100644
  			return
  		}
 diff --git a/internal/api/router.go b/internal/api/router.go
-index cda67b1..44c44ec 100644
+index cda67b1..90db3b8 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
-@@ -127,9 +127,15 @@ func NewRouter(
+@@ -127,9 +127,16 @@ func NewRouter(
  	registerUsageEventRequestLogDownloadTokenRoutes(apiV1, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
  
  	versionProtected := apiV1.Group("")
@@ -605,11 +1090,141 @@ index cda67b1..44c44ec 100644
 +	readOnlyProtected.Use(authHandler.readOnlyMiddleware())
 +	registerReadOnlyOverviewRoute(readOnlyProtected, usageProvider, cpaAPIKeyProvider)
 +	registerReadOnlyDashboardRoutes(readOnlyProtected, usageProvider, cpaAPIKeyProvider, usageIdentityProvider)
++	registerReadOnlyReportingRoutes(readOnlyProtected, usageProvider, cpaAPIKeyProvider, usageIdentityProvider, quotaProvider, localRankingProvider)
 +	registerViewerQuotaRoute(readOnlyProtected, "/read-only/key-quota", usageIdentityProvider, quotaProvider)
 +
  	adminProtected := apiV1.Group("")
  	adminProtected.Use(authHandler.adminMiddleware())
  	registerStatusRoutes(adminProtected, statusProvider, statusConfig)
+diff --git a/internal/api/test/read_only_reporting_test.go b/internal/api/test/read_only_reporting_test.go
+new file mode 100644
+index 0000000..52315ce
+--- /dev/null
++++ b/internal/api/test/read_only_reporting_test.go
+@@ -0,0 +1,123 @@
++package test
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"strings"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/ranking"
++	"cpa-usage-keeper/internal/service"
++	servicedto "cpa-usage-keeper/internal/service/dto"
++)
++
++type reportingKeysStub struct{ authLoginKeyStub }
++
++func (s *reportingKeysStub) ListReportingAPIKeys(context.Context) ([]service.ReportingAPIKey, error) {
++	return []service.ReportingAPIKey{{ID: "1", APIKey: "secret-current"}, {ID: "2", APIKey: "secret-retired", Historical: true}, {ID: "historical:123456789012345678901234", APIKey: "secret-orphan", Historical: true}}, nil
++}
++
++type reportingIdentityStub struct{ identityMetadataStub }
++
++func (s reportingIdentityStub) ListUsageIdentities(context.Context) ([]entities.UsageIdentity, error) {
++	return s.items, nil
++}
++func (s reportingIdentityStub) GetUsageIdentity(context.Context, int64) (service.UsageIdentityDetail, error) {
++	return service.UsageIdentityDetail{Identity: s.items[0]}, nil
++}
++
++type reportingUsageStub struct{ readOnlyUsageStub }
++
++func (s *reportingUsageStub) ListUsageEvents(_ context.Context, f servicedto.UsageFilter) (*servicedto.UsageEventsPage, error) {
++	s.filter = f
++	return &servicedto.UsageEventsPage{Events: []servicedto.UsageEventRecord{{ID: 7, Timestamp: time.Now(), APIGroupKey: "secret-retired", AuthIndex: "secret-auth-index", Source: "secret-source", ClientIP: new("secret-ip"), UserAgent: new("secret-agent"), RequestID: "secret-request", Model: "gpt-model", InputTokens: 12, TotalTokens: 19, CostUSD: 0.125, CostAvailable: true, Failed: true}}, Page: 1, PageSize: 50, TotalCount: 1}, nil
++}
++func (s *reportingUsageStub) ListUsageEventFilterOptions(context.Context, servicedto.UsageFilter) (*servicedto.UsageEventFilterOptions, error) {
++	return &servicedto.UsageEventFilterOptions{Models: []string{"gpt-model"}}, nil
++}
++func (s *reportingUsageStub) StreamUsageEvents(ctx context.Context, f servicedto.UsageFilter, emit func(servicedto.UsageEventRecord) error) error {
++	page, _ := s.ListUsageEvents(ctx, f)
++	return emit(page.Events[0])
++}
++
++type reportingRankingStub struct{}
++
++func (reportingRankingStub) Leaderboard(context.Context, ranking.LeaderboardPeriod, ranking.LeaderboardMetric) (ranking.Leaderboard, error) {
++	return ranking.Leaderboard{Entries: []ranking.LeaderboardEntry{{ParticipantID: "2", DisplayName: "secret-ranking-name", KeyAlias: "secret-alias", Value: 19}}}, nil
++}
++func (reportingRankingStub) UpdateProfile(context.Context, int64, string, uint8) (ranking.LocalProfile, error) {
++	panic("reporting invoked a write")
++}
++
++func TestReadOnlyReportingSanitizationScopeAndPermissions(t *testing.T) {
++	sessions := auth.NewSessionManager(time.Hour)
++	cfg := AuthConfig{Enabled: true, LoginPassword: "admin-password-long", ReadOnlyPassword: "read-password-long"}
++	usage := &reportingUsageStub{}
++	keys := &reportingKeysStub{}
++	row := entities.UsageIdentity{ID: 3, Identity: "secret-auth-index", Name: "secret-name", Alias: new("secret-alias"), FileName: new("secret-file"), FilePath: new("secret-path"), Note: new("secret-note"), LookupKey: "secret-lookup", BaseURL: "secret-url", AccountID: new("secret-account"), Provider: "secret-provider", Prefix: "secret-prefix", Type: "codex", AuthType: 1, TotalRequests: 17, TotalTokens: 190}
++	identities := reportingIdentityStub{identityMetadataStub{items: []entities.UsageIdentity{row}, pagedActiveItems: []entities.UsageIdentity{row}, pagedActiveTotal: 1}}
++	router := NewRouter(nil, nil, usage, nil, cfg, NewAuthHandler(cfg, sessions), "", OptionalProviders{CPAAPIKeys: keys, UsageIdentity: identities, Quota: &quotaProviderStub{}, LocalRanking: reportingRankingStub{}})
++	login := serveCredentialMutation(router, "POST", "/api/v1/auth/read-only-login", `{"password":"read-password-long"}`)
++	if login.Code != 204 {
++		t.Fatal(login.Code)
++	}
++	cookie := login.Result().Cookies()[0]
++	viewer, _, _ := sessions.CreateAPIKeyViewer(1)
++	viewerCookie := &http.Cookie{Name: cookie.Name, Value: viewer}
++	routes := []string{"keys", "events?range=today", "events/filters?range=today", "events/export?range=today&format=json", "events/export?range=today&format=csv", "accounts?page=1&page_size=10", "accounts/3", "accounts/quota-cache", "ranking/local/leaderboards?period=today&metric=total_tokens"}
++	for _, route := range routes {
++		path := "/api/v1/read-only/" + route
++		response := serveAPIGet(router, path, cookie)
++		if response.Code != 200 {
++			t.Fatalf("%s returned %d: %s", route, response.Code, response.Body.String())
++		}
++		if strings.Contains(response.Body.String(), "secret-") {
++			t.Fatalf("%s disclosed credential/client metadata", route)
++		}
++		if serveAPIGet(router, path).Code != 401 || serveAPIGet(router, path, viewerCookie).Code != 403 {
++			t.Fatalf("role isolation failed: %s", route)
++		}
++		if route == "events?range=today" {
++			var payload struct {
++				Events []struct {
++					APIKey string `json:"api_key"`
++					Failed bool
++					Tokens struct {
++						TotalTokens int64 `json:"total_tokens"`
++					}
++				}
++			}
++			if json.Unmarshal(response.Body.Bytes(), &payload) != nil || len(payload.Events) != 1 || payload.Events[0].APIKey != "Historical key 2" || !payload.Events[0].Failed || payload.Events[0].Tokens.TotalTokens != 19 {
++				t.Fatal("reporting metrics lost")
++			}
++		}
++	}
++	for _, id := range []string{"2", "historical:123456789012345678901234"} {
++		response := serveAPIGet(router, "/api/v1/read-only/key-overview?range=today&api_key_id="+id, cookie)
++		if response.Code != 200 || usage.filter.ReportingAPIGroupKey == "" {
++			t.Fatalf("historical selector failed: %s", id)
++		}
++	}
++	if serveAPIGet(router, "/api/v1/read-only/events?range=today&source=secret-auth-index", cookie).Code != 404 {
++		t.Fatal("raw credential selector accepted")
++	}
++	if serveAPIGet(router, "/api/v1/read-only/events?range=today&api_key_id=999", cookie).Code != 404 {
++		t.Fatal("unknown key accepted")
++	}
++	if serveAPIGet(router, "/api/v1/read-only/events?range=today&api_key_id=bad", cookie).Code != 400 {
++		t.Fatal("invalid key accepted")
++	}
++	if serveAPIGet(router, "/api/v1/read-only/events/7/request-log", cookie).Code != 404 {
++		t.Fatal("raw log route exposed")
++	}
++	for _, route := range []string{"events", "accounts/3", "accounts/quota-cache", "ranking/local/profiles/2"} {
++		if response := serveCredentialMutation(router, "POST", "/api/v1/read-only/"+route, `{}`); response.Code != 404 {
++			t.Fatal("reporting write route exposed")
++		}
++	}
++}
 diff --git a/internal/api/test/read_only_test.go b/internal/api/test/read_only_test.go
 new file mode 100644
 index 0000000..fa45dca
@@ -1201,6 +1816,21 @@ index be755dd..c57b879 100644
  	Key               string       `json:"key"`
  	Label             string       `json:"label,omitempty"`
  	Scope             string       `json:"scope,omitempty"`
+diff --git a/internal/service/dto/usage.go b/internal/service/dto/usage.go
+index 5e54d7a..2b424b0 100644
+--- a/internal/service/dto/usage.go
++++ b/internal/service/dto/usage.go
+@@ -38,7 +38,9 @@ type UsageFilter struct {
+ 	AuthIndex       string
+ 	AuthType        string
+ 	APIKeyID        string
+-	Result          string
++	// ReportingAPIGroupKey is assigned only by authenticated reporting handlers.
++	ReportingAPIGroupKey string
++	Result               string
+ }
+ 
+ // UsageEventsPage 是 usage events 列表的服务层结果。
 diff --git a/internal/service/redis_usage.go b/internal/service/redis_usage.go
 index 5fe5be9..1670e26 100644
 --- a/internal/service/redis_usage.go
@@ -1223,6 +1853,197 @@ index 5fe5be9..1670e26 100644
  		Headers:    headers,
  	})
  	if !ok {
+diff --git a/internal/service/reporting_keys.go b/internal/service/reporting_keys.go
+new file mode 100644
+index 0000000..ee25c22
+--- /dev/null
++++ b/internal/service/reporting_keys.go
+@@ -0,0 +1,44 @@
++package service
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/entities"
++	"crypto/sha256"
++	"fmt"
++	"strconv"
++)
++
++type ReportingAPIKey struct {
++	ID, APIKey string
++	Historical bool
++}
++type ReportingAPIKeyProvider interface {
++	ListReportingAPIKeys(context.Context) ([]ReportingAPIKey, error)
++}
++
++// Reporting includes revoked keys and retained events predating key synchronization.
++// Authentication and administrative operations continue to use active keys only.
++func (s *cpaAPIKeyService) ListReportingAPIKeys(ctx context.Context) ([]ReportingAPIKey, error) {
++	var rows []entities.CPAAPIKey
++	if err := s.db.WithContext(ctx).Order("id asc").Find(&rows).Error; err != nil {
++		return nil, err
++	}
++	result := []ReportingAPIKey{}
++	seen := map[string]bool{}
++	for _, row := range rows {
++		seen[row.APIKey] = true
++		result = append(result, ReportingAPIKey{strconv.FormatInt(row.ID, 10), row.APIKey, row.IsDeleted})
++	}
++	var raw []string
++	if err := s.db.WithContext(ctx).Model(&entities.UsageEvent{}).Distinct("api_group_key").Pluck("api_group_key", &raw).Error; err != nil {
++		return nil, err
++	}
++	for _, key := range raw {
++		if key == "" || seen[key] {
++			continue
++		}
++		digest := sha256.Sum256([]byte(key))
++		result = append(result, ReportingAPIKey{fmt.Sprintf("historical:%x", digest[:12]), key, true})
++	}
++	return result, nil
++}
+diff --git a/internal/service/test/reporting_keys_test.go b/internal/service/test/reporting_keys_test.go
+new file mode 100644
+index 0000000..4dc1adb
+--- /dev/null
++++ b/internal/service/test/reporting_keys_test.go
+@@ -0,0 +1,45 @@
++package test
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/repository"
++	"cpa-usage-keeper/internal/service"
++	servicedto "cpa-usage-keeper/internal/service/dto"
++	"testing"
++	"time"
++)
++
++func TestHistoricalReportingDoesNotReactivateRevokedKey(t *testing.T) {
++	db := openUsageServiceTestDatabase(t)
++	now := time.Now()
++	if err := repository.SyncCPAAPIKeys(db, []string{"active-key", "retired-key"}, now); err != nil {
++		t.Fatal(err)
++	}
++	if err := repository.SyncCPAAPIKeys(db, []string{"active-key"}, now); err != nil {
++		t.Fatal(err)
++	}
++	for i, key := range []string{"retired-key", "orphan-key", "active-key"} {
++		if err := db.Create(&entities.UsageEvent{ID: int64(i + 1), APIGroupKey: key, Model: "model", Timestamp: now, EventKey: key, TotalTokens: int64((i + 1) * 100)}).Error; err != nil {
++			t.Fatal(err)
++		}
++	}
++	keys := service.NewCPAAPIKeyService(db)
++	rows, err := keys.(service.ReportingAPIKeyProvider).ListReportingAPIKeys(context.Background())
++	if err != nil || len(rows) != 3 {
++		t.Fatalf("historical reporting keys: %d %v", len(rows), err)
++	}
++	if _, err := keys.FindActiveCPAAPIKeyByValue(context.Background(), "retired-key"); err == nil {
++		t.Fatal("reporting reactivated retired authentication")
++	}
++	usage := service.NewUsageService(db, emptyPricingCatalogForTest())
++	for _, key := range rows {
++		if !key.Historical {
++			continue
++		}
++		events, err := usage.ListUsageEvents(context.Background(), servicedto.UsageFilter{ReportingAPIGroupKey: key.APIKey, Page: 1, PageSize: 50, Limit: 50})
++		if err != nil || len(events.Events) != 1 || events.Events[0].APIGroupKey != key.APIKey {
++			t.Fatalf("historical scope failed: %v", err)
++		}
++	}
++}
+diff --git a/internal/service/usage.go b/internal/service/usage.go
+index 9410018..5a854ab 100644
+--- a/internal/service/usage.go
++++ b/internal/service/usage.go
+@@ -50,6 +50,13 @@ func usageServiceContext(ctx context.Context) context.Context {
+ 	return ctx
+ }
+ 
++func (s *usageService) resolveReportingAPIGroupKey(ctx context.Context, filter servicedto.UsageFilter) (string, error) {
++	if filter.ReportingAPIGroupKey != "" {
++		return filter.ReportingAPIGroupKey, nil
++	}
++	return s.resolveAPIGroupKey(ctx, filter.APIKeyID)
++}
++
+ func (s *usageService) resolveAPIGroupKey(ctx context.Context, apiKeyID string) (string, error) {
+ 	ctx = usageServiceContext(ctx)
+ 	apiKeyID = strings.TrimSpace(apiKeyID)
+@@ -70,7 +77,7 @@ func (s *usageService) resolveAPIGroupKey(ctx context.Context, apiKeyID string)
+ // Usage 页面里的 Overview tab 下传时间窗口和全局 API-Key，仓储层负责构建 overview 聚合。
+ func (s *usageService) GetUsageOverview(ctx context.Context, filter servicedto.UsageFilter) (*servicedto.UsageOverviewSnapshot, error) {
+ 	ctx = usageServiceContext(ctx)
+-	apiGroupKey, err := s.resolveAPIGroupKey(ctx, filter.APIKeyID)
++	apiGroupKey, err := s.resolveReportingAPIGroupKey(ctx, filter)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -110,7 +117,7 @@ func (s *usageService) GetUsageOverview(ctx context.Context, filter servicedto.U
+ // GetUsageOverviewComparisons 为 Overview 比较图单独构建维度汇总，不拖慢基础 Overview 查询。
+ func (s *usageService) GetUsageOverviewComparisons(ctx context.Context, filter servicedto.UsageFilter) (*servicedto.UsageOverviewSnapshot, error) {
+ 	ctx = usageServiceContext(ctx)
+-	apiGroupKey, err := s.resolveAPIGroupKey(ctx, filter.APIKeyID)
++	apiGroupKey, err := s.resolveReportingAPIGroupKey(ctx, filter)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -133,7 +140,7 @@ func (s *usageService) GetUsageOverviewComparisons(ctx context.Context, filter s
+ // GetUsageActivity 用统一时间条件选择档位；today/yesterday 额外保留本地自然日边界。
+ func (s *usageService) GetUsageActivity(ctx context.Context, filter servicedto.UsageFilter) (*servicedto.UsageActivitySnapshot, error) {
+ 	ctx = usageServiceContext(ctx)
+-	apiGroupKey, err := s.resolveAPIGroupKey(ctx, filter.APIKeyID)
++	apiGroupKey, err := s.resolveReportingAPIGroupKey(ctx, filter)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -264,7 +271,7 @@ func usageActivityGrain(window servicedto.UsageActivityWindow) (entities.UsageAc
+ 
+ func (s *usageService) GetUsageOverviewRealtime(ctx context.Context, filter servicedto.UsageFilter) (*servicedto.UsageOverviewRealtime, error) {
+ 	ctx = usageServiceContext(ctx)
+-	apiGroupKey, err := s.resolveAPIGroupKey(ctx, filter.APIKeyID)
++	apiGroupKey, err := s.resolveReportingAPIGroupKey(ctx, filter)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -458,7 +465,7 @@ func mapRealtimeCacheLevel(points []repodto.RealtimeCacheLevelPointRecord) []ser
+ 
+ func (s *usageService) GetAnalysis(ctx context.Context, filter servicedto.UsageFilter) (*servicedto.AnalysisSnapshot, error) {
+ 	ctx = usageServiceContext(ctx)
+-	apiGroupKey, err := s.resolveAPIGroupKey(ctx, filter.APIKeyID)
++	apiGroupKey, err := s.resolveReportingAPIGroupKey(ctx, filter)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -478,7 +485,7 @@ func (s *usageService) GetAnalysis(ctx context.Context, filter servicedto.UsageF
+ 
+ func (s *usageService) GetAnalysisLatency(ctx context.Context, filter servicedto.UsageFilter) (*servicedto.AnalysisLatencyDiagnostics, error) {
+ 	ctx = usageServiceContext(ctx)
+-	apiGroupKey, err := s.resolveAPIGroupKey(ctx, filter.APIKeyID)
++	apiGroupKey, err := s.resolveReportingAPIGroupKey(ctx, filter)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -648,7 +655,7 @@ func mapAnalysisCompositionRecord(item repodto.AnalysisCompositionRecord) servic
+ // Usage 页面里的 Request Event Log tab 下传分页、列表筛选条件和全局 API-Key。
+ func (s *usageService) ListUsageEvents(ctx context.Context, filter servicedto.UsageFilter) (*servicedto.UsageEventsPage, error) {
+ 	ctx = usageServiceContext(ctx)
+-	apiGroupKey, err := s.resolveAPIGroupKey(ctx, filter.APIKeyID)
++	apiGroupKey, err := s.resolveReportingAPIGroupKey(ctx, filter)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -719,7 +726,7 @@ func (s *usageService) ListUsageEvents(ctx context.Context, filter servicedto.Us
+ // StreamUsageEvents 使用 Request Event Log 相同筛选条件逐行导出，不应用分页。
+ func (s *usageService) StreamUsageEvents(ctx context.Context, filter servicedto.UsageFilter, emit func(servicedto.UsageEventRecord) error) error {
+ 	ctx = usageServiceContext(ctx)
+-	apiGroupKey, err := s.resolveAPIGroupKey(ctx, filter.APIKeyID)
++	apiGroupKey, err := s.resolveReportingAPIGroupKey(ctx, filter)
+ 	if err != nil {
+ 		return err
+ 	}
 diff --git a/web/src/App.tsx b/web/src/App.tsx
 index 814f442..b79440e 100644
 --- a/web/src/App.tsx
@@ -1360,8 +2181,54 @@ index 8a5c49b..fe49e25 100644
    if (session.kind === 'admin') {
      return session.alias || t('usage_stats.session_settings_admin_label');
    }
+diff --git a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
+index cce8afb..6552e11 100644
+--- a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
++++ b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
+@@ -11,6 +11,7 @@ import { CredentialStatusToggle, CredentialStatusUnsupportedIcon, isCredentialSt
+ import { QuestionMarkHelp } from '@/components/ui/QuestionMarkHelp'
+ 
+ interface AiProviderCredentialsSectionProps {
++  reportingOnly?: boolean
+   rows: AiProviderCredentialRow[]
+   total: number
+   page: number
+@@ -33,7 +34,7 @@ interface AiProviderCredentialsSectionProps {
+   onSortChange: (sort: UsageIdentityPageSort) => void
+ }
+ 
+-export function AiProviderCredentialsSection({ rows, total, page, totalPages, pageSize, activeOnly, sort, loading, editFallbackRef, onEdit, onOpenDetails, statusPendingIdentityIds, onToggleStatus, onSavePriority, onPageChange, onPageSizeChange, onActiveOnlyChange, onSortChange }: AiProviderCredentialsSectionProps) {
++export function AiProviderCredentialsSection({ reportingOnly = false, rows, total, page, totalPages, pageSize, activeOnly, sort, loading, editFallbackRef, onEdit, onOpenDetails, statusPendingIdentityIds, onToggleStatus, onSavePriority, onPageChange, onPageSizeChange, onActiveOnlyChange, onSortChange }: AiProviderCredentialsSectionProps) {
+   const { t } = useTranslation()
+   const helpText = t('usage_stats.credentials_ai_providers_active_only_help')
+ 
+@@ -89,7 +90,7 @@ export function AiProviderCredentialsSection({ rows, total, page, totalPages, pa
+               displayName={row.displayName}
+               disabled={row.identity.disabled}
+               pending={statusPendingIdentityIds?.has(row.identity.id || row.identity.identity) ?? false}
+-              readOnly={row.identity.is_deleted}
++              readOnly={reportingOnly || row.identity.is_deleted}
+               onToggle={(disabled) => onToggleStatus?.(row.identity.id || row.identity.identity, row.identity.identity, disabled)}
+             />
+           ) : (
+@@ -121,13 +122,13 @@ export function AiProviderCredentialsSection({ rows, total, page, totalPages, pa
+               <CredentialPriorityEditor
+                 priority={row.identity.priority}
+                 displayName={row.displayName}
+-                readOnly={row.identity.is_deleted}
++                readOnly={reportingOnly || row.identity.is_deleted}
+                 openAIShared={row.identity.type.trim().toLowerCase() === 'openai'}
+                 onSave={onSavePriority ? (priority) => onSavePriority(row.identity.id || row.identity.identity, row.identity.identity, priority) : undefined}
+               />
+             </span>
+           ) : undefined}
+-          badges={null}
++          badges={reportingOnly ? <span>{t(row.identity.disabled ? 'usage_stats.credentials_detail_disabled' : 'usage_stats.credentials_detail_enabled')}</span> : null}
+           metricsTitle={row.identity.stats_reset_at ? t('usage_stats.credentials_stats_since', { time: formatCredentialTimestamp(row.identity.stats_reset_at) ?? row.identity.stats_reset_at }) : undefined}
+           metrics={(
+             <>
 diff --git a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
-index 580f222..38eed4b 100644
+index 580f222..ebc34ea 100644
 --- a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
 @@ -10,6 +10,7 @@ import { IconChartLine, IconGaugeReset, IconRefreshCw, IconSearch, IconSettings,
@@ -1372,7 +2239,93 @@ index 580f222..38eed4b 100644
  import { formatCredentialTimestamp, type AuthFileCredentialRow, type DisplayQuota } from './credentialViewModels'
  import { deleteAuthFiles, fetchQuotaAutoRefreshSettings, fetchUsageQuotaResetCredits, setAuthFilesDisabled, updateQuotaAutoRefreshSettings, type UsageIdentityPageSort } from '@/lib/api'
  import type { QuotaAutoRefreshScheduleUnit, QuotaAutoRefreshSettings, UsageQuotaInspectionResult, UsageQuotaInspectionResultStatus, UsageQuotaInspectionStatusResponse, UsageQuotaResetCreditsResponse } from '@/lib/types'
-@@ -1991,6 +1992,7 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
+@@ -93,6 +94,7 @@ const AUTO_REFRESH_SCHEDULE_UNITS: QuotaAutoRefreshScheduleUnit[] = ['minute', '
+ const AUTO_REFRESH_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7] as const
+ 
+ interface AuthFileCredentialsSectionProps {
++  reportingOnly?: boolean
+   rows: AuthFileCredentialRow[]
+   timeZone?: string
+   total: number
+@@ -128,7 +130,7 @@ interface AuthFileCredentialsSectionProps {
+   onAfterInvalidAccountAction?: () => Promise<void>
+ }
+ 
+-export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalPages, pageSize, activeOnly, sort, loading, quotaRefreshing, quotaRefreshError, quotaInspectionStatus, quotaInspectionLoading, quotaInspectionStarting, quotaInspectionError, onPageChange, onPageSizeChange, onActiveOnlyChange, onSortChange, onRefreshQuota, onRefreshQuotaForAuthIndex, onResetQuotaForAuthIndex, editFallbackRef, onEdit, onOpenDetails, statusPendingIdentityIds, onToggleStatus, onSavePriority, onRefreshInspectionStatus, onStartInspection, onAfterInvalidAccountAction }: AuthFileCredentialsSectionProps) {
++export function AuthFileCredentialsSection({ reportingOnly = false, rows, timeZone, total, page, totalPages, pageSize, activeOnly, sort, loading, quotaRefreshing, quotaRefreshError, quotaInspectionStatus, quotaInspectionLoading, quotaInspectionStarting, quotaInspectionError, onPageChange, onPageSizeChange, onActiveOnlyChange, onSortChange, onRefreshQuota, onRefreshQuotaForAuthIndex, onResetQuotaForAuthIndex, editFallbackRef, onEdit, onOpenDetails, statusPendingIdentityIds, onToggleStatus, onSavePriority, onRefreshInspectionStatus, onStartInspection, onAfterInvalidAccountAction }: AuthFileCredentialsSectionProps) {
+   const { t } = useTranslation()
+   const [inspectionOpen, setInspectionOpen] = useState(false)
+   const [quotaUsageMode, setQuotaUsageMode] = useState<QuotaUsageMode>('current')
+@@ -216,7 +218,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+             <AuthFileDisplayModeSwitch mode={displayMode} onChange={setDisplayMode} />
+           </div>
+         )}
+-        actions={(
++        actions={!reportingOnly && (
+           <div className={styles.credentialSectionActionButtons}>
+             <MainActionButton
+               type="button"
+@@ -275,7 +277,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+                   displayName={row.displayName}
+                   disabled={row.identity.disabled}
+                   pending={statusPendingIdentityIds?.has(row.identity.id || row.identity.identity) ?? false}
+-                  readOnly={row.identity.is_deleted}
++                  readOnly={reportingOnly || row.identity.is_deleted}
+                   onToggle={(disabled) => onToggleStatus?.(row.identity.id || row.identity.identity, row.identity.identity, disabled)}
+                 />
+               ) : (
+@@ -339,12 +341,12 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+                 <CredentialPriorityEditor
+                   priority={row.identity.priority}
+                   displayName={row.displayName}
+-                  readOnly={row.identity.is_deleted}
++                  readOnly={reportingOnly || row.identity.is_deleted}
+                   onSave={onSavePriority ? (priority) => onSavePriority(row.identity.id || row.identity.identity, row.identity.identity, priority) : undefined}
+                 />
+               </span>
+             ) : undefined}
+-            badges={null}
++            badges={reportingOnly ? <span>{t(row.identity.disabled ? 'usage_stats.credentials_detail_disabled' : 'usage_stats.credentials_detail_enabled')}</span> : null}
+             metricsTitle={row.identity.stats_reset_at ? t('usage_stats.credentials_stats_since', { time: formatCredentialTimestamp(row.identity.stats_reset_at) ?? row.identity.stats_reset_at }) : undefined}
+             metrics={(
+               <>
+@@ -360,7 +362,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+             ) : (
+               <div className={styles.credentialQuotaSideWithAction}>
+                 <AuthFileQuotaPanel row={row} quotaUsageMode={quotaUsageMode} timeZone={timeZone} />
+-                <div className={styles.credentialQuotaActionStack}>
++                {!reportingOnly && <div className={styles.credentialQuotaActionStack}>
+                   {/* reset 按钮只在官方缓存给出可用次数时展示；refresh 始终保留在右侧列居中位置。 */}
+                   {resetCredits > 0 && (
+                     <QuotaResetAction
+@@ -381,7 +383,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+                   >
+                     {rowRefreshing ? <LoadingSpinner size={13} /> : <IconRefreshCw size={13} />}
+                   </button>
+-                </div>
++                </div>}
+               </div>
+             )}
+           />
+@@ -427,7 +429,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+             document.body,
+           )
+         : null}
+-      <QuotaInspectionModal
++      {!reportingOnly && <QuotaInspectionModal
+         open={inspectionOpen}
+         status={quotaInspectionStatus}
+         loading={quotaInspectionLoading}
+@@ -437,7 +439,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+         onStart={onStartInspection}
+         onRefreshStatus={onRefreshInspectionStatus}
+         onAfterInvalidAccountAction={onAfterInvalidAccountAction}
+-      />
++      />}
+     </>
+   )
+ }
+@@ -1991,6 +1993,7 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
        <div className={styles.credentialQuotaBarHeader}>
          <span className={styles.credentialQuotaLabelGroup}>
            <span>{quota.label}</span>
@@ -1380,6 +2333,100 @@ index 580f222..38eed4b 100644
          </span>
          {(resetDuration || percentLabel) && (
            <span className={styles.credentialQuotaValueGroup}>
+diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+index 43b49c7..e132ce2 100644
+--- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
++++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+@@ -24,6 +24,7 @@ const ERROR_EVENTS_PAGE_SIZE = 50
+ type CredentialDetailTab = 'overview' | 'quota-history' | 'requests' | 'errors'
+ 
+ interface CredentialDetailDrawerProps {
++  readOnly?: boolean
+   open: boolean
+   selection: CredentialDetailSelection | null
+   timeZone?: string
+@@ -71,6 +72,7 @@ function appendCredentialErrorEvents(
+ }
+ 
+ export function CredentialDetailDrawer({
++  readOnly = false,
+   open,
+   selection,
+   timeZone,
+@@ -143,10 +145,10 @@ export function CredentialDetailDrawer({
+     }
+   }
+   const quotaHistoryProvider = selection?.kind === 'auth-file' ? identity?.type?.trim().toLowerCase() : undefined
+-  const hasQuotaHistory = quotaHistoryProvider === 'codex' || quotaHistoryProvider === 'claude'
++  const hasQuotaHistory = !readOnly && (quotaHistoryProvider === 'codex' || quotaHistoryProvider === 'claude')
+   const availableTabs = useMemo<CredentialDetailTab[]>(() => hasQuotaHistory
+     ? ['overview', 'quota-history', 'requests', 'errors']
+-    : ['overview', 'requests', 'errors'], [hasQuotaHistory])
++    : readOnly ? ['overview', 'requests'] : ['overview', 'requests', 'errors'], [hasQuotaHistory, readOnly])
+ 
+   const resetRequestEvents = useCallback(() => {
+     firstPageControllerRef.current?.abort()
+@@ -208,6 +210,7 @@ export function CredentialDetailDrawer({
+     try {
+       // 详情列表固定从当前凭证最近的原始事件开始，不继承外层页面的查询条件。
+       const response = await fetchUsageEvents(undefined, controller.signal, {
++        readOnly,
+         authType: authTypeFilter,
+         pageSize: REQUEST_EVENTS_PAGE_SIZE,
+         cursorMode: true,
+@@ -231,7 +234,7 @@ export function CredentialDetailDrawer({
+         setEventsLoading(false)
+       }
+     }
+-  }, [activeTab, authTypeFilter, onAuthRequired, open, sourceFilter, t])
++  }, [activeTab, authTypeFilter, onAuthRequired, open, sourceFilter, t, readOnly])
+ 
+   useEffect(() => {
+     if (!open || activeTab !== 'requests') return
+@@ -349,6 +352,7 @@ export function CredentialDetailDrawer({
+     setEventsError('')
+     try {
+       const response = await fetchUsageEvents(undefined, controller.signal, {
++        readOnly,
+         authType: authTypeFilter,
+         pageSize: REQUEST_EVENTS_PAGE_SIZE,
+         cursorMode: true,
+@@ -373,7 +377,7 @@ export function CredentialDetailDrawer({
+         setEventsLoadingMore(false)
+       }
+     }
+-  }, [authTypeFilter, eventsLoading, eventsLoadingMore, eventsNextCursor, onAuthRequired, sourceFilter, t])
++  }, [authTypeFilter, eventsLoading, eventsLoadingMore, eventsNextCursor, onAuthRequired, sourceFilter, t, readOnly])
+ 
+   const loadMoreErrorEvents = useCallback(async () => {
+     const cursor = errorEventsNextCursor?.trim()
+@@ -422,7 +426,7 @@ export function CredentialDetailDrawer({
+         {selection.kind === 'auth-file' && selection.row.subscriptionBadge
+           ? <CredentialSubscriptionBadge model={selection.row.subscriptionBadge} />
+           : null}
+-        <CredentialPriorityBadge>{row.priorityLabel || 'P0'}</CredentialPriorityBadge>
++        {!readOnly && <CredentialPriorityBadge>{row.priorityLabel || 'P0'}</CredentialPriorityBadge>}
+         <span className={identity.disabled || identity.is_deleted ? styles.statusDisabled : styles.statusEnabled}>
+           {identity.is_deleted
+             ? t('usage_stats.deleted')
+@@ -486,7 +490,7 @@ export function CredentialDetailDrawer({
+             >
+               {t('usage_stats.credentials_detail_requests_tab')}
+             </button>
+-            <button
++            {!readOnly && <button
+               ref={errorsTabRef}
+               id={errorsTabId}
+               type="button"
+@@ -500,7 +504,7 @@ export function CredentialDetailDrawer({
+               onKeyDown={handleTabKeyDown}
+             >
+               {t('usage_stats.credentials_detail_errors_tab')}
+-            </button>
++            </button>}
+           </div>
+           {((activeTab === 'requests' && eventsError && events.length === 0 && !eventsLoading)
+             || (activeTab === 'errors' && errorEventsError && errorEvents.length === 0 && !errorEventsLoading)) ? (
 diff --git a/web/src/components/usage/credentials/credentialViewModels.ts b/web/src/components/usage/credentials/credentialViewModels.ts
 index 5c5e0a2..1a754ae 100644
 --- a/web/src/components/usage/credentials/credentialViewModels.ts
@@ -1510,7 +2557,7 @@ index b010835..31d25ec 100644
    useEffect(() => {
      if (!enabled || !rangeQuery.valid) return
 diff --git a/web/src/features/key-viewer/KeyViewerShell.tsx b/web/src/features/key-viewer/KeyViewerShell.tsx
-index 8eaead8..acbaca4 100644
+index 8eaead8..75110c7 100644
 --- a/web/src/features/key-viewer/KeyViewerShell.tsx
 +++ b/web/src/features/key-viewer/KeyViewerShell.tsx
 @@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
@@ -1522,7 +2569,14 @@ index 8eaead8..acbaca4 100644
  import styles from './KeyViewerShell.module.scss';
  import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
  import { DashboardToolbar } from '@/components/dashboard/DashboardToolbar';
-@@ -19,6 +19,7 @@ const KEY_VIEWER_PAGE_LABEL_KEYS: Record<KeyViewerPage, string> = {
+@@ -13,12 +13,13 @@ const KEY_VIEWER_PAGE_LABEL_KEYS: Record<KeyViewerPage, string> = {
+   realtime: 'usage_stats.tab_realtime',
+   analysis: 'usage_stats.tab_analysis',
+   ranking: 'usage_stats.tab_ranking',
+-  quota: 'key_quota.tab',
++  quota: 'key_quota.tab', events: 'usage_stats.tab_events', 'auth-files': 'usage_stats.tab_auth_files', 'ai-provider': 'usage_stats.tab_ai_provider',
+ };
+ 
  interface KeyViewerShellProps {
    activePage: KeyViewerPage;
    apiKey?: AuthSessionAPIKeySummary;
@@ -1552,26 +2606,54 @@ index 8eaead8..acbaca4 100644
              <DashboardToolbar
                activeId={activePage}
 -              items={(Object.keys(KEY_VIEWER_PAGE_PATHS) as KeyViewerPage[]).filter((page) => page !== 'quota' || apiKey?.quota_enabled === true).map((page) => ({ id: page, label: t(KEY_VIEWER_PAGE_LABEL_KEYS[page]), href: appPath(KEY_VIEWER_PAGE_PATHS[page]) }))}
-+              items={(Object.keys(KEY_VIEWER_PAGE_PATHS) as KeyViewerPage[]).filter((page) => (!readOnly || page !== 'ranking') && (page !== 'quota' || readOnly || apiKey?.quota_enabled === true)).map((page) => ({ id: page, label: t(KEY_VIEWER_PAGE_LABEL_KEYS[page]), href: appPath(readOnly ? READ_ONLY_PAGE_PATHS[page] : KEY_VIEWER_PAGE_PATHS[page]) }))}
++              items={(Object.keys(KEY_VIEWER_PAGE_PATHS) as KeyViewerPage[]).filter((page) => (readOnly || !['events','auth-files','ai-provider'].includes(page)) && (page !== 'quota' || readOnly || apiKey?.quota_enabled === true)).map((page) => ({ id: page, label: t(KEY_VIEWER_PAGE_LABEL_KEYS[page]), href: appPath(readOnly ? READ_ONLY_PAGE_PATHS[page] : KEY_VIEWER_PAGE_PATHS[page]) }))}
                onNavigate={(page) => onNavigate(KEY_VIEWER_PAGE_PATHS[page])}
                filters={filters}
                onRefresh={onRefresh}
 diff --git a/web/src/features/key-viewer/navigation.ts b/web/src/features/key-viewer/navigation.ts
-index fa46701..51c2c47 100644
+index fa46701..2a2ea1b 100644
 --- a/web/src/features/key-viewer/navigation.ts
 +++ b/web/src/features/key-viewer/navigation.ts
-@@ -12,3 +12,11 @@ export const KEY_VIEWER_PAGE_PATHS: Record<KeyViewerPage, KeyViewerPath> = {
- const KEY_VIEWER_PATHS = new Set<KeyViewerPath>(Object.values(KEY_VIEWER_PAGE_PATHS));
+@@ -1,14 +1,22 @@
+-export type KeyViewerPage = 'overview' | 'realtime' | 'analysis' | 'ranking' | 'quota';
+-export type KeyViewerPath = '/key-overview' | '/key-realtime' | '/key-analysis' | '/key-ranking' | '/key-quota';
++export type KeyViewerPage = 'overview' | 'realtime' | 'analysis' | 'ranking' | 'quota' | 'events' | 'auth-files' | 'ai-provider';
++export type KeyViewerPath = '/key-overview' | '/key-realtime' | '/key-analysis' | '/key-ranking' | '/key-quota' | '/key-events' | '/key-auth-files' | '/key-ai-provider';
+ 
+ export const KEY_VIEWER_PAGE_PATHS: Record<KeyViewerPage, KeyViewerPath> = {
+   overview: '/key-overview',
+   realtime: '/key-realtime',
+   analysis: '/key-analysis',
+   ranking: '/key-ranking',
+-  quota: '/key-quota',
++  quota: '/key-quota', events: '/key-events', 'auth-files': '/key-auth-files', 'ai-provider': '/key-ai-provider',
+ };
+ 
+-const KEY_VIEWER_PATHS = new Set<KeyViewerPath>(Object.values(KEY_VIEWER_PAGE_PATHS));
++const KEY_VIEWER_PATHS = new Set<KeyViewerPath>(Object.entries(KEY_VIEWER_PAGE_PATHS).filter(([page])=>!['events','auth-files','ai-provider'].includes(page)).map(([,path])=>path));
  
  export const isKeyViewerPath = (path: string): path is KeyViewerPath => KEY_VIEWER_PATHS.has(path as KeyViewerPath);
 +
 +export const READ_ONLY_PAGE_PATHS: Record<KeyViewerPage, string> = {
 +  overview: '/read-only', realtime: '/read-only/realtime', analysis: '/read-only/analysis',
-+  quota: '/read-only/quota', ranking: '/read-only',
++  quota: '/read-only/quota', ranking: '/read-only/ranking', events: '/read-only/events', 'auth-files': '/read-only/auth-files', 'ai-provider': '/read-only/ai-provider',
 +};
 +export function getReadOnlyPage(path: string): KeyViewerPage | undefined {
-+  return (['overview', 'realtime', 'analysis', 'quota'] as const).find(page => READ_ONLY_PAGE_PATHS[page] === path);
++  return (['overview', 'realtime', 'analysis', 'quota', 'ranking', 'events', 'auth-files', 'ai-provider'] as const).find(page => READ_ONLY_PAGE_PATHS[page] === path);
 +}
+diff --git a/web/src/features/ranking/api.ts b/web/src/features/ranking/api.ts
+index b98f418..1e5c4ca 100644
+--- a/web/src/features/ranking/api.ts
++++ b/web/src/features/ranking/api.ts
+@@ -49,6 +49,8 @@ const requestRankingJSON = async <T>(path: string, init: RequestInit = {}): Prom
+   return response.json() as Promise<T>;
+ };
+ 
++export const fetchReadOnlyLocalRankingLeaderboard = (period: RankingPeriod, metric: RankingMetric, signal?: AbortSignal) => requestRankingJSON<RankingLeaderboardResponse>(`/read-only/ranking/local/leaderboards?period=${period}&metric=${metric}`, {signal});
++
+ export const fetchRankingStatus = (signal?: AbortSignal) => requestRankingJSON<RankingStatusResponse>(
+   '/ranking/status',
+   { signal },
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
 index a8c1332..53702f3 100644
 --- a/web/src/i18n/index.ts
@@ -1601,7 +2683,7 @@ index a8c1332..53702f3 100644
          loading: '載入中...',
          save: '儲存',
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index bf62a55..4c3bc13 100644
+index bf62a55..c4078c2 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
 @@ -3,6 +3,7 @@ import { isCPAMCEmbed } from '@/embed/cpamcEmbed'
@@ -1742,7 +2824,33 @@ index bf62a55..4c3bc13 100644
    const query = params.toString()
    const response = await apiFetch(`${apiPath(path)}${query ? `?${query}` : ''}`, { signal: options.signal })
    if (!response.ok) {
-@@ -1056,3 +1090,9 @@ export async function deletePricing(model: string): Promise<void> {
+@@ -449,6 +483,7 @@ export async function fetchUsageOverviewRealtime(options: FetchUsageOverviewReal
+ }
+ 
+ export interface FetchUsageEventsOptions {
++  readOnly?: boolean
+   page?: number
+   pageSize?: number
+   cursorMode?: boolean
+@@ -534,7 +569,7 @@ export async function fetchUsageEventSourceFilterOptions(signal?: AbortSignal):
+ export async function fetchUsageEvents(request: UsageRangeRequest | undefined, signal?: AbortSignal, options?: FetchUsageEventsOptions): Promise<UsageEventsResponse> {
+   const params = buildUsageEventsParams(request, options)
+   const query = params.toString()
+-  const response = await apiFetch(`${apiPath('/usage/events')}${query ? `?${query}` : ''}`, { signal })
++  const response = await apiFetch(`${apiPath(options?.readOnly ? '/read-only/events' : '/usage/events')}${query ? `?${query}` : ''}`, { signal })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to load usage events: ${response.status}`)
+   }
+@@ -579,7 +614,7 @@ export async function exportUsageEvents(request: UsageRangeRequest, format: Usag
+   const params = buildUsageEventsParams(request, options, false)
+   params.set('format', format)
+   const query = params.toString()
+-  const response = await apiFetch(`${apiPath('/usage/events/export')}${query ? `?${query}` : ''}`)
++  const response = await apiFetch(`${apiPath(options?.readOnly ? '/read-only/events/export' : '/usage/events/export')}${query ? `?${query}` : ''}`)
+   if (!response.ok) {
+     await parseApiError(response, `Failed to export usage events: ${response.status}`)
+   }
+@@ -1056,3 +1091,14 @@ export async function deletePricing(model: string): Promise<void> {
      await parseApiError(response, `Failed to delete pricing: ${response.status}`)
    }
  }
@@ -1751,6 +2859,11 @@ index bf62a55..4c3bc13 100644
 +  const response = await apiFetch(apiPath('/read-only/keys'), {signal})
 +  if (!response.ok) await parseApiError(response, 'Failed to load API key filter')
 +  return response.json()
++}
++
++export async function fetchReadOnlyReport<T>(path: string, params = new URLSearchParams(), signal?: AbortSignal): Promise<T> {
++ const response=await apiFetch(apiPath('/read-only/'+path)+'?'+params.toString(),{signal,cache:'no-store'});
++ if(!response.ok) await parseApiError(response,'Unable to load reporting data');return response.json();
 +}
 diff --git a/web/src/lib/quotaPolling.ts b/web/src/lib/quotaPolling.ts
 new file mode 100644
@@ -2081,6 +3194,69 @@ index 6f8cf57..e29bb65 100644
 -  </KeyViewerShell>;
 +    </Card>)}</div>;
  }
+diff --git a/web/src/pages/KeyRankingPage.tsx b/web/src/pages/KeyRankingPage.tsx
+index 785d5b3..8f9e456 100644
+--- a/web/src/pages/KeyRankingPage.tsx
++++ b/web/src/pages/KeyRankingPage.tsx
+@@ -4,6 +4,7 @@ import { KeyViewerShell } from '@/features/key-viewer/KeyViewerShell';
+ import type { KeyViewerPath } from '@/features/key-viewer/navigation';
+ import {
+   fetchKeyLocalRankingLeaderboard,
++  fetchReadOnlyLocalRankingLeaderboard,
+   fetchKeyRankingLeaderboard,
+   RankingApiError,
+ } from '@/features/ranking/api';
+@@ -35,16 +36,17 @@ const formatDateTime = (value: string, language: string): string => {
+ };
+ 
+ export interface KeyRankingPageProps {
++  readOnly?: boolean;
+   apiKey?: AuthSessionAPIKeySummary;
+   onNavigate: (path: KeyViewerPath) => void;
+   onAuthRequired?: () => void;
+ }
+ 
+-export function KeyRankingPage({ apiKey, onNavigate, onAuthRequired }: KeyRankingPageProps) {
++export function KeyRankingPage({ apiKey, readOnly = false, onNavigate, onAuthRequired }: KeyRankingPageProps) {
+   const { t, i18n } = useTranslation();
+-  const localRankingEnabled = apiKey?.local_ranking_enabled === true;
++  const localRankingEnabled = readOnly || apiKey?.local_ranking_enabled === true;
+   const [scope, setScope] = useState<RankingScope>('community');
+-  const effectiveScope: RankingScope = localRankingEnabled && scope === 'local' ? 'local' : 'community';
++  const effectiveScope: RankingScope = readOnly || localRankingEnabled && scope === 'local' ? 'local' : 'community';
+   const [period, setPeriod] = useState<RankingPeriod>('today');
+   const [metric, setMetric] = useState<RankingMetric>('overall');
+   const [leaderboard, setLeaderboard] = useState<RankingLeaderboardResponse | null>(null);
+@@ -87,7 +89,7 @@ export function KeyRankingPage({ apiKey, onNavigate, onAuthRequired }: KeyRankin
+ 
+     try {
+       const nextLeaderboard = effectiveScope === 'local'
+-        ? await fetchKeyLocalRankingLeaderboard(period, metric, controller.signal)
++        ? await (readOnly ? fetchReadOnlyLocalRankingLeaderboard : fetchKeyLocalRankingLeaderboard)(period, metric, controller.signal)
+         : await fetchKeyRankingLeaderboard(period, metric, controller.signal);
+       if (requestControllerRef.current !== controller) return;
+       setLeaderboard(nextLeaderboard);
+@@ -112,7 +114,7 @@ export function KeyRankingPage({ apiKey, onNavigate, onAuthRequired }: KeyRankin
+         setLoading(false);
+       }
+     }
+-  }, [effectiveScope, metric, onAuthRequired, period]);
++  }, [effectiveScope, metric, onAuthRequired, period, readOnly]);
+ 
+   useEffect(() => {
+     void loadLeaderboard();
+@@ -145,9 +147,10 @@ export function KeyRankingPage({ apiKey, onNavigate, onAuthRequired }: KeyRankin
+   return (
+     <KeyViewerShell
+       activePage="ranking"
++      readOnly={readOnly}
+       apiKey={apiKey}
+       loading={loading && !leaderboard}
+-      filters={localRankingEnabled ? [<RankingScopeSwitch key="scope" value={effectiveScope} onChange={handleScopeChange} />] : []}
++      filters={localRankingEnabled && !readOnly ? [<RankingScopeSwitch key="scope" value={effectiveScope} onChange={handleScopeChange} />] : []}
+       onRefresh={() => void handleManualRefresh()}
+       refreshing={manualRefreshLoading}
+       onNavigate={onNavigate}
 diff --git a/web/src/pages/LoginPage.tsx b/web/src/pages/LoginPage.tsx
 index 1fd3365..dce5f8d 100644
 --- a/web/src/pages/LoginPage.tsx
@@ -2170,10 +3346,10 @@ index 1fd3365..dce5f8d 100644
          </Card>
 diff --git a/web/src/pages/ReadOnlyPage.tsx b/web/src/pages/ReadOnlyPage.tsx
 new file mode 100644
-index 0000000..9be4b94
+index 0000000..e99e7be
 --- /dev/null
 +++ b/web/src/pages/ReadOnlyPage.tsx
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,49 @@
 +import {useEffect,useState} from 'react';
 +import {useTranslation} from 'react-i18next';
 +import {ApiError,fetchReadOnlyKeys} from '@/lib/api';
@@ -2184,12 +3360,14 @@ index 0000000..9be4b94
 +import {KeyOverviewPage} from './KeyOverviewPage';
 +import {KeyAnalysisPage} from './KeyAnalysisPage';
 +import {KeyQuotaPage} from './KeyQuotaPage';
++import {KeyRankingPage} from './KeyRankingPage';
++import {ReadOnlyReportingPage} from './ReadOnlyReportingPage';
 +
 +export function ReadOnlyPage({onAuthRequired}: {onAuthRequired: () => void}) {
 +  const [page,setPage]=useState<KeyViewerPage>(()=>getReadOnlyPage(stripAppBasePath(window.location.pathname,window.__APP_BASE_PATH__) ?? '/') ?? 'overview');
 +  const navigate=(path: KeyViewerPath)=>{
 +    const next=(Object.keys(KEY_VIEWER_PAGE_PATHS) as KeyViewerPage[]).find(item=>KEY_VIEWER_PAGE_PATHS[item]===path);
-+    if (!next || next==='ranking') return;
++    if (!next) return;
 +    window.history.replaceState(null,'',appPath(READ_ONLY_PAGE_PATHS[next]));setPage(next);
 +  };
 +  const {t}=useTranslation();
@@ -2215,9 +3393,99 @@ index 0000000..9be4b94
 +    {keysError && <span role="alert">{keysError}</span>}
 +  </>;
 +  const shared={readOnly:true,selectedApiKeyId,keyFilter,onNavigate:navigate,onAuthRequired};
++  if(page==='ranking') return <KeyRankingPage {...shared}/>;
++  if(page==='events'||page==='auth-files'||page==='ai-provider') return <ReadOnlyReportingPage key={page+selectedApiKeyId} {...shared} page={page}/>;
 +  if(page==='analysis') return <KeyAnalysisPage key={selectedApiKeyId} {...shared}/>;
 +  if(page==='quota') return <KeyQuotaPage {...shared}/>;
 +  return <KeyOverviewPage key={selectedApiKeyId} {...shared} page={page==='realtime'?'realtime':'overview'}/>;
++}
+diff --git a/web/src/pages/ReadOnlyReportingPage.tsx b/web/src/pages/ReadOnlyReportingPage.tsx
+new file mode 100644
+index 0000000..99043be
+--- /dev/null
++++ b/web/src/pages/ReadOnlyReportingPage.tsx
+@@ -0,0 +1,82 @@
++import {useCallback,useEffect,useMemo,useRef,useState,type ReactNode} from 'react';
++import {useTranslation} from 'react-i18next';
++import {ApiError,exportUsageEvents,fetchReadOnlyReport,fetchUsageEvents,type UsageEventsExportFormat,type UsageIdentityPageSort} from '@/lib/api';
++import type {UsageCustomRange,UsageTimeRange,UsageEventsResponse,UsageIdentitiesPageResponse,UsageQuotaCacheResponse,UsageSourceFilterOption} from '@/lib/types';
++import {KeyViewerShell} from '@/features/key-viewer/KeyViewerShell';
++import type {KeyViewerPath} from '@/features/key-viewer/navigation';
++import {RequestEventsDetailsCard} from '@/components/usage/RequestEventsDetailsCard';
++import {TimeRangeControl} from '@/components/usage/TimeRangeControl';
++import {Select} from '@/components/ui/Select';
++import {AuthFileCredentialsSection} from '@/components/usage/credentials/AuthFileCredentialsSection';
++import {AiProviderCredentialsSection} from '@/components/usage/credentials/AiProviderCredentialsSection';
++import {CredentialDetailDrawer} from '@/components/usage/credentials/CredentialDetailDrawer';
++import {buildAuthFileCredentialRows,buildAiProviderCredentialRows,type CredentialDetailSelection} from '@/components/usage/credentials/credentialViewModels';
++import {buildUsageRangeQuery} from '@/utils/usage/rangeQuery';
++
++interface Props {
++ page:'events'|'auth-files'|'ai-provider'; selectedApiKeyId?:string; keyFilter?:ReactNode;
++ onNavigate:(path:KeyViewerPath)=>void; onAuthRequired:()=>void;
++}
++const ALL='__all__';
++const noop=async()=>undefined;
++
++export function ReadOnlyReportingPage({page,selectedApiKeyId,keyFilter,onNavigate,onAuthRequired}:Props) {
++ const {t}=useTranslation();
++ const [range,setRange]=useState<UsageTimeRange>('today');const [custom,setCustom]=useState<UsageCustomRange>();
++ const [model,setModel]=useState(ALL),[source,setSource]=useState(ALL),[result,setResult]=useState(ALL);
++ const [events,setEvents]=useState<UsageEventsResponse|null>(null),[options,setOptions]=useState<{models:string[];sources:UsageSourceFilterOption[]}>({models:[],sources:[]});
++ const [accounts,setAccounts]=useState<UsageIdentitiesPageResponse|null>(null),[cache,setCache]=useState<UsageQuotaCacheResponse>({items:[]});
++ const [number,setNumber]=useState(1),[size,setSize]=useState(10),[active,setActive]=useState(true),[sort,setSort]=useState<UsageIdentityPageSort>('priority');
++ const [detail,setDetail]=useState<CredentialDetailSelection|null>(null);
++ const [provider,setProvider]=useState('');
++ const moreController=useRef<AbortController|null>(null);
++ const [loading,setLoading]=useState(false),[error,setError]=useState(''),[revision,setRevision]=useState(0),[exporting,setExporting]=useState<UsageEventsExportFormat|null>(null);
++ const [nextCursor,setNextCursor]=useState<string>(),[loadingMore,setLoadingMore]=useState(false),[autoLoadMore,setAutoLoadMore]=useState(true);
++ const query=useMemo(()=>buildUsageRangeQuery({range,customUnit:custom?.unit,customStart:custom?.start,customEnd:custom?.end}),[range,custom]);
++ const eventOptions=useMemo(()=>({readOnly:true,apiKeyId:selectedApiKeyId,model:model===ALL?undefined:model,source:source===ALL?undefined:source,result:result===ALL?undefined:result,pageSize:50,cursorMode:true}),[selectedApiKeyId,model,source,result]);
++ const fail=useCallback((err:unknown)=>{if(err instanceof ApiError&&err.status===401)onAuthRequired();setError(err instanceof Error?err.message:'Unable to load report');},[onAuthRequired]);
++
++ useEffect(()=>{
++  moreController.current?.abort();moreController.current=null;setLoadingMore(false);
++  const controller=new AbortController();setLoading(true);setError('');setEvents(null);setAccounts(null);setNextCursor(undefined);setAutoLoadMore(true);
++  const load=async()=>{
++   try {
++    if(page==='events') {
++     const params=new URLSearchParams();for(const [key,value] of Object.entries(query))if(value!==undefined)params.set(key,String(value));if(selectedApiKeyId)params.set('api_key_id',selectedApiKeyId);
++     const [data,filters]=await Promise.all([fetchUsageEvents(query,controller.signal,eventOptions),fetchReadOnlyReport<typeof options>('events/filters',params,controller.signal)]);
++     if(controller.signal.aborted)return;setEvents(data);setOptions(filters);setNextCursor(data.has_more?data.next_cursor:undefined);
++    } else {
++     const params=new URLSearchParams({auth_type:page==='auth-files'?'1':'2',page:String(number),page_size:String(size),active_only:String(active),sort});
++     if(provider)params.append('type',provider);
++     const quotaRequest=page==='auth-files'?fetchReadOnlyReport<UsageQuotaCacheResponse>('accounts/quota-cache',undefined,controller.signal).catch(err=>{if(err instanceof ApiError&&err.status===401)throw err;if(!controller.signal.aborted)setError('Cached quota is unavailable.');return {items:[]};}):Promise.resolve({items:[]});
++     const [data,quota]=await Promise.all([fetchReadOnlyReport<UsageIdentitiesPageResponse>('accounts',params,controller.signal),quotaRequest]);
++     if(controller.signal.aborted)return;setAccounts(data);setCache(quota);
++    }
++   } catch(err){if(!controller.signal.aborted)fail(err);}finally{if(!controller.signal.aborted)setLoading(false);}
++  };void load();return()=>{controller.abort();moreController.current?.abort();};
++ },[page,query,eventOptions,selectedApiKeyId,number,size,active,sort,provider,revision,fail]);
++
++ const loadMore=async()=>{
++  if(!nextCursor||loadingMore)return;setLoadingMore(true);const controller=new AbortController();moreController.current=controller;
++  try {const data=await fetchUsageEvents(query,controller.signal,{...eventOptions,cursor:nextCursor});if(controller.signal.aborted)return;setEvents(previous=>previous?{...data,events:[...previous.events,...data.events]}:data);setNextCursor(data.has_more?data.next_cursor:undefined);setAutoLoadMore(true);}catch(err){if(!controller.signal.aborted){fail(err);setAutoLoadMore(false);}}finally{if(moreController.current===controller){setLoadingMore(false);moreController.current=null;}}
++ };
++ const doExport=async(format:UsageEventsExportFormat)=>{
++  setExporting(format);setError('');try {const file=await exportUsageEvents(query,format,eventOptions);const href=URL.createObjectURL(file.blob);const link=document.createElement('a');link.href=href;link.download=file.filename;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(href),1000);}catch(err){fail(err);}finally{setExporting(null);}
++ };
++ const quotaMap=useMemo(()=>new Map(cache.items.filter(item=>item.quota).map(item=>[item.auth_index,item.quota!])),[cache]);
++ const authRows=useMemo(()=>buildAuthFileCredentialRows(accounts?.identities??[],quotaMap),[accounts,quotaMap]);
++ const providerRows=useMemo(()=>buildAiProviderCredentialRows(accounts?.identities??[]),[accounts]);
++ const pagination={reportingOnly:true,total:accounts?.total_count??0,page:number,totalPages:accounts?.total_pages??1,pageSize:size,activeOnly:active,sort,loading,
++  onPageChange:setNumber,onPageSizeChange:(value:number)=>{setSize(value);setNumber(1);},onActiveOnlyChange:(value:boolean)=>{setActive(value);setNumber(1);},onSortChange:(value:UsageIdentityPageSort)=>{setSort(value);setNumber(1);}};
++ return <KeyViewerShell activePage={page} readOnly onNavigate={onNavigate} onAuthRequired={onAuthRequired} onRefresh={()=>setRevision(value=>value+1)} refreshing={loading}
++  filters={page==='events'?[keyFilter,<TimeRangeControl key="range" value={range} customRange={custom} ariaLabel={t('usage_stats.range_filter')} labelInsideTrigger onChange={(value,next)=>{setRange(value);setCustom(next);}}/>]:[<Select key="provider" value={provider} options={[{value:'',label:t('usage_stats.api_key_filter_all')},...(accounts?.type_counts??[]).map(item=>({value:item.type,label:item.type}))]} ariaLabel="Provider" onChange={value=>{setProvider(value);setNumber(1);}}/>]}>
++  {error&&<p role="alert">{error}</p>}
++  {page==='events'&&<RequestEventsDetailsCard events={events?.events??[]} loading={loading} totalCount={events?.total_count??0} modelOptions={options.models} sourceOptions={options.sources}
++   modelFilter={model} sourceFilter={source} resultFilter={result} onModelFilterChange={setModel} onSourceFilterChange={setSource} onResultFilterChange={setResult}
++   onExport={format=>void doExport(format)} exportingFormat={exporting} hasMore={Boolean(nextCursor)} loadingMore={loadingMore} autoLoadMore={autoLoadMore} onLoadMore={()=>void loadMore()} requestLogAccessEnabled={false}/>}
++  {page==='auth-files'&&<AuthFileCredentialsSection {...pagination} rows={authRows} quotaRefreshing={false} quotaRefreshError="" quotaInspectionStatus={null} quotaInspectionLoading={false} quotaInspectionStarting={false} quotaInspectionError=""
++   onRefreshQuota={noop} onRefreshQuotaForAuthIndex={noop} onResetQuotaForAuthIndex={noop} onRefreshInspectionStatus={noop} onStartInspection={noop} onOpenDetails={row=>setDetail({kind:'auth-file',row})}/>}
++  {page==='ai-provider'&&<AiProviderCredentialsSection {...pagination} rows={providerRows} onOpenDetails={row=>setDetail({kind:'ai-provider',row})}/>}
++  <CredentialDetailDrawer readOnly open={Boolean(detail)} selection={detail} onAuthRequired={onAuthRequired} onClose={()=>setDetail(null)}/>
++ </KeyViewerShell>;
 +}
 diff --git a/web/src/pages/test/KeyQuotaPage.test.tsx b/web/src/pages/test/KeyQuotaPage.test.tsx
 index a124f06..90d8393 100644
@@ -2311,4 +3579,63 @@ index 0000000..39e107d
 +  expect(getRoleTargetPath('read_only','/read-only/analysis')).toBe('/read-only/analysis');
 +  expect(getRoleTargetPath('api_key_viewer','/read-only/analysis')).toBe('/key-overview');
 + }finally{await act(async()=>root.unmount());element.remove();localStorage.clear();}
++});
+diff --git a/web/src/pages/test/ReadOnlyReportingPage.test.tsx b/web/src/pages/test/ReadOnlyReportingPage.test.tsx
+new file mode 100644
+index 0000000..600e036
+--- /dev/null
++++ b/web/src/pages/test/ReadOnlyReportingPage.test.tsx
+@@ -0,0 +1,53 @@
++// @vitest-environment happy-dom
++import React,{act} from 'react';
++import {createRoot} from 'react-dom/client';
++import {expect,it,vi} from 'vitest';
++import i18n from '@/i18n';
++const api=vi.hoisted(()=>({fetchReadOnlyReport:vi.fn(),fetchUsageEvents:vi.fn(),exportUsageEvents:vi.fn()}));
++vi.mock('@/lib/api',async(original)=>({...await original<typeof import('@/lib/api')>(),...api}));
++import {ReadOnlyReportingPage} from '../ReadOnlyReportingPage';
++
++it('renders cached account usage and drill-down without management controls or admin requests',async()=>{
++ globalThis.IS_REACT_ACT_ENVIRONMENT=true;await i18n.changeLanguage('en');localStorage.clear();
++ const identity={id:'3',name:'Codex account 1',displayName:'Codex account 1',identity:'account:opaque',type:'codex',auth_type:1,auth_type_name:'Auth file',disabled:false,is_deleted:false,total_requests:5,success_count:4,failure_count:1,total_tokens:1200,input_tokens:1000,cache_read_tokens:100,period_stats:{total_requests:5,success_count:4,failure_count:1,total_tokens:1200,input_tokens:1000,cache_read_tokens:100}};
++ api.fetchReadOnlyReport.mockImplementation((path:string)=>Promise.resolve(path==='accounts'?{identities:[identity],total_count:1,total_pages:1,type_counts:[{type:'codex',count:1}]}:{items:[{auth_index:'account:opaque',status:'completed',quota:{id:'safe',quota:[{key:'weekly',label:'Weekly',remainingFraction:0.94}]}}]}));
++ api.fetchUsageEvents.mockResolvedValue({events:[],has_more:false});
++ const element=document.createElement('div');document.body.append(element);const root=createRoot(element);
++ try {
++  await act(async()=>root.render(<ReadOnlyReportingPage page="auth-files" onNavigate={()=>undefined} onAuthRequired={()=>undefined}/>));
++  expect(element.textContent).toContain('Codex account 1');expect(element.textContent).toContain('94');
++  expect(element.querySelector('[data-credential-status-toggle]')).toBeNull();
++  expect(element.textContent).not.toMatch(/Quota inspection|Refresh quota|Reset quota|Edit credential|Delete account/);
++  expect(api.fetchReadOnlyReport.mock.calls.map(call=>call[0]).sort()).toEqual(['accounts','accounts/quota-cache']);
++  const trigger=element.querySelector<HTMLButtonElement>('[data-credential-detail-trigger]');expect(trigger).not.toBeNull();
++  await act(async()=>trigger!.click());
++  const requestTab=document.querySelector<HTMLButtonElement>('[data-credential-detail-tab="requests"]');expect(requestTab).not.toBeNull();
++  expect(document.querySelector('[data-credential-detail-tab="errors"]')).toBeNull();
++  expect(document.querySelector('[data-credential-detail-tab="quota-history"]')).toBeNull();
++  await act(async()=>requestTab!.click());
++  expect(api.fetchUsageEvents).toHaveBeenCalledWith(undefined,expect.any(AbortSignal),expect.objectContaining({readOnly:true,source:'account:opaque'}));
++ }finally{await act(async()=>root.unmount());element.remove();}
++});
++
++it('uses sanitized event APIs, key scope and both export formats',async()=>{
++ globalThis.IS_REACT_ACT_ENVIRONMENT=true;await i18n.changeLanguage('en');localStorage.clear();
++ api.fetchReadOnlyReport.mockResolvedValue({models:['gpt-model'],sources:[]});api.fetchUsageEvents.mockResolvedValue({events:[],total_count:0,has_more:false});
++ api.exportUsageEvents.mockResolvedValue({blob:new Blob(['[]']),filename:'keeper-reporting.json'});
++ vi.stubGlobal('URL',Object.assign(URL,{createObjectURL:vi.fn(()=> 'blob:sanitized-export'),revokeObjectURL:vi.fn()}));
++ const click=vi.spyOn(HTMLAnchorElement.prototype,'click').mockImplementation(()=>undefined);
++ const element=document.createElement('div');document.body.append(element);const root=createRoot(element);
++ try {
++  await act(async()=>root.render(<ReadOnlyReportingPage page="events" selectedApiKeyId="2" onNavigate={()=>undefined} onAuthRequired={()=>undefined}/>));
++  expect(api.fetchUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({range:'today'}),expect.any(AbortSignal),expect.objectContaining({readOnly:true,apiKeyId:'2'}));
++  const exportButton=Array.from(element.querySelectorAll<HTMLButtonElement>('button')).find(button=>button.getAttribute('aria-label')?.includes('Export')||button.textContent?.includes('Export'));expect(exportButton).toBeDefined();
++  await act(async()=>exportButton!.click());
++  const json=Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(button=>button.textContent?.includes('JSON'));expect(json).toBeDefined();
++  await act(async()=>json!.click());
++  expect(api.exportUsageEvents).toHaveBeenCalledWith(expect.objectContaining({range:'today'}),'json',expect.objectContaining({readOnly:true,apiKeyId:'2'}));
++  expect(click).toHaveBeenCalled();
++  await act(async()=>exportButton!.click());
++  const csv=Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(button=>button.textContent?.includes('CSV'));expect(csv).toBeDefined();
++  await act(async()=>csv!.click());
++  expect(api.exportUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({range:'today'}),'csv',expect.objectContaining({readOnly:true,apiKeyId:'2'}));
++ }finally{await act(async()=>root.unmount());element.remove();click.mockRestore();vi.unstubAllGlobals();}
 +});

@@ -166,7 +166,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_read_only_gateway_uses_dedicated_routes(self):
         locations = KEEPER.viewer_gateway_locations({'viewer_dashboard_enabled': True})
-        self.assertIn('read-only/(?:overview|key-quota|key-overview', locations)
+        self.assertIn('read-only/(?:keys|overview|key-quota|key-overview', locations)
         self.assertIn('api-key-login|read-only-login|logout', locations)
         self.assertNotIn('usage/overview', locations)
         self.assertNotIn('auth/(?:login|', locations)

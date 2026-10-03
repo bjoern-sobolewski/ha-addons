@@ -200,6 +200,20 @@ def main():
                 assert request(report_url, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={}, opener=read_only_opener)[0] == 404
             for page in ('read-only', 'read-only/realtime', 'read-only/analysis', 'read-only/quota'):
                 assert request(viewer_gateway + viewer_path + '/' + page)[0] == 200
+
+            keys_route = viewer_gateway + viewer_path + '/api/v1/read-only/keys'
+            keys_status, keys_body = request(keys_route, opener=read_only_opener)
+            assert keys_status == 200
+            key_options = json.loads(keys_body)['keys']
+            assert key_options and all(set(option) == {'id', 'label'} for option in key_options)
+            assert key.encode() not in keys_body and management.encode() not in keys_body
+            assert request(keys_route)[0] == 401 and request(keys_route, opener=viewer_opener)[0] == 403
+            filtered_url = viewer_gateway + viewer_path + '/api/v1/read-only/key-overview?range=today&api_key_id='
+            assert json.loads(request(filtered_url + key_options[0]['id'], opener=read_only_opener)[1])['usage']['total_requests'] >= 2
+            assert request(filtered_url + '999999', opener=read_only_opener)[0] == 404
+            assert request(filtered_url + 'bad', opener=read_only_opener)[0] == 400
+            assert request(keys_route, headers={'X-CPA-Usage-Keeper-Request':'fetch'}, body={}, opener=read_only_opener)[0] == 404
+            print('PASS: read-only key dropdown metadata, selected/all/unknown scopes and role isolation', flush=True)
             print('PASS: native all-key dashboard APIs/pages, account data filtering and role/write isolation', flush=True)
             print('PASS: read-only all-key reports, secret filtering, client-key separation and server/gateway write denial', flush=True)
             # Exercise the same persisted client-key setting as the management UI.

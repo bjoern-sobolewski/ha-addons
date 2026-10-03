@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6
+
+- Add an API key dropdown to read-only Overview, Realtime and Analysis, defaulting to All API Keys.
+- Apply the selected key to all usage reports while retaining shared provider quota and restricted access.
+
 ## 0.1.5
 
 - Use the existing key dashboard layout for all-key read-only access: Overview, Realtime, Analysis and Provider quota.

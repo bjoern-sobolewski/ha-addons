@@ -294,12 +294,29 @@ def main():
             assert int(docker('exec', names['keeper'], 'python3', '-c', query)) >= count
             assert docker('exec', names['cpa'], 'cat', '/data/auth/persistence-marker') == 'test'
             viewer_gateway = endpoint(names['keeper'], 8082)
-            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=read_only_opener)[0] == 401
-            assert request(viewer_gateway + viewer_path + '/api/v1/auth/read-only-login', headers=alias_headers, body={'password':read_only_password}, opener=read_only_opener)[0] == 204
+            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=read_only_opener)[0] == 200
             assert 'Shared Team' in request(viewer_gateway + viewer_path + '/api/v1/read-only/keys', opener=read_only_opener)[1].decode()
             assert request(api + '/v1/models', auth)[0] == 401
             print('PASS: shared names and historical reporting survive restart without restoring revoked authentication', flush=True)
-            print('PASS: Keeper restart revokes read-only sessions while preserving usage', flush=True)
+            print('PASS: Keeper restart preserves read-only sessions and usage', flush=True)
+            # Password rotation revokes only the read-only role, including persisted cookies.
+            keeper_options = json.loads((temp / 'keeper.json').read_text())
+            new_read_only_password = secrets.token_urlsafe(32)
+            keeper_options['read_only_password'] = new_read_only_password
+            (temp / 'keeper.json').write_text(json.dumps(keeper_options))
+            docker('cp', str(temp / 'keeper.json'), names['keeper'] + ':/data/options.json')
+            docker('restart', names['keeper'])
+            keeper = endpoint(names['keeper'], 8080)
+            viewer_gateway = endpoint(names['keeper'], 8082)
+            eventually(lambda: request(keeper + '/healthz')[0] == 200)
+            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=read_only_opener)[0] == 401
+            assert request(keeper + '/api/v1/usage/overview?range=30d', opener=opener)[0] == 200
+            assert request(viewer_gateway + viewer_path + '/api/v1/auth/read-only-login', headers=alias_headers, body={'password':read_only_password}, opener=read_only_opener)[0] == 401
+            assert request(viewer_gateway + viewer_path + '/api/v1/auth/read-only-login', headers=alias_headers, body={'password':new_read_only_password}, opener=read_only_opener)[0] == 204
+            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=read_only_opener)[0] == 200
+            assert request(viewer_gateway + viewer_path + '/api/v1/auth/logout', headers=alias_headers, body={}, opener=read_only_opener)[0] == 204
+            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=read_only_opener)[0] == 401
+            print('PASS: password rotation revokes read-only cookies, preserves admin sessions, and logout still denies access', flush=True)
             print('PASS: Keeper authentication, HTTP usage ingestion and persistence across restarts', flush=True)
             print('PASS: management API key additions and revocations survive restart with an empty HA key list', flush=True)
             for service in ('cpa', 'keeper'):

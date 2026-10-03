@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.11
+
+- Preserve read-only logins across restarts and updates until their original seven-day expiry.
+- Revoke read-only sessions when the dashboard password changes or the role is disabled; retain logout and individual admin revocation.
+
 ## 0.1.10
 
 - Synchronize client-key names from CPA across dashboards, sessions, exports and read-only reports.

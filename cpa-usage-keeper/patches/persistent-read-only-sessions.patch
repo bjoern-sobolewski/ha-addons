@@ -1,0 +1,340 @@
+diff --git a/internal/api/auth.go b/internal/api/auth.go
+index 2abe5b2..0d27918 100644
+--- a/internal/api/auth.go
++++ b/internal/api/auth.go
+@@ -12,6 +12,7 @@ import (
+ 	"cpa-usage-keeper/internal/helper"
+ 	"cpa-usage-keeper/internal/service"
+ 	"github.com/gin-gonic/gin"
++	"github.com/sirupsen/logrus"
+ )
+ 
+ const (
+@@ -103,10 +104,16 @@ type resolvedSessionToken struct {
+ }
+ 
+ func NewAuthHandler(config AuthConfig, sessions *auth.SessionManager) *authHandler {
+-	// Read-only sessions expire across restarts. Changing/removing the password
+-	// therefore revokes previously issued read-only cookies without touching admins.
++	password := config.ReadOnlyPassword
++	if !config.Enabled || len(password) < 16 || password == config.LoginPassword {
++		password = ""
++	}
+ 	if sessions != nil {
+-		sessions.DeleteByRole(auth.RoleReadOnly)
++		if err := sessions.BindReadOnlyPassword(password); err != nil {
++			// Fail closed without logging credential values or storage contents.
++			logrus.Error("read-only session credential binding failed; read-only login disabled")
++			config.ReadOnlyPassword = ""
++		}
+ 	}
+ 	return &authHandler{
+ 		config:   config,
+@@ -244,6 +251,9 @@ func (h *authHandler) resolveValidSession(c *gin.Context) (resolvedSessionToken,
+ 			}
+ 			continue
+ 		}
++		if session.Role == auth.RoleReadOnly && !h.readOnlyEnabled() {
++			continue
++		}
+ 		return resolved, session, true
+ 	}
+ 	return resolveSessionToken(c), auth.Session{}, false
+diff --git a/internal/api/test/read_only_persistence_test.go b/internal/api/test/read_only_persistence_test.go
+new file mode 100644
+index 0000000..8b68ff7
+--- /dev/null
++++ b/internal/api/test/read_only_persistence_test.go
+@@ -0,0 +1,48 @@
++package test
++
++import (
++	"net/http"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/entities"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func TestReadOnlySessionBindingFailsClosed(t *testing.T) {
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "session.db")), &gorm.Config{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := db.AutoMigrate(&entities.AuthSession{}); err != nil {
++		t.Fatal(err)
++	}
++	// Missing credential storage must not accept previously issued read-only cookies.
++	manager := auth.NewPersistentSessionManager(time.Hour, auth.NewGormSessionStore(db))
++	token, _, err := manager.CreateReadOnlyWithSourceAndMetadata(auth.SessionSourceStandard, auth.SessionClientMetadata{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	config := AuthConfig{Enabled: true, LoginPassword: "admin-test-password", ReadOnlyPassword: "read-only-test-password"}
++	router := NewRouter(nil, nil, &readOnlyUsageStub{}, nil, config, NewAuthHandler(config, manager), "")
++	cookie := &http.Cookie{Name: "cpa_usage_keeper_session", Value: token}
++	if serveAPIGet(router, "/api/v1/read-only/overview", cookie).Code != 401 {
++		t.Fatal("read-only storage failure did not fail closed")
++	}
++	state := serveAPIGet(router, "/api/v1/auth/session", cookie)
++	if state.Code != 200 || !strings.Contains(state.Body.String(), `"authenticated":false`) {
++		t.Fatal("invalid read-only session reported authenticated")
++	}
++	admin, _, err := manager.Create()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !manager.Validate(admin) {
++		t.Fatal("read-only failure revoked admin")
++	}
++}
+diff --git a/internal/api/test/read_only_test.go b/internal/api/test/read_only_test.go
+index 939f378..19dbd80 100644
+--- a/internal/api/test/read_only_test.go
++++ b/internal/api/test/read_only_test.go
+@@ -126,8 +126,13 @@ func TestReadOnlyLoginAndServerPermissions(t *testing.T) {
+ 	}
+ 	admin, _, _ := sessions.Create()
+ 	_ = NewAuthHandler(config, sessions)
++	if !sessions.Validate(cookie.Value) || !sessions.Validate(admin) || !sessions.Validate(viewer) {
++		t.Fatal("unchanged password revoked sessions")
++	}
++	config.ReadOnlyPassword = "changed-read-only-password"
++	_ = NewAuthHandler(config, sessions)
+ 	if sessions.Validate(cookie.Value) || !sessions.Validate(admin) || !sessions.Validate(viewer) {
+-		t.Fatal("restart failed to revoke only read-only sessions")
++		t.Fatal("password change failed to revoke only read-only sessions")
+ 	}
+ }
+ 
+diff --git a/internal/auth/read_only_credential.go b/internal/auth/read_only_credential.go
+new file mode 100644
+index 0000000..cfb84c2
+--- /dev/null
++++ b/internal/auth/read_only_credential.go
+@@ -0,0 +1,87 @@
++package auth
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"time"
++
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/timeutil"
++	"golang.org/x/crypto/bcrypt"
++	"gorm.io/gorm"
++)
++
++const readOnlyCredentialSetting = "auth.read_only.credential_hash"
++
++type readOnlyCredentialStore interface {
++	syncReadOnlyCredential(string, bool) (bool, error)
++}
++
++// BindReadOnlyPassword keeps sessions across restarts, but revokes the read-only
++// role when the configured password changes or the role is disabled.
++func (m *SessionManager) BindReadOnlyPassword(password string) error {
++	digest := sha256.Sum256([]byte(password))
++	fingerprint := hex.EncodeToString(digest[:])
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	changed := m.readOnlyCredential != "" && m.readOnlyCredential != fingerprint
++	if m.store != nil {
++		store, ok := m.store.(readOnlyCredentialStore)
++		if !ok {
++			return fmt.Errorf("session store cannot persist read-only credential binding")
++		}
++		var err error
++		changed, err = store.syncReadOnlyCredential(fingerprint, password == "")
++		if err != nil {
++			return err
++		}
++	}
++	if changed || password == "" {
++		for token, session := range m.sessions {
++			if session.Role == RoleReadOnly {
++				delete(m.sessions, token)
++				delete(m.pendingActivity, token)
++			}
++		}
++	}
++	m.readOnlyCredential = fingerprint
++	return nil
++}
++
++func (s *GormSessionStore) syncReadOnlyCredential(fingerprint string, disabled bool) (bool, error) {
++	if s == nil || s.db == nil {
++		return false, fmt.Errorf("auth session store is not configured")
++	}
++	changed := false
++	err := s.db.Transaction(func(tx *gorm.DB) error {
++		var setting entities.AppSetting
++		err := tx.Where("setting_key = ?", readOnlyCredentialSetting).First(&setting).Error
++		missing := errors.Is(err, gorm.ErrRecordNotFound)
++		if err != nil && !missing {
++			return err
++		}
++		if !missing && setting.Value != nil && bcrypt.CompareHashAndPassword([]byte(*setting.Value), []byte(fingerprint)) == nil {
++			return nil
++		}
++		// The first upgrade binds existing valid sessions to the unchanged HA
++		// password. Later changes revoke sessions atomically with the new binding.
++		changed = !missing || disabled
++		if changed {
++			if err := tx.Unscoped().Where("role = ?", string(RoleReadOnly)).Delete(&entities.AuthSession{}).Error; err != nil {
++				return err
++			}
++		}
++		hash, err := bcrypt.GenerateFromPassword([]byte(fingerprint), bcrypt.DefaultCost)
++		if err != nil {
++			return err
++		}
++		value := string(hash)
++		if missing {
++			return tx.Create(&entities.AppSetting{SettingKey: readOnlyCredentialSetting, Value: &value, ValueType: "string", CreatedAt: time.Now(), UpdatedAt: time.Now()}).Error
++		}
++		return tx.Model(&setting).Updates(map[string]any{"value": value, "updated_at": timeutil.FormatStorageTime(time.Now())}).Error
++	})
++	return changed, err
++}
+diff --git a/internal/auth/session.go b/internal/auth/session.go
+index 8739f7e..5438e58 100644
+--- a/internal/auth/session.go
++++ b/internal/auth/session.go
+@@ -273,10 +273,11 @@ type sessionActivityUpdate struct {
+ }
+ 
+ type SessionManager struct {
+-	ttl      time.Duration
+-	now      func() time.Time
+-	generate func() (string, error)
+-	store    SessionStore
++	readOnlyCredential string
++	ttl                time.Duration
++	now                func() time.Time
++	generate           func() (string, error)
++	store              SessionStore
+ 
+ 	mu                    sync.RWMutex
+ 	sessions              map[string]Session
+diff --git a/internal/auth/test/read_only_credential_test.go b/internal/auth/test/read_only_credential_test.go
+new file mode 100644
+index 0000000..4e0692d
+--- /dev/null
++++ b/internal/auth/test/read_only_credential_test.go
+@@ -0,0 +1,106 @@
++package test
++
++import (
++	"strings"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/timeutil"
++)
++
++func TestReadOnlySessionsPersistAndRevokeOnPasswordChange(t *testing.T) {
++	db := openSessionStoreTestDatabase(t)
++	if err := db.AutoMigrate(&entities.AppSetting{}); err != nil {
++		t.Fatal(err)
++	}
++	store := NewGormSessionStore(db)
++	manager := NewPersistentSessionManager(7*24*time.Hour, store)
++	password := "read-only-test-password"
++	// Preserve an existing session on the first upgrade as well.
++	token, expiry, err := manager.CreateReadOnlyWithSourceAndMetadata(SessionSourceStandard, SessionClientMetadata{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	admin, _, _ := manager.Create()
++	viewer, _, _ := manager.CreateAPIKeyViewer(1)
++	if err := manager.BindReadOnlyPassword(password); err != nil {
++		t.Fatal(err)
++	}
++	var setting entities.AppSetting
++	if err := db.Where("setting_key = ?", "auth.read_only.credential_hash").First(&setting).Error; err != nil {
++		t.Fatal(err)
++	}
++	if setting.Value == nil || !strings.HasPrefix(*setting.Value, "$2") || strings.Contains(*setting.Value, password) {
++		t.Fatal("credential binding is not a salted hash")
++	}
++	for i := 0; i < 2; i++ {
++		manager = NewPersistentSessionManager(7*24*time.Hour, store)
++		if err := manager.BindReadOnlyPassword(password); err != nil {
++			t.Fatal(err)
++		}
++		session, ok := manager.Get(token)
++		if !ok || session.Role != RoleReadOnly || !session.ExpiresAt.Equal(expiry) {
++			t.Fatal("restart lost session or changed expiry")
++		}
++		manager.Touch(token, "127.0.0.1")
++		if session, _ := manager.Get(token); !session.ExpiresAt.Equal(expiry) {
++			t.Fatal("activity extended expiry")
++		}
++	}
++	if err := manager.BindReadOnlyPassword("another-read-only-password"); err != nil {
++		t.Fatal(err)
++	}
++	if manager.Validate(token) || !manager.Validate(admin) || !manager.Validate(viewer) {
++		t.Fatal("password change revoked incorrect roles")
++	}
++	if _, ok, err := store.Get(token); err != nil || ok {
++		t.Fatal("password revocation was not persisted")
++	}
++	newToken, _, _ := manager.CreateReadOnlyWithSourceAndMetadata(SessionSourceStandard, SessionClientMetadata{})
++	manager.DeleteByTokenHash(SessionTokenHash(newToken))
++	restarted := NewPersistentSessionManager(7*24*time.Hour, store)
++	if err := restarted.BindReadOnlyPassword("another-read-only-password"); err != nil {
++		t.Fatal(err)
++	}
++	if restarted.Validate(newToken) {
++		t.Fatal("restart resurrected revoked session")
++	}
++	disabledToken, _, _ := restarted.CreateReadOnlyWithSourceAndMetadata(SessionSourceStandard, SessionClientMetadata{})
++	if err := restarted.BindReadOnlyPassword(""); err != nil {
++		t.Fatal(err)
++	}
++	if restarted.Validate(disabledToken) {
++		t.Fatal("disable did not revoke session")
++	}
++	if err := restarted.BindReadOnlyPassword("another-read-only-password"); err != nil {
++		t.Fatal(err)
++	}
++	if restarted.Validate(disabledToken) {
++		t.Fatal("reenable resurrected session")
++	}
++}
++
++func TestReadOnlyPersistentSessionStillExpires(t *testing.T) {
++	db := openSessionStoreTestDatabase(t)
++	if err := db.AutoMigrate(&entities.AppSetting{}); err != nil {
++		t.Fatal(err)
++	}
++	store := NewGormSessionStore(db)
++	manager := NewPersistentSessionManager(time.Hour, store)
++	if err := manager.BindReadOnlyPassword("read-only-test-password"); err != nil {
++		t.Fatal(err)
++	}
++	token, _, _ := manager.CreateReadOnlyWithSourceAndMetadata(SessionSourceStandard, SessionClientMetadata{})
++	if err := db.Model(&entities.AuthSession{}).Where("token_hash = ?", SessionTokenHash(token)).Update("expires_at", timeutil.FormatStorageTime(time.Now().Add(-time.Hour))).Error; err != nil {
++		t.Fatal(err)
++	}
++	restarted := NewPersistentSessionManager(time.Hour, store)
++	if err := restarted.BindReadOnlyPassword("read-only-test-password"); err != nil {
++		t.Fatal(err)
++	}
++	if restarted.Validate(token) {
++		t.Fatal("expired session accepted after restart")
++	}
++}

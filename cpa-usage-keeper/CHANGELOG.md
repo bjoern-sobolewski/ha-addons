@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.10
+
+- Synchronize client-key names from CPA across dashboards, sessions, exports and read-only reports.
+- Retain revoked-key names and existing aliases when no shared name exists; archive conflicting aliases.
+- Send administrative name edits from Keeper and Local Ranking to CPA; keep viewer access read-only.
+
 ## 0.1.9
 
 - Automatically ingest account/window observations from CPA every five seconds, reusing the usage-header cache path.

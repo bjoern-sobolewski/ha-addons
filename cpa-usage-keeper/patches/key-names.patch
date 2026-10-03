@@ -1,0 +1,618 @@
+diff --git a/internal/api/read_only_reporting.go b/internal/api/read_only_reporting.go
+index f0d5bcb..9b986ca 100644
+--- a/internal/api/read_only_reporting.go
++++ b/internal/api/read_only_reporting.go
+@@ -13,6 +13,7 @@ import (
+ 	"time"
+ 
+ 	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/helper"
+ 	"cpa-usage-keeper/internal/quota"
+ 	"cpa-usage-keeper/internal/ranking"
+ 	rankingapi "cpa-usage-keeper/internal/ranking/httpapi"
+@@ -28,12 +29,15 @@ func listReadOnlyKeys(c *gin.Context, keys service.CPAAPIKeyProvider) ([]service
+ 	rows, err := keys.ListCPAAPIKeys(c.Request.Context())
+ 	result := []service.ReportingAPIKey{}
+ 	for _, row := range rows {
+-		result = append(result, service.ReportingAPIKey{ID: strconv.FormatInt(row.ID, 10), APIKey: row.APIKey, Historical: row.IsDeleted})
++		result = append(result, service.ReportingAPIKey{ID: strconv.FormatInt(row.ID, 10), APIKey: row.APIKey, Name: row.KeyAlias, Historical: row.IsDeleted})
+ 	}
+ 	return result, err
+ }
+ 
+ func readOnlyKeyLabel(row service.ReportingAPIKey) string {
++	if name := helper.APIKeyAlias(row.Name, row.APIKey); name != "" {
++		return name
++	}
+ 	if row.Historical {
+ 		if strings.HasPrefix(row.ID, "historical:") {
+ 			return "Historical key " + strings.TrimPrefix(row.ID, "historical:")[:12]
+@@ -239,7 +243,10 @@ func registerReadOnlyReportingRoutes(router *gin.RouterGroup, usage service.Usag
+ 				indexes = append(indexes, row.Identity)
+ 			}
+ 		}
+-		if len(indexes) == 0 { c.JSON(200, gin.H{"items": []gin.H{}}); return }
++		if len(indexes) == 0 {
++			c.JSON(200, gin.H{"items": []gin.H{}})
++			return
++		}
+ 		cache, err := quotas.GetCachedQuota(c.Request.Context(), quota.CacheRequest{AuthIndexes: indexes})
+ 		if err != nil {
+ 			c.JSON(503, gin.H{"error": "Quota unavailable"})
+diff --git a/internal/api/test/read_only_reporting_test.go b/internal/api/test/read_only_reporting_test.go
+index 52315ce..fb05087 100644
+--- a/internal/api/test/read_only_reporting_test.go
++++ b/internal/api/test/read_only_reporting_test.go
+@@ -19,7 +19,7 @@ import (
+ type reportingKeysStub struct{ authLoginKeyStub }
+ 
+ func (s *reportingKeysStub) ListReportingAPIKeys(context.Context) ([]service.ReportingAPIKey, error) {
+-	return []service.ReportingAPIKey{{ID: "1", APIKey: "secret-current"}, {ID: "2", APIKey: "secret-retired", Historical: true}, {ID: "historical:123456789012345678901234", APIKey: "secret-orphan", Historical: true}}, nil
++	return []service.ReportingAPIKey{{ID: "1", APIKey: "secret-current"}, {ID: "2", APIKey: "secret-retired", Name: "Retired Team", Historical: true}, {ID: "historical:123456789012345678901234", APIKey: "secret-orphan", Historical: true}}, nil
+ }
+ 
+ type reportingIdentityStub struct{ identityMetadataStub }
+@@ -82,6 +82,11 @@ func TestReadOnlyReportingSanitizationScopeAndPermissions(t *testing.T) {
+ 		if serveAPIGet(router, path).Code != 401 || serveAPIGet(router, path, viewerCookie).Code != 403 {
+ 			t.Fatalf("role isolation failed: %s", route)
+ 		}
++		if (strings.HasPrefix(route, "events") && !strings.Contains(route, "filters")) || strings.HasPrefix(route, "ranking") {
++			if !strings.Contains(response.Body.String(), "Retired Team") {
++				t.Fatalf("%s missing shared name", route)
++			}
++		}
+ 		if route == "events?range=today" {
+ 			var payload struct {
+ 				Events []struct {
+@@ -92,7 +97,7 @@ func TestReadOnlyReportingSanitizationScopeAndPermissions(t *testing.T) {
+ 					}
+ 				}
+ 			}
+-			if json.Unmarshal(response.Body.Bytes(), &payload) != nil || len(payload.Events) != 1 || payload.Events[0].APIKey != "Historical key 2" || !payload.Events[0].Failed || payload.Events[0].Tokens.TotalTokens != 19 {
++			if json.Unmarshal(response.Body.Bytes(), &payload) != nil || len(payload.Events) != 1 || payload.Events[0].APIKey != "Retired Team" || !payload.Events[0].Failed || payload.Events[0].Tokens.TotalTokens != 19 {
+ 				t.Fatal("reporting metrics lost")
+ 			}
+ 		}
+diff --git a/internal/api/test/read_only_test.go b/internal/api/test/read_only_test.go
+index fa45dca..939f378 100644
+--- a/internal/api/test/read_only_test.go
++++ b/internal/api/test/read_only_test.go
+@@ -30,7 +30,7 @@ func (s *readOnlyUsageStub) GetUsageOverviewComparisons(_ context.Context, f ser
+ 	s.filter = f
+ 	return &servicedto.UsageOverviewSnapshot{Comparisons: &repodto.UsageOverviewComparisonsRecord{
+ 		APIKeys: map[string]*repodto.UsageComparisonItemRecord{
+-			"first-private-key":   {Key: "first-private-key", Label: "private-key-alias", Requests: 2, TotalTokens: 200},
++			"first-private-key":   {Key: "first-private-key", Label: "Demo Team", Requests: 2, TotalTokens: 200},
+ 			"second-private-key":  {Key: "second-private-key", Requests: 3, TotalTokens: 300, CostAvailable: true, CostUSD: 0},
+ 			"revoked-private-key": {Key: "revoked-private-key", Requests: 2, TotalTokens: 200},
+ 		}, AuthFiles: map[string]*repodto.UsageComparisonItemRecord{"private-file": {Key: "private-file"}},
+@@ -41,7 +41,7 @@ func TestReadOnlyLoginAndServerPermissions(t *testing.T) {
+ 	sessions := auth.NewSessionManager(time.Hour)
+ 	config := AuthConfig{Enabled: true, LoginPassword: "admin-password-123456", ReadOnlyPassword: "read-only-password-123456"}
+ 	usage := &readOnlyUsageStub{}
+-	keys := &authLoginKeyStub{rowsByID: map[int64]entities.CPAAPIKey{1: {ID: 1, APIKey: "first-private-key", KeyAlias: "private-key-alias"}, 2: {ID: 2, APIKey: "second-private-key"}, 3: {ID: 3, APIKey: "unused-private-key"}}}
++	keys := &authLoginKeyStub{rowsByID: map[int64]entities.CPAAPIKey{1: {ID: 1, APIKey: "first-private-key", KeyAlias: "Demo Team"}, 2: {ID: 2, APIKey: "second-private-key"}, 3: {ID: 3, APIKey: "unused-private-key"}}}
+ 	handler := NewAuthHandler(config, sessions)
+ 	router := NewRouter(nil, nil, usage, nil, config, handler, "", OptionalProviders{CPAAPIKeys: keys, Quota: &quotaProviderStub{}, UsageIdentity: identityMetadataStub{}})
+ 	for _, password := range []string{"", config.LoginPassword, "wrong-password"} {
+@@ -63,7 +63,7 @@ func TestReadOnlyLoginAndServerPermissions(t *testing.T) {
+ 	if response.Code != 200 {
+ 		t.Fatal(response.Code, response.Body.String())
+ 	}
+-	for _, private := range []string{"first-private-key", "second-private-key", "revoked-private-key", "unused-private-key", "private-key-alias", "private-file", "auth_index", "APIKey"} {
++	for _, private := range []string{"first-private-key", "second-private-key", "revoked-private-key", "unused-private-key", "Demo Team", "private-file", "auth_index", "APIKey"} {
+ 		if strings.Contains(response.Body.String(), private) {
+ 			t.Fatalf("leaked %s", private)
+ 		}
+@@ -111,7 +111,7 @@ func TestReadOnlyLoginAndServerPermissions(t *testing.T) {
+ 	}
+ 	viewer, _, _ := sessions.CreateAPIKeyViewer(1)
+ 	keyList := serveAPIGet(router, "/api/v1/read-only/keys", cookie)
+-	if keyList.Code != 200 || !strings.Contains(keyList.Body.String(), `"label":"Client key 1"`) || strings.Contains(keyList.Body.String(), "private") {
++	if keyList.Code != 200 || !strings.Contains(keyList.Body.String(), `"label":"Demo Team"`) || strings.Contains(keyList.Body.String(), "private") {
+ 		t.Fatalf("unexpected safe key list: %d %s", keyList.Code, keyList.Body.String())
+ 	}
+ 	if serveAPIGet(router, "/api/v1/read-only/keys").Code != 401 || serveAPIGet(router, "/api/v1/read-only/keys", &http.Cookie{Name: "cpa_usage_keeper_session", Value: viewer}).Code != 403 {
+@@ -163,7 +163,7 @@ func (s *readOnlyUsageStub) GetUsageActivity(_ context.Context, f servicedto.Usa
+ func (s *readOnlyUsageStub) GetUsageOverviewRealtime(_ context.Context, f servicedto.UsageFilter) (*servicedto.UsageOverviewRealtime, error) {
+ 	s.filter = f
+ 	return &servicedto.UsageOverviewRealtime{CurrentUsage: servicedto.RealtimeCurrentUsage{
+-		APIKeys:   []servicedto.RealtimeUsageTopItem{{Key: "first-private-key", Label: "private-key-alias", Requests: 2}, {Key: "revoked-private-key", Requests: 3}},
++		APIKeys:   []servicedto.RealtimeUsageTopItem{{Key: "first-private-key", Label: "Demo Team", Requests: 2}, {Key: "revoked-private-key", Requests: 3}},
+ 		AuthFiles: []servicedto.RealtimeUsageTopItem{{Key: "private-file", Label: "private-email@example.invalid", Requests: 5}},
+ 	}}, nil
+ }
+@@ -184,7 +184,7 @@ func TestReadOnlySharedDashboardReports(t *testing.T) {
+ 	sessions := auth.NewSessionManager(time.Hour)
+ 	config := AuthConfig{Enabled: true, LoginPassword: "admin-password-123456", ReadOnlyPassword: "read-only-password-123456"}
+ 	usage := &readOnlyUsageStub{}
+-	keys := &authLoginKeyStub{rowsByID: map[int64]entities.CPAAPIKey{1: {ID: 1, APIKey: "first-private-key", KeyAlias: "private-key-alias"}}}
++	keys := &authLoginKeyStub{rowsByID: map[int64]entities.CPAAPIKey{1: {ID: 1, APIKey: "first-private-key", KeyAlias: "Demo Team"}}}
+ 	identities := identityMetadataStub{items: []entities.UsageIdentity{{ID: 1, Identity: "private-file", Type: "codex", Name: "private-email@example.invalid"}}}
+ 	router := NewRouter(nil, nil, usage, nil, config, NewAuthHandler(config, sessions), "", OptionalProviders{CPAAPIKeys: keys, UsageIdentity: identities})
+ 	token, _, err := sessions.CreateReadOnlyWithSourceAndMetadata(auth.SessionSourceStandard, auth.SessionClientMetadata{})
+@@ -194,7 +194,7 @@ func TestReadOnlySharedDashboardReports(t *testing.T) {
+ 	cookie := &http.Cookie{Name: "cpa_usage_keeper_session", Value: token}
+ 	viewer, _, _ := sessions.CreateAPIKeyViewer(1)
+ 	keyList := serveAPIGet(router, "/api/v1/read-only/keys", cookie)
+-	if keyList.Code != 200 || !strings.Contains(keyList.Body.String(), `"label":"Client key 1"`) || strings.Contains(keyList.Body.String(), "private") {
++	if keyList.Code != 200 || !strings.Contains(keyList.Body.String(), `"label":"Demo Team"`) || strings.Contains(keyList.Body.String(), "private") {
+ 		t.Fatalf("unexpected safe key list: %d %s", keyList.Code, keyList.Body.String())
+ 	}
+ 	if serveAPIGet(router, "/api/v1/read-only/keys").Code != 401 || serveAPIGet(router, "/api/v1/read-only/keys", &http.Cookie{Name: "cpa_usage_keeper_session", Value: viewer}).Code != 403 {
+@@ -207,7 +207,7 @@ func TestReadOnlySharedDashboardReports(t *testing.T) {
+ 		if response.Code != 200 {
+ 			t.Fatalf("%s: %d %s", path, response.Code, response.Body.String())
+ 		}
+-		for _, secret := range []string{"first-private-key", "revoked-private-key", "private-key-alias", "private-file", "private-email", "private-model"} {
++		for _, secret := range []string{"first-private-key", "revoked-private-key", "private-file", "private-email", "private-model"} {
+ 			if strings.Contains(response.Body.String(), secret) {
+ 				t.Fatalf("%s leaked %s", path, secret)
+ 			}
+@@ -225,7 +225,7 @@ func TestReadOnlySharedDashboardReports(t *testing.T) {
+ 			t.Fatal("unknown key selector accepted")
+ 		}
+ 		if path == "key-overview/comparisons" || path == "key-overview/realtime" || path == "key-analysis" {
+-			if !strings.Contains(response.Body.String(), "Codex account 1") || !strings.Contains(response.Body.String(), "Client key 1") || !strings.Contains(response.Body.String(), "Historical key") {
++			if !strings.Contains(response.Body.String(), "Codex account 1") || !strings.Contains(response.Body.String(), "Demo Team") || !strings.Contains(response.Body.String(), "Historical key") {
+ 				t.Fatalf("missing account/key breakdown: %s", response.Body.String())
+ 			}
+ 		}
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 3cf51e2..dac1033 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -199,6 +199,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+ 	pricingCatalog := pricing.NewCatalog(pricingSnapshot)
+ 
+ 	cpaClient := cpa.NewClient(cfg.CPABaseURL, cfg.CPAManagementKey, cfg.RequestTimeout, cfg.TLSSkipVerify)
++	localRankingService.SetAPIKeyNameWriter(cpaClient)
+ 	quotaService := quota.NewServiceWithOptions(db, cpaClient, quota.ServiceOptions{
+ 		UsageHeaderSnapshotFlushInterval: time.Second,
+ 		RefreshWorkerLimit:               cfg.QuotaRefreshWorkerLimit,
+@@ -306,7 +307,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+ 	usageIdentityService := service.NewUsageIdentityServiceWithOptions(db, recentUsageCache, service.UsageIdentityServiceOptions{
+ 		OnDisplayNameChanged: quotaService.UpdateUsageIdentityDisplayNameSnapshot,
+ 	})
+-	cpaAPIKeyService := service.NewCPAAPIKeyService(db)
++	cpaAPIKeyService := service.NewSharedCPAAPIKeyService(db, cpaClient)
+ 	// 单条凭证开关成功后立即与 CPA 对齐；runner 自带合并窗口和 nil 保护。
+ 	credentialMutationLocks := &service.CredentialMutationLocks{}
+ 	authFilesManagementService := service.NewAuthFilesManagementService(cpaClient, credentialMutationLocks)
+diff --git a/internal/cpa/api_key_names.go b/internal/cpa/api_key_names.go
+new file mode 100644
+index 0000000..8fe3f7e
+--- /dev/null
++++ b/internal/cpa/api_key_names.go
+@@ -0,0 +1,26 @@
++package cpa
++
++import (
++	"context"
++	"crypto/sha256"
++	"fmt"
++	"net/http"
++)
++
++func (c *Client) UpdateAPIKeyName(ctx context.Context, key, name string) error {
++	_, _, err := c.doManagementJSONRequestWithBody(ctx, http.MethodPatch, "/v8/management/access/api-key-names", map[string]any{
++		"names": map[string]string{fmt.Sprintf("%x", sha256.Sum256([]byte(key))): name},
++	}, nil, "key names")
++	return err
++}
++
++func (c *Client) FetchAPIKeyNames(ctx context.Context) (map[string]string, error) {
++	var result struct {
++		Names map[string]string `json:"names"`
++	}
++	status, _, err := c.doManagementJSONRequest(ctx, "/v8/management/access/api-key-names", &result, "key names")
++	if status == http.StatusNotFound {
++		return nil, nil
++	}
++	return result.Names, err
++}
+diff --git a/internal/cpa/dto/cpaapikeys/cpa_api_keys.go b/internal/cpa/dto/cpaapikeys/cpa_api_keys.go
+index 2a6898c..86bbd2f 100644
+--- a/internal/cpa/dto/cpaapikeys/cpa_api_keys.go
++++ b/internal/cpa/dto/cpaapikeys/cpa_api_keys.go
+@@ -2,5 +2,6 @@ package cpaapikeys
+ 
+ // ManagementAPIKeysResponse 是 CPA /v0/management/api-keys 响应 DTO。
+ type ManagementAPIKeysResponse struct {
+-	APIKeys []string `json:"api-keys"`
++	APIKeys []string          `json:"api-keys"`
++	Names   map[string]string `json:"api-key-names"`
+ }
+diff --git a/internal/cpa/test/api_key_names_test.go b/internal/cpa/test/api_key_names_test.go
+new file mode 100644
+index 0000000..6c2513e
+--- /dev/null
++++ b/internal/cpa/test/api_key_names_test.go
+@@ -0,0 +1,67 @@
++package cpa_test
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/cpa"
++	"crypto/sha256"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestSharedKeyNameClientUsesV8AndKeepsCredentialsOutOfMetadata(t *testing.T) {
++	digest := fmt.Sprintf("%x", sha256.Sum256([]byte("synthetic-client")))
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/v8/management/access/api-key-names" || r.Header.Get("Authorization") != "Bearer synthetic-management" {
++			t.Error("incorrect management route or authentication")
++			w.WriteHeader(401)
++			return
++		}
++		if r.Method == http.MethodPatch {
++			var request struct {
++				Names map[string]string `json:"names"`
++			}
++			if json.NewDecoder(r.Body).Decode(&request) != nil || request.Names[digest] != "Team" {
++				t.Error("incorrect name write")
++			}
++			if _, exists := request.Names["synthetic-client"]; exists {
++				t.Error("metadata contains credential")
++			}
++		}
++		fmt.Fprintf(w, `{"names":{"%s":"Team"}}`, digest)
++	}))
++	defer server.Close()
++	client := cpa.NewClient(server.URL, "synthetic-management", time.Second, false)
++	names, err := client.FetchAPIKeyNames(context.Background())
++	if err != nil || names[digest] != "Team" {
++		t.Fatal("name read failed")
++	}
++	if err := client.UpdateAPIKeyName(context.Background(), "synthetic-client", "Team"); err != nil {
++		t.Fatal(err)
++	}
++}
++func TestSharedKeyNameClientOldServerAndErrors(t *testing.T) {
++	status := 404
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(status)
++		fmt.Fprint(w, "sensitive-response-body")
++	}))
++	defer server.Close()
++	client := cpa.NewClient(server.URL, "synthetic-management", time.Second, false)
++	names, err := client.FetchAPIKeyNames(context.Background())
++	if err != nil || names != nil {
++		t.Fatal("old server should preserve local aliases")
++	}
++	status = 500
++	_, err = client.FetchAPIKeyNames(context.Background())
++	if err == nil || strings.Contains(err.Error(), "sensitive-response-body") {
++		t.Fatal("error handling lost or disclosed response body")
++	}
++	if err := client.UpdateAPIKeyName(context.Background(), "key", "Team"); err == nil {
++		t.Fatal("write failure not surfaced")
++	}
++}
+diff --git a/internal/helper/redact.go b/internal/helper/redact.go
+index 97f862f..3526dd2 100644
+--- a/internal/helper/redact.go
++++ b/internal/helper/redact.go
+@@ -31,8 +31,16 @@ func CPAAPIKeyMaskedDisplayKey(row entities.CPAAPIKey) string {
+ 
+ // CPAAPIKeyDisplayName 返回 CPA API Key 的前端展示名：优先别名，其次使用统一脱敏 key。
+ func CPAAPIKeyDisplayName(row entities.CPAAPIKey) string {
+-	if strings.TrimSpace(row.KeyAlias) != "" {
+-		return strings.TrimSpace(row.KeyAlias)
++	if name := APIKeyAlias(row.KeyAlias, row.APIKey); name != "" {
++		return name
+ 	}
+ 	return CPAAPIKeyMaskedDisplayKey(row)
+ }
++
++func APIKeyAlias(name, key string) string {
++	name = strings.TrimSpace(name)
++	if key != "" && strings.Contains(name, key) {
++		return ""
++	}
++	return name
++}
+diff --git a/internal/ranking/local_profile.go b/internal/ranking/local_profile.go
+index 7153f09..1e97f3d 100644
+--- a/internal/ranking/local_profile.go
++++ b/internal/ranking/local_profile.go
+@@ -8,6 +8,7 @@ import (
+ 	"unicode"
+ 	"unicode/utf8"
+ 
++	"cpa-usage-keeper/internal/entities"
+ 	"cpa-usage-keeper/internal/helper"
+ 	"cpa-usage-keeper/internal/repository"
+ )
+@@ -41,6 +42,15 @@ func (s *LocalRankingService) UpdateProfile(ctx context.Context, apiKeyID int64,
+ 	if ctx == nil {
+ 		ctx = context.Background()
+ 	}
++	if s.nameWriter != nil {
++		var key entities.CPAAPIKey
++		if err := s.db.WithContext(ctx).First(&key, apiKeyID).Error; err != nil {
++			return LocalProfile{}, err
++		}
++		if err := s.nameWriter.UpdateAPIKeyName(ctx, key.APIKey, keyAlias); err != nil {
++			return LocalProfile{}, err
++		}
++	}
+ 	row, err := repository.UpdateCPAAPIKeyLocalRankingProfile(s.db.WithContext(ctx), apiKeyID, keyAlias, avatarID)
+ 	if err != nil {
+ 		return LocalProfile{}, err
+@@ -52,3 +62,9 @@ func (s *LocalRankingService) UpdateProfile(ctx context.Context, apiKeyID int64,
+ 		AvatarID:      *row.LocalRankingAvatarID,
+ 	}, nil
+ }
++
++func (s *LocalRankingService) SetAPIKeyNameWriter(writer interface {
++	UpdateAPIKeyName(context.Context, string, string) error
++}) {
++	s.nameWriter = writer
++}
+diff --git a/internal/ranking/local_service.go b/internal/ranking/local_service.go
+index d18f4f1..8729b69 100644
+--- a/internal/ranking/local_service.go
++++ b/internal/ranking/local_service.go
+@@ -37,6 +37,9 @@ type LocalRankingServiceOptions struct {
+ 
+ // LocalRankingService 以完整自然日快照维护本地 API Key 排行。
+ type LocalRankingService struct {
++	nameWriter interface {
++		UpdateAPIKeyName(context.Context, string, string) error
++	}
+ 	db  *gorm.DB
+ 	now func() time.Time
+ 
+diff --git a/internal/repository/cpa_api_key_names.go b/internal/repository/cpa_api_key_names.go
+new file mode 100644
+index 0000000..c618192
+--- /dev/null
++++ b/internal/repository/cpa_api_key_names.go
+@@ -0,0 +1,58 @@
++package repository
++
++import (
++	"cpa-usage-keeper/internal/entities"
++	"crypto/sha256"
++	"fmt"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++	"strings"
++	"unicode"
++	"unicode/utf8"
++)
++
++// Shared metadata updates labels only, including revoked keys. Missing metadata
++// leaves existing Keeper aliases intact; explicit empty values clear the alias.
++func SyncCPAAPIKeyNames(db *gorm.DB, names map[string]string) error {
++	if len(names) == 0 {
++		return nil
++	}
++	return db.Transaction(func(tx *gorm.DB) error {
++		var rows []entities.CPAAPIKey
++		if err := tx.Find(&rows).Error; err != nil {
++			return err
++		}
++		for _, row := range rows {
++			fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(row.APIKey)))
++			name, exists := names[fingerprint]
++			if !exists {
++				continue
++			}
++			name = strings.TrimSpace(name)
++			if utf8.RuneCountInString(name) > 128 {
++				return fmt.Errorf("invalid shared key name")
++			}
++			for _, char := range name {
++				if unicode.IsControl(char) {
++					return fmt.Errorf("invalid shared key name")
++				}
++			}
++			if name != "" && strings.Contains(name, row.APIKey) {
++				return fmt.Errorf("shared name contains key")
++			}
++			if row.KeyAlias == name {
++				continue
++			}
++			if row.KeyAlias != "" {
++				backup := entities.AppSetting{SettingKey: fmt.Sprintf("api_key_names.previous_alias.%d", row.ID), Value: new(row.KeyAlias), ValueType: "string"}
++				if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&backup).Error; err != nil {
++					return err
++				}
++			}
++			if err := tx.Model(&entities.CPAAPIKey{}).Where("id = ?", row.ID).Update("key_alias", name).Error; err != nil {
++				return err
++			}
++		}
++		return nil
++	})
++}
+diff --git a/internal/repository/test/cpa_api_key_names_test.go b/internal/repository/test/cpa_api_key_names_test.go
+new file mode 100644
+index 0000000..d7d09f4
+--- /dev/null
++++ b/internal/repository/test/cpa_api_key_names_test.go
+@@ -0,0 +1,62 @@
++package test
++
++import (
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/repository"
++	"crypto/sha256"
++	"fmt"
++	"testing"
++	"time"
++)
++
++func TestSharedKeyNamesPreserveConflictHistoryAndRevocation(t *testing.T) {
++	db := openTestDatabase(t)
++	if err := repository.SyncCPAAPIKeys(db, []string{"alpha-secret", "beta-secret"}, time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := repository.UpdateCPAAPIKeyAlias(db, 1, "Existing Keeper alias"); err != nil {
++		t.Fatal(err)
++	}
++	alpha := fmt.Sprintf("%x", sha256.Sum256([]byte("alpha-secret")))
++	if err := repository.SyncCPAAPIKeyNames(db, map[string]string{alpha: "Shared Team"}); err != nil {
++		t.Fatal(err)
++	}
++	var row entities.CPAAPIKey
++	db.First(&row, 1)
++	if row.KeyAlias != "Shared Team" {
++		t.Fatal("shared name not synchronized")
++	}
++	var backup entities.AppSetting
++	db.First(&backup, "setting_key = ?", "api_key_names.previous_alias.1")
++	if backup.Value == nil || *backup.Value != "Existing Keeper alias" {
++		t.Fatal("conflict was not retained")
++	}
++	if err := repository.SyncCPAAPIKeys(db, []string{"beta-secret"}, time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := repository.SyncCPAAPIKeyNames(db, map[string]string{alpha: "Retired Team"}); err != nil {
++		t.Fatal(err)
++	}
++	db.First(&row, 1)
++	if !row.IsDeleted || row.KeyAlias != "Retired Team" {
++		t.Fatal("historical name or revocation lost")
++	}
++	if err := repository.SyncCPAAPIKeyNames(db, nil); err != nil {
++		t.Fatal(err)
++	}
++	db.First(&row, 1)
++	if row.KeyAlias != "Retired Team" {
++		t.Fatal("missing metadata cleared historical alias")
++	}
++	if err := repository.SyncCPAAPIKeyNames(db, map[string]string{alpha: ""}); err != nil {
++		t.Fatal(err)
++	}
++	db.First(&row, 1)
++	if row.KeyAlias != "" || !row.IsDeleted {
++		t.Fatal("clear changed authentication")
++	}
++	db.First(&backup, "setting_key = ?", "api_key_names.previous_alias.1")
++	if *backup.Value != "Existing Keeper alias" {
++		t.Fatal("original conflict overwritten")
++	}
++}
+diff --git a/internal/service/cpa_api_keys_service.go b/internal/service/cpa_api_keys_service.go
+index 46700e7..d32c487 100644
+--- a/internal/service/cpa_api_keys_service.go
++++ b/internal/service/cpa_api_keys_service.go
+@@ -21,8 +21,16 @@ type CPAAPIKeyProvider interface {
+ 	UpdateCPAAPIKeyAlias(ctx context.Context, id int64, keyAlias string) (entities.CPAAPIKey, error)
+ }
+ 
++type APIKeyNameWriter interface {
++	UpdateAPIKeyName(context.Context, string, string) error
++}
+ type cpaAPIKeyService struct {
+-	db *gorm.DB
++	db         *gorm.DB
++	nameWriter APIKeyNameWriter
++}
++
++func NewSharedCPAAPIKeyService(db *gorm.DB, writer APIKeyNameWriter) CPAAPIKeyProvider {
++	return &cpaAPIKeyService{db: db, nameWriter: writer}
+ }
+ 
+ func NewCPAAPIKeyService(db *gorm.DB) CPAAPIKeyProvider {
+@@ -48,10 +56,19 @@ func (s *cpaAPIKeyService) FindActiveCPAAPIKeyByID(_ context.Context, id int64)
+ 	return repository.FindActiveCPAAPIKeyByID(s.db, id)
+ }
+ 
+-func (s *cpaAPIKeyService) UpdateCPAAPIKeyAlias(_ context.Context, id int64, keyAlias string) (entities.CPAAPIKey, error) {
++func (s *cpaAPIKeyService) UpdateCPAAPIKeyAlias(ctx context.Context, id int64, keyAlias string) (entities.CPAAPIKey, error) {
+ 	if id <= 0 {
+ 		return entities.CPAAPIKey{}, ErrInvalidID
+ 	}
++	if s.nameWriter != nil {
++		row, err := s.FindActiveCPAAPIKeyByID(ctx, id)
++		if err != nil {
++			return entities.CPAAPIKey{}, err
++		}
++		if err = s.nameWriter.UpdateAPIKeyName(ctx, row.APIKey, strings.TrimSpace(keyAlias)); err != nil {
++			return entities.CPAAPIKey{}, err
++		}
++	}
+ 	// UPDATE 由 dbresolver 自动路由 writer；结果回读再用官方 Write clause 固定到同一物理池。
+ 	if err := repository.UpdateCPAAPIKeyAlias(s.db, id, keyAlias); err != nil {
+ 		return entities.CPAAPIKey{}, err
+diff --git a/internal/service/metadata_management_api_keys.go b/internal/service/metadata_management_api_keys.go
+index 68b8815..448e318 100644
+--- a/internal/service/metadata_management_api_keys.go
++++ b/internal/service/metadata_management_api_keys.go
+@@ -32,5 +32,5 @@ func syncManagementAPIKeys(db *gorm.DB, result *response.ManagementAPIKeysResult
+ 		return fmt.Errorf("sync management api keys: %w", err)
+ 	}
+ 	// 成功空列表和非空列表都完成本轮同步。
+-	return nil
++	return repository.SyncCPAAPIKeyNames(db, result.Payload.Names)
+ }
+diff --git a/internal/service/metadata_sync.go b/internal/service/metadata_sync.go
+index 5d1a767..523a735 100644
+--- a/internal/service/metadata_sync.go
++++ b/internal/service/metadata_sync.go
+@@ -25,6 +25,12 @@ func (s *SyncService) SyncMetadata(ctx context.Context) error {
+ 	authFilesResult, authFilesErr := s.metadataFetcher.FetchAuthFiles(ctx)
+ 	// 管理 API Keys 保持第二个读取位置，失败同样不阻止 provider。
+ 	apiKeysResult, apiKeysErr := s.metadataFetcher.FetchManagementAPIKeys(ctx)
++	var keyNamesErr error
++	if reader, ok := s.metadataFetcher.(interface {
++		FetchAPIKeyNames(context.Context) (map[string]string, error)
++	}); ok && apiKeysErr == nil && apiKeysResult != nil {
++		apiKeysResult.Payload.Names, keyNamesErr = reader.FetchAPIKeyNames(ctx)
++	}
+ 	// 八个 provider endpoint 只在纯包内并发，返回按 registry 确定性归并的 snapshot。
+ 	providerSnapshot, providerFetchErr := providermetadata.Fetch(ctx, s.metadataFetcher)
+ 	// Auth Files 先进入自己的 repository 事务，保持原有写入顺序。
+@@ -53,7 +59,7 @@ func (s *SyncService) SyncMetadata(ctx context.Context) error {
+ 		}
+ 	}
+ 	// 最终顺序保持 persistence、兼容 aggregate、provider warning；生产后台聚合仍有独立生命周期。
+-	err := joinErrors(upsertErr, aggregateErr, providerWarningErr)
++	err := joinErrors(upsertErr, aggregateErr, providerWarningErr, keyNamesErr)
+ 	// 完成日志默认沿用 completed 状态。
+ 	fields := logrus.Fields{
+ 		// status 字段保持现有 dashboard/runtime 观察语义。
+diff --git a/internal/service/reporting_keys.go b/internal/service/reporting_keys.go
+index ee25c22..97a1d61 100644
+--- a/internal/service/reporting_keys.go
++++ b/internal/service/reporting_keys.go
+@@ -9,8 +9,8 @@ import (
+ )
+ 
+ type ReportingAPIKey struct {
+-	ID, APIKey string
+-	Historical bool
++	ID, APIKey, Name string
++	Historical       bool
+ }
+ type ReportingAPIKeyProvider interface {
+ 	ListReportingAPIKeys(context.Context) ([]ReportingAPIKey, error)
+@@ -27,7 +27,7 @@ func (s *cpaAPIKeyService) ListReportingAPIKeys(ctx context.Context) ([]Reportin
+ 	seen := map[string]bool{}
+ 	for _, row := range rows {
+ 		seen[row.APIKey] = true
+-		result = append(result, ReportingAPIKey{strconv.FormatInt(row.ID, 10), row.APIKey, row.IsDeleted})
++		result = append(result, ReportingAPIKey{ID: strconv.FormatInt(row.ID, 10), APIKey: row.APIKey, Name: row.KeyAlias, Historical: row.IsDeleted})
+ 	}
+ 	var raw []string
+ 	if err := s.db.WithContext(ctx).Model(&entities.UsageEvent{}).Distinct("api_group_key").Pluck("api_group_key", &raw).Error; err != nil {
+@@ -38,7 +38,7 @@ func (s *cpaAPIKeyService) ListReportingAPIKeys(ctx context.Context) ([]Reportin
+ 			continue
+ 		}
+ 		digest := sha256.Sum256([]byte(key))
+-		result = append(result, ReportingAPIKey{fmt.Sprintf("historical:%x", digest[:12]), key, true})
++		result = append(result, ReportingAPIKey{ID: fmt.Sprintf("historical:%x", digest[:12]), APIKey: key, Historical: true})
+ 	}
+ 	return result, nil
+ }

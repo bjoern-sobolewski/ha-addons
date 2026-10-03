@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Persist shared client-key names separately from authentication configuration.
+- Import existing browser names in Access & Auth, preserving server names and cleared-name markers.
+- Provide admin-only name reads/edits and hashed name metadata for Keeper synchronization.
+
 ## 0.1.2
 
 - Capture supported HTTP quota headers and Codex WebSocket quota events in an account/window cache.

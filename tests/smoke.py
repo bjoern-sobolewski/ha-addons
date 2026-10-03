@@ -1,5 +1,6 @@
 """Exercise the packaged services with isolated, automatically cleaned Docker resources."""
 import http.cookiejar
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -185,6 +186,37 @@ def main():
             # The app enforces the role even without the restricted gateway.
             direct_read_only = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
             assert request(keeper + '/api/v1/auth/read-only-login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'password': read_only_password}, opener=direct_read_only)[0] == 204
+            management_auth = {'Authorization': 'Bearer ' + management}
+            names_url = private + '/v8/management/access/api-key-names'
+            fingerprint = hashlib.sha256(key.encode()).hexdigest()
+            name_body = {'names': {fingerprint: 'Shared Team ✓'}}
+            assert request(names_url, auth)[0] == 401
+            assert request(api + '/v8/management/access/api-key-names', management_auth)[0] == 404
+            assert request(names_url, management_auth, body=name_body, method='PATCH')[0] == 200
+            shared_keys_url = viewer_gateway + viewer_path + '/api/v1/read-only/keys'
+            eventually(lambda: 'Shared Team ✓' in request(shared_keys_url, opener=read_only_opener)[1].decode(), timeout=90)
+            assert request(names_url, management_auth, body={'names': {fingerprint: 'Old browser name'}, 'only_if_absent': True}, method='PATCH')[0] == 200
+            assert json.loads(request(names_url, management_auth)[1])['names'][fingerprint] == 'Shared Team ✓'
+            assert request(keeper + '/api/v1/auth/login', headers={'X-CPA-Usage-Keeper-Request':'fetch'}, body={'password':password}, opener=opener)[0] == 204
+            assert 'Shared Team' in request(keeper + '/api/v1/usage/api-keys/options', opener=opener)[1].decode()
+            assert json.loads(request(viewer_gateway + viewer_path + '/api/v1/auth/session', opener=viewer_opener)[1])['api_key']['alias'] == 'Shared Team ✓'
+            for report in ('events?range=today', 'events/export?range=today&format=json', 'events/export?range=today&format=csv', 'key-overview/comparisons?range=today', 'key-analysis?range=today'):
+                name_report = request(viewer_gateway + viewer_path + '/api/v1/read-only/' + report, opener=read_only_opener)
+                assert name_report[0] == 200 and 'Shared Team' in name_report[1].decode(), report
+                assert key.encode() not in name_report[1]
+            key_id = next(item['id'] for item in json.loads(request(shared_keys_url, opener=read_only_opener)[1])['keys'] if item['label'] == 'Shared Team ✓')
+            alias_url = keeper + '/api/v1/usage/api-keys/' + key_id
+            alias_headers = {'X-CPA-Usage-Keeper-Request':'fetch'}
+            assert request(alias_url, alias_headers, body={'keyAlias':'Keeper Team'}, method='PATCH', opener=direct_read_only)[0] == 403
+            assert request(alias_url, alias_headers, body={'keyAlias':'Keeper Team'}, method='PATCH', opener=opener)[0] == 200
+            assert json.loads(request(names_url, management_auth)[1])['names'][fingerprint] == 'Keeper Team'
+            assert request(names_url, management_auth, body={'names': {fingerprint: ''}}, method='PATCH')[0] == 200
+            eventually(lambda: 'Keeper Team' not in request(shared_keys_url, opener=read_only_opener)[1].decode())
+            assert request(names_url, management_auth, body={'names': {fingerprint:'Old browser'}, 'only_if_absent': True}, method='PATCH')[0] == 200
+            assert json.loads(request(names_url, management_auth)[1])['names'][fingerprint] == ''
+            assert request(names_url, management_auth, body=name_body, method='PATCH')[0] == 200
+            eventually(lambda: 'Shared Team' in request(shared_keys_url, opener=read_only_opener)[1].decode())
+            print('PASS: shared name import, admin edits, session labels, charts, events, exports, clear tombstones and role isolation', flush=True)
             for method, path in (('GET', '/usage/overview'), ('GET', '/auth/sessions'), ('PATCH', '/auth-files/status'), ('DELETE', '/auth-files'), ('POST', '/quota/reset'), ('PUT', '/pricing'), ('POST', '/usage/identities/1/stats/reset')):
                 assert request(keeper + '/api/v1' + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={} if method != 'GET' else None, method=method, opener=direct_read_only)[0] == 403
                 assert request(viewer_gateway + viewer_path + '/api/v1' + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={} if method != 'GET' else None, method=method, opener=read_only_opener)[0] == 404
@@ -241,6 +273,7 @@ def main():
             assert request(keys_url, management_auth, body=[rotated_key], method='PUT')[0] == 200
             eventually(lambda: request(api + '/v1/models', auth)[0] == 401)
             eventually(lambda: request(viewer_gateway + viewer_path + '/api/v1/key-quota', opener=viewer_opener)[0] == 401, timeout=90)
+            assert 'Shared Team' in request(shared_keys_url, opener=read_only_opener)[1].decode()
             print('PASS: revoked client token loses viewer quota access', flush=True)
             # Clear stale HA keys after switching to management ownership.
             (temp / 'cpa.json').write_text(json.dumps({'api_key_source': 'management_ui', 'api_keys': [], 'management_key': management}))
@@ -257,10 +290,15 @@ def main():
             assert request(api + '/v1/models', auth)[0] == 401
             private = endpoint(names['cpa'], 8317)
             assert json.loads(request(private + '/v8/management/config/access/api-keys', management_auth)[1]) == [rotated_key]
+            assert json.loads(request(private + '/v8/management/access/api-key-names', management_auth)[1])['names'][fingerprint] == 'Shared Team ✓'
             assert int(docker('exec', names['keeper'], 'python3', '-c', query)) >= count
             assert docker('exec', names['cpa'], 'cat', '/data/auth/persistence-marker') == 'test'
             viewer_gateway = endpoint(names['keeper'], 8082)
             assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=read_only_opener)[0] == 401
+            assert request(viewer_gateway + viewer_path + '/api/v1/auth/read-only-login', headers=alias_headers, body={'password':read_only_password}, opener=read_only_opener)[0] == 204
+            assert 'Shared Team' in request(viewer_gateway + viewer_path + '/api/v1/read-only/keys', opener=read_only_opener)[1].decode()
+            assert request(api + '/v1/models', auth)[0] == 401
+            print('PASS: shared names and historical reporting survive restart without restoring revoked authentication', flush=True)
             print('PASS: Keeper restart revokes read-only sessions while preserving usage', flush=True)
             print('PASS: Keeper authentication, HTTP usage ingestion and persistence across restarts', flush=True)
             print('PASS: management API key additions and revocations survive restart with an empty HA key list', flush=True)

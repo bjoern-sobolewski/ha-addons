@@ -7,11 +7,13 @@ RUN git init && git remote add origin https://github.com/router-for-me/CLIProxyA
     && test "$(git rev-parse HEAD)" = 6fecc6e5567912661654a4eaf9b8f5436facd1c2
 COPY patches/quota-traffic.patch /tmp/quota-traffic.patch
 RUN git apply --check /tmp/quota-traffic.patch && git apply /tmp/quota-traffic.patch
+COPY patches/key-names.patch /tmp/key-names.patch
+RUN git apply --check /tmp/key-names.patch && git apply /tmp/key-names.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/ ./
 RUN go test ./internal/quotatraffic ./internal/logging ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
-RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.10-ha.1" -o /out/CLIProxyAPI ./cmd/server
+RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.10-ha.2" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -20,10 +22,12 @@ RUN git init && git remote add origin https://github.com/router-for-me/Cli-Proxy
     && git checkout --detach FETCH_HEAD
 COPY patches/cpamc-quota.patch /tmp/cpamc-quota.patch
 RUN git apply --check /tmp/cpamc-quota.patch && git apply /tmp/cpamc-quota.patch
+COPY patches/cpamc-key-names.patch /tmp/cpamc-key-names.patch
+RUN git apply --check /tmp/cpamc-key-names.patch && git apply /tmp/cpamc-key-names.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/ ./
-RUN npm install --ignore-scripts && npm run build
+RUN npm install --ignore-scripts && npx --yes --package=bun@1.3.14 bun run verify
 FROM eceasy/cli-proxy-api:v8.0.10@sha256:0b007a6abd15aec1f5314908417ceab99f049f75353e3703f52f0968747f6110
 USER root
 RUN apt-get update \
@@ -36,7 +40,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.2
+ARG BUILD_VERSION=0.1.3
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

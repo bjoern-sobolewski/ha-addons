@@ -4,6 +4,8 @@ Set `api_keys` to a list of random client secrets and `management_key` to a diff
 
 ## Client API key management
 
+Client-key names in **Access & Auth** are saved immediately on CPA and shared with Keeper. Existing names from the current browser are imported when this editor opens, only for keys without shared metadata. Server names and explicit cleared names take priority over old browser storage. Open the editor once in the browser that holds your old names to migrate them. Names are stored as SHA-256-keyed metadata in `/data/api-key-names.json`, separate from authentication and provider configuration. Revoking a key retains its name for historical reports; naming a key never grants access. Use names without credentials or secrets.
+
 `api_key_source` defaults to `home_assistant`, which reapplies HA's `api_keys` on every startup. To manage client access in the private dashboard instead, select `management_ui` in HA options, save and restart the app. Existing client keys in `/data/config.yaml` are retained; HA's list is used only to initialize keys when the saved `access.api-keys` setting is absent.
 
 In the dashboard's **Config Panel**, edit **Client API Keys (access.api-keys)** and save. Add or remove client keys there; saved changes survive app restarts and updates. These are client access keys, separate from the keys on the upstream provider pages. Keep at least one client key of 24 or more characters, distinct from the management key. An empty or invalid saved list prevents startup and is never replaced with old HA keys.

@@ -4,6 +4,7 @@
 
 - Use the compact inline quota refresh display.
 - Route quota observations through the bounded cache/history worker, preserving partial Claude windows and per-window freshness.
+- Keep API-provider traffic in a separate validated cache path, without writing OAuth quota history.
 - Harden reporting exports, credential sanitization and read-only session credential binding.
 - Preserve local key alias editing on older CPA versions and keep write-command reads on the writer pool.
 

@@ -995,10 +995,10 @@ index d32c4872..cac7a987 100644
  			return entities.CPAAPIKey{}, err
  		}
 diff --git a/web/src/components/usage/QuotaFreshness.tsx b/web/src/components/usage/QuotaFreshness.tsx
-index c1e6db14..2a647036 100644
+index c1e6db14..5dcbd601 100644
 --- a/web/src/components/usage/QuotaFreshness.tsx
 +++ b/web/src/components/usage/QuotaFreshness.tsx
-@@ -1,20 +1,120 @@
+@@ -1,20 +1,109 @@
 -import {useState} from 'react';
 -export const quotaSourceLabel = (source?: string) => ({
 - api_response_headers: 'API response headers', usage_header: 'API response headers',
@@ -1018,21 +1018,10 @@ index c1e6db14..2a647036 100644
 -  <button type="button" aria-expanded={open} aria-label={`Quota freshness: ${details}`} onFocus={()=>setOpen(true)} onBlur={()=>setOpen(false)} onClick={()=>setOpen(true)} style={{font:'inherit',color:old?'#d97706':'inherit',background:'transparent',border:'1px solid currentColor',borderRadius:4,padding:'2px 6px',cursor:'pointer'}}>{old?'Stale · ':''}{age} ⓘ</button>
 -  {open && <span role="tooltip" style={{display:'block',whiteSpace:'pre-line',position:'absolute',zIndex:30,bottom:'100%',left:0,minWidth:210,padding:10,borderRadius:6,background:'#172033',color:'white',boxShadow:'0 2px 10px #0005'}}>{details}</span>}
 - </span>;
++import { quotaSourceLabel } from './quotaSourceLabel';
 +import { useEffect, useId, useState } from "react";
 +import { IconRefreshCw } from "@/components/ui/icons";
 +
-+const quotaSourceLabel = (source?: string) =>
-+  ({
-+    api_response_headers: "API response headers",
-+    usage_header: "API response headers",
-+    websocket_event: "WebSocket event",
-+    scheduled: "Scheduled provider query",
-+    scheduled_provider_query: "Scheduled provider query",
-+    manual: "Manual provider query",
-+    manual_provider_query: "Manual provider query",
-+    inspection: "Manual provider query",
-+    cache_backfill: "Scheduled provider query",
-+  })[source ?? ""] ?? "Unknown source";
 +
 +export function QuotaFreshness({
 +  capturedAt,
@@ -1139,7 +1128,7 @@ index c1e6db14..2a647036 100644
 +  );
  }
 diff --git a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
-index 83c853b6..60751d24 100644
+index 83c853b6..3a832fc9 100644
 --- a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
 @@ -69,7 +69,7 @@ export function AiProviderCredentialsSection({ reportingOnly = false, rows, tota
@@ -1147,7 +1136,7 @@ index 83c853b6..60751d24 100644
        )}
      >
 -      <ApiProviderQuota />
-+      {!readOnly && <ApiProviderQuota />}
++      {!reportingOnly && <ApiProviderQuota />}
        {loading && rows.length === 0 && <div className={styles.credentialEmptyState}>{t('common.loading')}</div>}
        {!loading && rows.length === 0 && <div className={styles.credentialEmptyState}>{t('usage_stats.credentials_ai_providers_empty')}</div>}
        {rows.length > 0 && (
@@ -1191,6 +1180,25 @@ index e132ce27..4dfbf4f0 100644
          authType: authTypeFilter,
          pageSize: REQUEST_EVENTS_PAGE_SIZE,
          cursorMode: true,
+diff --git a/web/src/components/usage/quotaSourceLabel.ts b/web/src/components/usage/quotaSourceLabel.ts
+new file mode 100644
+index 00000000..72fe35f8
+--- /dev/null
++++ b/web/src/components/usage/quotaSourceLabel.ts
+@@ -0,0 +1,13 @@
++export const quotaSourceLabel = (source?: string) =>
++  ({
++    api_response_headers: "API response headers",
++    usage_header: "API response headers",
++    websocket_event: "WebSocket event",
++    scheduled: "Scheduled provider query",
++    scheduled_provider_query: "Scheduled provider query",
++    manual: "Manual provider query",
++    manual_provider_query: "Manual provider query",
++    inspection: "Manual provider query",
++    cache_backfill: "Scheduled provider query",
++  })[source ?? ""] ?? "Unknown source";
++
 diff --git a/web/src/pages/KeyQuotaPage.tsx b/web/src/pages/KeyQuotaPage.tsx
 index e29bb65b..a532dbb7 100644
 --- a/web/src/pages/KeyQuotaPage.tsx

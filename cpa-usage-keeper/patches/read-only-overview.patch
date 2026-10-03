@@ -266,6 +266,264 @@ index 0000000..e349523
 +		c.JSON(http.StatusOK, gin.H{"overview": overview, "keys": result})
 +	})
 +}
+diff --git a/internal/api/read_only_dashboard.go b/internal/api/read_only_dashboard.go
+new file mode 100644
+index 0000000..d7ebc77
+--- /dev/null
++++ b/internal/api/read_only_dashboard.go
+@@ -0,0 +1,252 @@
++package api
++
++import (
++	"crypto/sha256"
++	"fmt"
++	"net/http"
++	"sort"
++	"strconv"
++	"time"
++
++	"cpa-usage-keeper/internal/service"
++	servicedto "cpa-usage-keeper/internal/service/dto"
++	"github.com/gin-gonic/gin"
++)
++
++// The read-only dashboard uses the same statistical DTOs as the existing
++// dashboard, but never serializes credential names or masked key fragments.
++type readOnlyDashboardLabels struct {
++	keys      map[string]analysisAPIKeyInfo
++	keyLabels map[string]string
++	accounts  map[string]string
++}
++
++func loadReadOnlyDashboardLabels(c *gin.Context, keys service.CPAAPIKeyProvider, identities service.UsageIdentityProvider) (readOnlyDashboardLabels, error) {
++	result := readOnlyDashboardLabels{keys: map[string]analysisAPIKeyInfo{}, keyLabels: map[string]string{}, accounts: map[string]string{}}
++	if keys != nil {
++		rows, err := keys.ListCPAAPIKeys(c.Request.Context())
++		if err != nil {
++			return result, err
++		}
++		for _, row := range rows {
++			id, label := strconv.FormatInt(row.ID, 10), fmt.Sprintf("Client key %d", row.ID)
++			result.keys[row.APIKey] = analysisAPIKeyInfo{ID: id, Label: label}
++			result.keyLabels[id] = label
++		}
++	}
++	if identities != nil {
++		rows, err := identities.ListActiveUsageIdentities(c.Request.Context())
++		if err != nil {
++			return result, err
++		}
++		sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
++		counts := map[string]int{}
++		for _, row := range rows {
++			if row.IsDeleted || (row.Disabled != nil && *row.Disabled) {
++				continue
++			}
++			name := viewerProviderName(row)
++			counts[name]++
++			result.accounts[row.Identity] = fmt.Sprintf("%s account %d", name, counts[name])
++		}
++	}
++	return result, nil
++}
++
++func (labels readOnlyDashboardLabels) key(key string) (string, string) {
++	if label, ok := labels.keyLabels[key]; ok {
++		return key, label
++	}
++	// Some existing builders already hash historical keys. Hashing their opaque
++	// identifier again is safe and keeps all pages consistent with one another.
++	digest := sha256.Sum256([]byte(key))
++	return fmt.Sprintf("historical:%x", digest[:12]), fmt.Sprintf("Historical key %x", digest[:6])
++}
++
++func (labels readOnlyDashboardLabels) includeKey(raw string) {
++	if _, ok := labels.keys[raw]; ok {
++		return
++	}
++	digest := sha256.Sum256([]byte(raw))
++	id, label := fmt.Sprintf("historical:%x", digest[:12]), fmt.Sprintf("Historical key %x", digest[:6])
++	labels.keys[raw] = analysisAPIKeyInfo{ID: id, Label: label}
++	labels.keyLabels[id] = label
++}
++
++func (labels readOnlyDashboardLabels) account(key string) (string, string) {
++	digest := sha256.Sum256([]byte(key))
++	label := labels.accounts[key]
++	if label == "" {
++		label = fmt.Sprintf("Historical account %x", digest[:6])
++	}
++	return fmt.Sprintf("account:%x", digest[:12]), label
++}
++
++func sanitizeReadOnlyComparisons(payload *usageOverviewComparisons, labels readOnlyDashboardLabels) {
++	for i := range payload.APIKeys {
++		payload.APIKeys[i].Key, payload.APIKeys[i].Label = labels.key(payload.APIKeys[i].Key)
++	}
++	for _, items := range [][]usageOverviewComparisonItem{payload.AuthFiles, payload.AIProviders} {
++		for i := range items {
++			items[i].Key, items[i].Label = labels.account(items[i].Key)
++		}
++	}
++}
++
++func sanitizeReadOnlyAnalysis(payload *analysisResponse, labels readOnlyDashboardLabels, snapshot *servicedto.AnalysisSnapshot) {
++	for i := range payload.APIKeyComposition {
++		payload.APIKeyComposition[i].Key, payload.APIKeyComposition[i].Label = labels.key(payload.APIKeyComposition[i].Key)
++	}
++	if snapshot != nil {
++		for i := range payload.AuthFilesComposition {
++			payload.AuthFilesComposition[i].Key, payload.AuthFilesComposition[i].Label = labels.account(snapshot.AuthFilesComposition[i].Key)
++		}
++		for i := range payload.AIProviderComposition {
++			payload.AIProviderComposition[i].Key, payload.AIProviderComposition[i].Label = labels.account(snapshot.AIProviderComposition[i].Key)
++		}
++	}
++	safeLabels := map[string]string{}
++	for i, key := range payload.Heatmap.APIKeys {
++		safe, label := labels.key(key)
++		payload.Heatmap.APIKeys[i] = safe
++		safeLabels[safe] = label
++	}
++	payload.Heatmap.APIKeyLabels = safeLabels
++	for i := range payload.Heatmap.Cells {
++		payload.Heatmap.Cells[i].APIKey, _ = labels.key(payload.Heatmap.Cells[i].APIKey)
++	}
++}
++
++func sanitizeReadOnlyRealtime(payload *usageOverviewRealtime, labels readOnlyDashboardLabels) {
++	for i := range payload.CurrentUsage.APIKeys {
++		payload.CurrentUsage.APIKeys[i].Key, payload.CurrentUsage.APIKeys[i].Label = labels.key(payload.CurrentUsage.APIKeys[i].Key)
++	}
++	for _, items := range [][]usageOverviewRealtimeUsageTopItem{payload.CurrentUsage.AuthFiles, payload.CurrentUsage.AIProviders} {
++		for i := range items {
++			items[i].Key, items[i].Label = labels.account(items[i].Key)
++		}
++	}
++}
++
++func registerReadOnlyDashboardRoutes(router *gin.RouterGroup, provider service.UsageProvider, keys service.CPAAPIKeyProvider, identities service.UsageIdentityProvider) {
++	// Only explicit GET routes are registered. Admin middleware/routes remain
++	// unchanged, so this role cannot reach a write even via the LAN listener.
++	group := router.Group("/read-only")
++	for _, path := range []string{"/key-overview", "/key-overview/comparisons", "/key-overview/realtime", "/key-activity", "/key-analysis", "/key-analysis/latency"} {
++		route := path
++		group.GET(route, func(c *gin.Context) {
++			setNoStoreHeaders(c)
++			unavailable := func() { c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Usage data is unavailable"}) }
++			if provider == nil {
++				unavailable()
++				return
++			}
++			now := time.Now()
++			var filter servicedto.UsageFilter
++			var err error
++			switch route {
++			case "/key-overview/realtime":
++				filter, err = parseKeyUsageRealtimeFilterQuery(c.Request, now)
++			case "/key-activity":
++				filter, err = parseKeyUsageActivityFilterQuery(c.Request, now)
++			case "/key-analysis", "/key-analysis/latency":
++				filter, err = parseKeyUsageAnalysisTimeFilterQuery(c.Request, now)
++			default:
++				filter, err = parseKeyUsageOverviewTimeFilterQuery(c.Request, now)
++			}
++			if err != nil {
++				writeUsageFilterParseError(c, err)
++				return
++			}
++			// Time parsers are shared with key view, with client identity selectors
++			// disabled. All-key scope is established here, never by a client key.
++			filter.APIKeyID = ""
++			labels, err := loadReadOnlyDashboardLabels(c, keys, identities)
++			if err != nil {
++				unavailable()
++				return
++			}
++			switch route {
++			case "/key-overview":
++				snapshot, err := provider.GetUsageOverview(c.Request.Context(), filter)
++				if err != nil {
++					unavailable()
++					return
++				}
++				payload := usageOverviewResponse{Usage: buildUsageOverviewPayload(nil), Summary: buildUsageOverviewSummary(snapshot), Series: buildUsageOverviewSeries(snapshot), Timezone: time.Local.String()}
++				if snapshot != nil {
++					payload.Usage = buildUsageOverviewPayload(snapshot.Usage)
++				}
++				c.JSON(http.StatusOK, payload)
++			case "/key-overview/comparisons":
++				comparisons, ok := provider.(service.UsageComparisonProvider)
++				if !ok {
++					unavailable()
++					return
++				}
++				snapshot, err := comparisons.GetUsageOverviewComparisons(c.Request.Context(), filter)
++				if err != nil {
++					unavailable()
++					return
++				}
++				if snapshot != nil && snapshot.Comparisons != nil {
++					for raw := range snapshot.Comparisons.APIKeys {
++						labels.includeKey(raw)
++					}
++				}
++				payload := buildUsageOverviewComparisons(snapshot, labels.keys)
++				sanitizeReadOnlyComparisons(payload, labels)
++				c.JSON(http.StatusOK, payload)
++			case "/key-overview/realtime":
++				snapshot, err := provider.GetUsageOverviewRealtime(c.Request.Context(), filter)
++				if err != nil {
++					unavailable()
++					return
++				}
++				if snapshot != nil {
++					for _, item := range snapshot.CurrentUsage.APIKeys {
++						labels.includeKey(item.Key)
++					}
++				}
++				payload := buildUsageOverviewRealtime(snapshot, filter.RealtimeWindow, labels.keys)
++				sanitizeReadOnlyRealtime(&payload, labels)
++				c.JSON(http.StatusOK, payload)
++			case "/key-activity":
++				snapshot, err := provider.GetUsageActivity(c.Request.Context(), filter)
++				if err != nil {
++					unavailable()
++					return
++				}
++				c.JSON(http.StatusOK, buildUsageActivityResponse(snapshot))
++			case "/key-analysis":
++				snapshot, err := provider.GetAnalysis(c.Request.Context(), filter)
++				if err != nil {
++					unavailable()
++					return
++				}
++				if snapshot != nil {
++					for _, item := range snapshot.APIKeyComposition {
++						labels.includeKey(item.Key)
++					}
++					for _, item := range snapshot.Heatmap {
++						labels.includeKey(item.APIKey)
++					}
++				}
++				payload := buildAnalysisPayload(snapshot, labels.keys)
++				sanitizeReadOnlyAnalysis(&payload, labels, snapshot)
++				c.JSON(http.StatusOK, payload)
++			case "/key-analysis/latency":
++				snapshot, err := provider.GetAnalysisLatency(c.Request.Context(), filter)
++				if err != nil {
++					unavailable()
++					return
++				}
++				if snapshot == nil {
++					c.JSON(http.StatusOK, emptyAnalysisLatencyDiagnosticsResponse())
++					return
++				}
++				c.JSON(http.StatusOK, buildAnalysisLatencyDiagnosticsPayload(*snapshot))
++			}
++		})
++	}
++}
 diff --git a/internal/api/request_limits.go b/internal/api/request_limits.go
 index 4b3ba41..d76591e 100644
 --- a/internal/api/request_limits.go
@@ -282,10 +540,10 @@ index 4b3ba41..d76591e 100644
  			return
  		}
 diff --git a/internal/api/router.go b/internal/api/router.go
-index cda67b1..4ebb665 100644
+index cda67b1..44c44ec 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
-@@ -127,9 +127,14 @@ func NewRouter(
+@@ -127,9 +127,15 @@ func NewRouter(
  	registerUsageEventRequestLogDownloadTokenRoutes(apiV1, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
  
  	versionProtected := apiV1.Group("")
@@ -296,6 +554,7 @@ index cda67b1..4ebb665 100644
 +	readOnlyProtected := apiV1.Group("")
 +	readOnlyProtected.Use(authHandler.readOnlyMiddleware())
 +	registerReadOnlyOverviewRoute(readOnlyProtected, usageProvider, cpaAPIKeyProvider)
++	registerReadOnlyDashboardRoutes(readOnlyProtected, usageProvider, cpaAPIKeyProvider, usageIdentityProvider)
 +	registerViewerQuotaRoute(readOnlyProtected, "/read-only/key-quota", usageIdentityProvider, quotaProvider)
 +
  	adminProtected := apiV1.Group("")
@@ -303,10 +562,10 @@ index cda67b1..4ebb665 100644
  	registerStatusRoutes(adminProtected, statusProvider, statusConfig)
 diff --git a/internal/api/test/read_only_test.go b/internal/api/test/read_only_test.go
 new file mode 100644
-index 0000000..c96c75e
+index 0000000..1bb25aa
 --- /dev/null
 +++ b/internal/api/test/read_only_test.go
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,222 @@
 +package test
 +
 +import (
@@ -456,6 +715,79 @@ index 0000000..c96c75e
 +		t.Fatal("login body not bounded")
 +	}
 +}
++
++func (s *readOnlyUsageStub) GetUsageActivity(_ context.Context, f servicedto.UsageFilter) (*servicedto.UsageActivitySnapshot, error) {
++	s.filter = f
++	return &servicedto.UsageActivitySnapshot{}, nil
++}
++func (s *readOnlyUsageStub) GetUsageOverviewRealtime(_ context.Context, f servicedto.UsageFilter) (*servicedto.UsageOverviewRealtime, error) {
++	s.filter = f
++	return &servicedto.UsageOverviewRealtime{CurrentUsage: servicedto.RealtimeCurrentUsage{
++		APIKeys:   []servicedto.RealtimeUsageTopItem{{Key: "first-private-key", Label: "private-key-alias", Requests: 2}, {Key: "revoked-private-key", Requests: 3}},
++		AuthFiles: []servicedto.RealtimeUsageTopItem{{Key: "private-file", Label: "private-email@example.invalid", Requests: 5}},
++	}}, nil
++}
++func (s *readOnlyUsageStub) GetAnalysis(_ context.Context, f servicedto.UsageFilter) (*servicedto.AnalysisSnapshot, error) {
++	s.filter = f
++	return &servicedto.AnalysisSnapshot{
++		APIKeyComposition:    []servicedto.AnalysisCompositionItem{{Key: "first-private-key", Requests: 2}, {Key: "revoked-private-key", Requests: 3}},
++		AuthFilesComposition: []servicedto.AnalysisCompositionItem{{Key: "private-file", Label: "private-email@example.invalid", Requests: 5}},
++		Heatmap:              []servicedto.AnalysisHeatmapCell{{APIKey: "first-private-key", Model: "public-model", Requests: 2}, {APIKey: "revoked-private-key", Model: "public-model", Requests: 3}},
++	}, nil
++}
++func (s *readOnlyUsageStub) GetAnalysisLatency(_ context.Context, f servicedto.UsageFilter) (*servicedto.AnalysisLatencyDiagnostics, error) {
++	s.filter = f
++	return &servicedto.AnalysisLatencyDiagnostics{}, nil
++}
++
++func TestReadOnlySharedDashboardReports(t *testing.T) {
++	sessions := auth.NewSessionManager(time.Hour)
++	config := AuthConfig{Enabled: true, LoginPassword: "admin-password-123456", ReadOnlyPassword: "read-only-password-123456"}
++	usage := &readOnlyUsageStub{}
++	keys := &authLoginKeyStub{rowsByID: map[int64]entities.CPAAPIKey{1: {ID: 1, APIKey: "first-private-key", KeyAlias: "private-key-alias"}}}
++	identities := identityMetadataStub{items: []entities.UsageIdentity{{ID: 1, Identity: "private-file", Type: "codex", Name: "private-email@example.invalid"}}}
++	router := NewRouter(nil, nil, usage, nil, config, NewAuthHandler(config, sessions), "", OptionalProviders{CPAAPIKeys: keys, UsageIdentity: identities})
++	token, _, err := sessions.CreateReadOnlyWithSourceAndMetadata(auth.SessionSourceStandard, auth.SessionClientMetadata{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	cookie := &http.Cookie{Name: "cpa_usage_keeper_session", Value: token}
++	viewer, _, _ := sessions.CreateAPIKeyViewer(1)
++	for _, path := range []string{"key-overview", "key-overview/comparisons", "key-overview/realtime", "key-activity", "key-analysis", "key-analysis/latency"} {
++		url := "/api/v1/read-only/" + path + "?range=today&api_key_id=999&auth_index=private-file&model=private-model"
++		response := serveAPIGet(router, url, cookie)
++		if response.Code != 200 {
++			t.Fatalf("%s: %d %s", path, response.Code, response.Body.String())
++		}
++		for _, secret := range []string{"first-private-key", "revoked-private-key", "private-key-alias", "private-file", "private-email", "private-model"} {
++			if strings.Contains(response.Body.String(), secret) {
++				t.Fatalf("%s leaked %s", path, secret)
++			}
++		}
++		if usage.filter.APIKeyID != "" || usage.filter.AuthIndex != "" || usage.filter.Model != "" {
++			t.Fatal("client scope selectors affected all-key report")
++		}
++		if path == "key-overview/comparisons" || path == "key-overview/realtime" || path == "key-analysis" {
++			if !strings.Contains(response.Body.String(), "Codex account 1") || !strings.Contains(response.Body.String(), "Client key 1") || !strings.Contains(response.Body.String(), "Historical key") {
++				t.Fatalf("missing account/key breakdown: %s", response.Body.String())
++			}
++		}
++		if serveAPIGet(router, url).Code != 401 {
++			t.Fatal("anonymous report allowed")
++		}
++		if serveAPIGet(router, url, &http.Cookie{Name: "cpa_usage_keeper_session", Value: viewer}).Code != 403 {
++			t.Fatal("client-key report allowed")
++		}
++		req := httptest.NewRequest("POST", "/api/v1/read-only/"+path, strings.NewReader(`{}`))
++		req.AddCookie(cookie)
++		req.Header.Set("X-CPA-Usage-Keeper-Request", "fetch")
++		result := httptest.NewRecorder()
++		router.ServeHTTP(result, req)
++		if result.Code != 404 {
++			t.Fatalf("write on new report: %d", result.Code)
++		}
++	}
++}
 diff --git a/internal/app/app.go b/internal/app/app.go
 index 6ab9413..8115685 100644
 --- a/internal/app/app.go
@@ -536,7 +868,7 @@ index 82d318e..c0856e9 100644
  		if cfg.TLSCertFile == "" {
  			return nil, fmt.Errorf("TLS_CERT_FILE is required when TLS_ENABLED is true")
 diff --git a/web/src/App.tsx b/web/src/App.tsx
-index 814f442..5cc7088 100644
+index 814f442..b79440e 100644
 --- a/web/src/App.tsx
 +++ b/web/src/App.tsx
 @@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
@@ -548,15 +880,16 @@ index 814f442..5cc7088 100644
  import type { AuthRole, AuthSessionAPIKeySummary } from './lib/types';
  import { AppFooter } from './components/AppFooter';
  import { isKeyViewerPath, type KeyViewerPath } from './features/key-viewer';
-@@ -11,6 +11,7 @@ import { KeyAnalysisPage } from './pages/KeyAnalysisPage';
+@@ -11,6 +11,8 @@ import { KeyAnalysisPage } from './pages/KeyAnalysisPage';
  import { KeyOverviewPage } from './pages/KeyOverviewPage';
  import { KeyQuotaPage } from './pages/KeyQuotaPage';
  import { KeyRankingPage } from './pages/KeyRankingPage';
++import { getReadOnlyPage } from './features/key-viewer/navigation';
 +import { ReadOnlyPage } from './pages/ReadOnlyPage';
  import { LoginPage } from './pages/LoginPage';
  import { UsagePage } from './pages/UsagePage';
  import { cpamcEmbedSearch, isCPAMCEmbed, notifyCPAMCEmbedReady } from './embed/cpamcEmbed';
-@@ -24,8 +25,8 @@ const getInitialKeyViewerPath = (): KeyViewerPath => {
+@@ -24,8 +26,8 @@ const getInitialKeyViewerPath = (): KeyViewerPath => {
    return isKeyViewerPath(currentPath) ? currentPath : '/key-overview';
  };
  
@@ -567,15 +900,15 @@ index 814f442..5cc7088 100644
  );
  
  export const getRoleTargetPath = (
-@@ -37,6 +38,7 @@ export const getRoleTargetPath = (
+@@ -37,6 +39,7 @@ export const getRoleTargetPath = (
    if (role === 'api_key_viewer') {
      return isKeyViewerPath(currentPath) ? currentPath : '/key-overview';
    }
-+  if (role === 'read_only') return '/read-only';
++  if (role === 'read_only') return getReadOnlyPage(currentPath) ? currentPath : '/read-only';
    if (currentPath === '/') return '/';
  
    const usageTab = resolveUsageTabFromPath(currentPath);
-@@ -58,6 +60,8 @@ function App() {
+@@ -58,6 +61,8 @@ function App() {
    const [keyViewerPath, setKeyViewerPath] = useState<KeyViewerPath>(getInitialKeyViewerPath);
    const [adminLoginError, setAdminLoginError] = useState('');
    const [apiKeyLoginError, setAPIKeyLoginError] = useState('');
@@ -584,7 +917,7 @@ index 814f442..5cc7088 100644
    const [submitting, setSubmitting] = useState(false);
    const clearUsageStats = useUsageStatsStore((state) => state.clearUsageStats);
    const isEmbeddedInCPAMC = isCPAMCEmbed();
-@@ -71,6 +75,7 @@ function App() {
+@@ -71,6 +76,7 @@ function App() {
    }, [clearUsageStats]);
  
    const applySession = useCallback((session: Awaited<ReturnType<typeof getSession>>) => {
@@ -592,7 +925,7 @@ index 814f442..5cc7088 100644
      if (!session.authenticated) {
        clearSession();
        return;
-@@ -133,6 +138,19 @@ function App() {
+@@ -133,6 +139,19 @@ function App() {
      }
    }, [clearSession, isEmbeddedInCPAMC, loadSession, t]);
  
@@ -612,7 +945,7 @@ index 814f442..5cc7088 100644
    const handleAPIKeyLogin = useCallback(async (apiKey: string) => {
      setSubmitting(true);
      setAPIKeyLoginError('');
-@@ -172,7 +190,9 @@ function App() {
+@@ -172,7 +191,9 @@ function App() {
    if (authState === 'checking') {
      page = <div className="app-checking" aria-busy="true" />;
    } else if (authState === 'unauthenticated') {
@@ -645,6 +978,132 @@ index 8a5c49b..fe49e25 100644
    if (session.kind === 'admin') {
      return session.alias || t('usage_stats.session_settings_admin_label');
    }
+diff --git a/web/src/components/usage/hooks/useUsageActivityData.ts b/web/src/components/usage/hooks/useUsageActivityData.ts
+index 0e56bf7..c92e657 100644
+--- a/web/src/components/usage/hooks/useUsageActivityData.ts
++++ b/web/src/components/usage/hooks/useUsageActivityData.ts
+@@ -3,7 +3,7 @@ import { ApiError, fetchKeyActivity, fetchUsageActivity } from '@/lib/api';
+ import type { UsageActivityRequest, UsageActivityResponse, UsageTimeRange } from '@/lib/types';
+ 
+ export interface UseUsageActivityDataOptions {
+-  viewer: 'admin' | 'key';
++  viewer: 'admin' | 'key' | 'read_only';
+   request: UsageActivityRequest;
+   apiKeyId?: string;
+   enabled?: boolean;
+@@ -83,8 +83,8 @@ export function useUsageActivityData({
+     setErrorQueryKey('');
+     activeRequest.promise = (async () => {
+       try {
+-        const next = viewer === 'key'
+-          ? await fetchKeyActivity({ request: normalizedRequest, signal: controller.signal })
++        const next = viewer !== 'admin'
++          ? await fetchKeyActivity({ request: normalizedRequest, signal: controller.signal, readOnly: viewer === 'read_only' })
+           : await fetchUsageActivity({ request: normalizedRequest, apiKeyId: normalizedAPIKeyID, signal: controller.signal });
+         if (activeRequestRef.current !== activeRequest) return;
+         setResponse(next);
+diff --git a/web/src/components/usage/hooks/useUsageComparisonsData.ts b/web/src/components/usage/hooks/useUsageComparisonsData.ts
+index b010835..31d25ec 100644
+--- a/web/src/components/usage/hooks/useUsageComparisonsData.ts
++++ b/web/src/components/usage/hooks/useUsageComparisonsData.ts
+@@ -8,6 +8,7 @@ export interface UseUsageComparisonsDataOptions {
+   onRangeBoundsConflict?: (error: unknown) => boolean
+   enabled?: boolean
+   keyViewer?: boolean
++  readOnly?: boolean
+   apiKeyId?: string
+   range?: UsageTimeRange
+   customUnit?: UsageCustomRangeUnit
+@@ -20,7 +21,7 @@ interface LoadComparisonsOptions {
+ }
+ 
+ export function useUsageComparisonsData(options: UseUsageComparisonsDataOptions = {}) {
+-  const { onAuthRequired, onRangeBoundsConflict, enabled = true, keyViewer = false, apiKeyId, range = 'today', customUnit, customStart, customEnd } = options
++  const { onAuthRequired, onRangeBoundsConflict, enabled = true, keyViewer = false, readOnly = false, apiKeyId, range = 'today', customUnit, customStart, customEnd } = options
+   const [comparisons, setComparisons] = useState<UsageOverviewComparisons | null>(null)
+   const [loading, setLoading] = useState(false)
+   const [error, setError] = useState('')
+@@ -38,7 +39,7 @@ export function useUsageComparisonsData(options: UseUsageComparisonsDataOptions
+     setLoading(true)
+     setError('')
+     try {
+-      const nextComparisons = await fetchUsageOverviewComparisons(rangeQuery, { apiKeyId, keyViewer, signal: controller.signal })
++      const nextComparisons = await fetchUsageOverviewComparisons(rangeQuery, { apiKeyId, keyViewer, readOnly, signal: controller.signal })
+       if (sequence === requestSequence.current) setComparisons(nextComparisons)
+     } catch (nextError) {
+       if (controller.signal.aborted || sequence !== requestSequence.current) return
+@@ -49,7 +50,7 @@ export function useUsageComparisonsData(options: UseUsageComparisonsDataOptions
+       if (sequence === requestSequence.current) setLoading(false)
+       if (sequence === requestSequence.current) activeController.current = null
+     }
+-  }, [apiKeyId, keyViewer, onAuthRequired, onRangeBoundsConflict, rangeQuery])
++  }, [apiKeyId, keyViewer, readOnly, onAuthRequired, onRangeBoundsConflict, rangeQuery])
+ 
+   useEffect(() => {
+     if (!enabled || !rangeQuery.valid) return
+diff --git a/web/src/features/key-viewer/KeyViewerShell.tsx b/web/src/features/key-viewer/KeyViewerShell.tsx
+index 8eaead8..acbaca4 100644
+--- a/web/src/features/key-viewer/KeyViewerShell.tsx
++++ b/web/src/features/key-viewer/KeyViewerShell.tsx
+@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
+ import type { AuthSessionAPIKeySummary } from '@/lib/types';
+ import { appPath, logout } from '@/lib/api';
+ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+-import { KEY_VIEWER_PAGE_PATHS, type KeyViewerPage, type KeyViewerPath } from './navigation';
++import { KEY_VIEWER_PAGE_PATHS, READ_ONLY_PAGE_PATHS, type KeyViewerPage, type KeyViewerPath } from './navigation';
+ import styles from './KeyViewerShell.module.scss';
+ import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
+ import { DashboardToolbar } from '@/components/dashboard/DashboardToolbar';
+@@ -19,6 +19,7 @@ const KEY_VIEWER_PAGE_LABEL_KEYS: Record<KeyViewerPage, string> = {
+ interface KeyViewerShellProps {
+   activePage: KeyViewerPage;
+   apiKey?: AuthSessionAPIKeySummary;
++  readOnly?: boolean;
+   loading?: boolean;
+   filters?: ReactNode[];
+   onRefresh: () => void;
+@@ -32,6 +33,7 @@ interface KeyViewerShellProps {
+ export function KeyViewerShell({
+   activePage,
+   apiKey,
++  readOnly = false,
+   loading = false,
+   filters,
+   onRefresh,
+@@ -43,7 +45,7 @@ export function KeyViewerShell({
+ }: KeyViewerShellProps) {
+   const { t } = useTranslation();
+   const [loggingOut, setLoggingOut] = useState(false);
+-  const identityLabel = apiKey?.display_key || t('key_overview.identity_unknown');
++  const identityLabel = readOnly ? t('read_only.title') : apiKey?.display_key || t('key_overview.identity_unknown');
+ 
+   const handleLogout = useCallback(async () => {
+     setLoggingOut(true);
+@@ -73,7 +75,7 @@ export function KeyViewerShell({
+ 
+             <DashboardToolbar
+               activeId={activePage}
+-              items={(Object.keys(KEY_VIEWER_PAGE_PATHS) as KeyViewerPage[]).filter((page) => page !== 'quota' || apiKey?.quota_enabled === true).map((page) => ({ id: page, label: t(KEY_VIEWER_PAGE_LABEL_KEYS[page]), href: appPath(KEY_VIEWER_PAGE_PATHS[page]) }))}
++              items={(Object.keys(KEY_VIEWER_PAGE_PATHS) as KeyViewerPage[]).filter((page) => (!readOnly || page !== 'ranking') && (page !== 'quota' || readOnly || apiKey?.quota_enabled === true)).map((page) => ({ id: page, label: t(KEY_VIEWER_PAGE_LABEL_KEYS[page]), href: appPath(readOnly ? READ_ONLY_PAGE_PATHS[page] : KEY_VIEWER_PAGE_PATHS[page]) }))}
+               onNavigate={(page) => onNavigate(KEY_VIEWER_PAGE_PATHS[page])}
+               filters={filters}
+               onRefresh={onRefresh}
+diff --git a/web/src/features/key-viewer/navigation.ts b/web/src/features/key-viewer/navigation.ts
+index fa46701..51c2c47 100644
+--- a/web/src/features/key-viewer/navigation.ts
++++ b/web/src/features/key-viewer/navigation.ts
+@@ -12,3 +12,11 @@ export const KEY_VIEWER_PAGE_PATHS: Record<KeyViewerPage, KeyViewerPath> = {
+ const KEY_VIEWER_PATHS = new Set<KeyViewerPath>(Object.values(KEY_VIEWER_PAGE_PATHS));
+ 
+ export const isKeyViewerPath = (path: string): path is KeyViewerPath => KEY_VIEWER_PATHS.has(path as KeyViewerPath);
++
++export const READ_ONLY_PAGE_PATHS: Record<KeyViewerPage, string> = {
++  overview: '/read-only', realtime: '/read-only/realtime', analysis: '/read-only/analysis',
++  quota: '/read-only/quota', ranking: '/read-only',
++};
++export function getReadOnlyPage(path: string): KeyViewerPage | undefined {
++  return (['overview', 'realtime', 'analysis', 'quota'] as const).find(page => READ_ONLY_PAGE_PATHS[page] === path);
++}
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
 index a8c1332..53702f3 100644
 --- a/web/src/i18n/index.ts
@@ -674,10 +1133,18 @@ index a8c1332..53702f3 100644
          loading: '載入中...',
          save: '儲存',
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index bf62a55..c78fc8c 100644
+index bf62a55..049bc2f 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
-@@ -242,6 +242,31 @@ export async function login(password: string): Promise<void> {
+@@ -90,6 +90,7 @@ function normalizeOverviewRealtimeBlock(
+ }
+ 
+ export interface FetchKeyOverviewRealtimeOptions {
++  readOnly?: boolean
+   window?: OverviewRealtimeWindow
+   signal?: AbortSignal
+ }
+@@ -242,6 +243,31 @@ export async function login(password: string): Promise<void> {
    await activateEmbedSessionFallback(response)
  }
  
@@ -709,6 +1176,90 @@ index bf62a55..c78fc8c 100644
  export async function loginWithCPAAPIKey(apiKey: string): Promise<void> {
    if (isCPAMCEmbed()) {
      clearEmbedSessionToken()
+@@ -318,27 +344,27 @@ const buildUsageRangeParams = (request: UsageRangeRequest): URLSearchParams => {
+   return params
+ }
+ 
+-export async function fetchKeyOverview(request: UsageRangeRequest, signal?: AbortSignal): Promise<UsageOverviewResponse> {
++export async function fetchKeyOverview(request: UsageRangeRequest, signal?: AbortSignal, readOnly = false): Promise<UsageOverviewResponse> {
+   const params = buildUsageRangeParams(request)
+-  const response = await apiFetch(`${apiPath('/key-overview')}?${params.toString()}`, { signal })
++  const response = await apiFetch(`${apiPath(readOnly ? '/read-only/key-overview' : '/key-overview')}?${params.toString()}`, { signal })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to load key overview: ${response.status}`)
+   }
+   return response.json()
+ }
+ 
+-export async function fetchKeyAnalysis(request: UsageRangeRequest, signal?: AbortSignal): Promise<AnalysisResponse> {
++export async function fetchKeyAnalysis(request: UsageRangeRequest, signal?: AbortSignal, readOnly = false): Promise<AnalysisResponse> {
+   const params = buildUsageRangeParams(request)
+-  const response = await apiFetch(`${apiPath('/key-analysis')}?${params.toString()}`, { signal })
++  const response = await apiFetch(`${apiPath(readOnly ? '/read-only/key-analysis' : '/key-analysis')}?${params.toString()}`, { signal })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to load key analysis: ${response.status}`)
+   }
+   return response.json()
+ }
+ 
+-export async function fetchKeyAnalysisLatency(request: UsageRangeRequest, signal?: AbortSignal): Promise<AnalysisLatencyDiagnostics> {
++export async function fetchKeyAnalysisLatency(request: UsageRangeRequest, signal?: AbortSignal, readOnly = false): Promise<AnalysisLatencyDiagnostics> {
+   const params = buildUsageRangeParams(request)
+-  const response = await apiFetch(`${apiPath('/key-analysis/latency')}?${params.toString()}`, { signal })
++  const response = await apiFetch(`${apiPath(readOnly ? '/read-only/key-analysis/latency' : '/key-analysis/latency')}?${params.toString()}`, { signal })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to load key analysis latency: ${response.status}`)
+   }
+@@ -347,6 +373,7 @@ export async function fetchKeyAnalysisLatency(request: UsageRangeRequest, signal
+ 
+ export interface FetchUsageActivityOptions {
+   request: UsageActivityRequest
++  readOnly?: boolean
+   apiKeyId?: string
+   signal?: AbortSignal
+ }
+@@ -361,9 +388,9 @@ const buildUsageActivityParams = (request: UsageActivityRequest): URLSearchParam
+   return buildUsageRangeParams(request)
+ }
+ 
+-export async function fetchKeyActivity({ request, signal }: FetchUsageActivityOptions): Promise<UsageActivityResponse> {
++export async function fetchKeyActivity({ request, signal, readOnly = false }: FetchUsageActivityOptions): Promise<UsageActivityResponse> {
+   const params = buildUsageActivityParams(request)
+-  const response = await apiFetch(`${apiPath('/key-activity')}?${params.toString()}`, { signal })
++  const response = await apiFetch(`${apiPath(readOnly ? '/read-only/key-activity' : '/key-activity')}?${params.toString()}`, { signal })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to load key activity: ${response.status}`)
+   }
+@@ -371,13 +398,13 @@ export async function fetchKeyActivity({ request, signal }: FetchUsageActivityOp
+ }
+ 
+ export async function fetchKeyOverviewRealtime(options: FetchKeyOverviewRealtimeOptions = {}): Promise<OverviewRealtimeBlock> {
+-  const { window, signal } = options
++  const { window, signal, readOnly = false } = options
+   const params = new URLSearchParams()
+   if (window) {
+     params.set('window', window)
+   }
+   const query = params.toString()
+-  const response = await apiFetch(`${apiPath('/key-overview/realtime')}${query ? `?${query}` : ''}`, { signal })
++  const response = await apiFetch(`${apiPath(readOnly ? '/read-only/key-overview/realtime' : '/key-overview/realtime')}${query ? `?${query}` : ''}`, { signal })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to load key overview realtime: ${response.status}`)
+   }
+@@ -401,11 +428,11 @@ export async function fetchUsageOverview(request: UsageRangeRequest, signal?: Ab
+   return response.json()
+ }
+ 
+-export async function fetchUsageOverviewComparisons(request: UsageRangeRequest, options: { signal?: AbortSignal; apiKeyId?: string; keyViewer?: boolean } = {}): Promise<UsageOverviewComparisons> {
++export async function fetchUsageOverviewComparisons(request: UsageRangeRequest, options: { signal?: AbortSignal; apiKeyId?: string; keyViewer?: boolean; readOnly?: boolean } = {}): Promise<UsageOverviewComparisons> {
+   const params = buildUsageRangeParams(request)
+   const selectedAPIKeyId = options.apiKeyId?.trim()
+   if (selectedAPIKeyId) params.set('api_key_id', selectedAPIKeyId)
+-  const path = options.keyViewer ? '/key-overview/comparisons' : '/usage/overview/comparisons'
++  const path = options.readOnly ? '/read-only/key-overview/comparisons' : options.keyViewer ? '/key-overview/comparisons' : '/usage/overview/comparisons'
+   const query = params.toString()
+   const response = await apiFetch(`${apiPath(path)}${query ? `?${query}` : ''}`, { signal: options.signal })
+   if (!response.ok) {
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
 index 3bfbfbb..df89499 100644
 --- a/web/src/lib/types.ts
@@ -733,11 +1284,214 @@ index 3bfbfbb..df89499 100644
  export type AuthManagedSessionSource = 'standard' | 'embed'
  
  export interface AuthManagedSessionItem {
+diff --git a/web/src/pages/KeyAnalysisPage.tsx b/web/src/pages/KeyAnalysisPage.tsx
+index 1f0c3ca..39789b1 100644
+--- a/web/src/pages/KeyAnalysisPage.tsx
++++ b/web/src/pages/KeyAnalysisPage.tsx
+@@ -22,11 +22,12 @@ const loadTimeRange = (): StoredUsageRangeState => {
+ 
+ export interface KeyAnalysisPageProps {
+   apiKey?: AuthSessionAPIKeySummary;
++  readOnly?: boolean;
+   onNavigate: (path: KeyViewerPath) => void;
+   onAuthRequired?: () => void;
+ }
+ 
+-export function KeyAnalysisPage({ apiKey, onNavigate, onAuthRequired }: KeyAnalysisPageProps) {
++export function KeyAnalysisPage({ apiKey, readOnly = false, onNavigate, onAuthRequired }: KeyAnalysisPageProps) {
+   const { t } = useTranslation();
+   const isMobile = useMediaQuery('(max-width: 768px)');
+   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
+@@ -88,7 +89,7 @@ export function KeyAnalysisPage({ apiKey, onNavigate, onAuthRequired }: KeyAnaly
+     setLatency(null);
+ 
+     // 主 Analysis 与 Latency 同时加载，但分别更新状态，避免一个慢请求阻塞另一块内容。
+-    const coreRequest = fetchKeyAnalysis(usageRangeQuery, controller.signal).then((response) => {
++    const coreRequest = fetchKeyAnalysis(usageRangeQuery, controller.signal, readOnly).then((response) => {
+       if (requestControllerRef.current !== controller) return;
+       // 项目时区只作为后续 409 恢复依据，不参与当前请求 callback 身份，避免响应触发重复加载。
+       analysisTimeZoneRef.current = response.timezone;
+@@ -104,7 +105,7 @@ export function KeyAnalysisPage({ apiKey, onNavigate, onAuthRequired }: KeyAnaly
+       }
+       setAnalysisError('KEY_ANALYSIS_LOAD_FAILED');
+     });
+-    const latencyRequest = fetchKeyAnalysisLatency(usageRangeQuery, controller.signal).then((response) => {
++    const latencyRequest = fetchKeyAnalysisLatency(usageRangeQuery, controller.signal, readOnly).then((response) => {
+       if (requestControllerRef.current !== controller) return;
+       setLatency(response);
+       setLatencyLoading(false);
+@@ -122,7 +123,7 @@ export function KeyAnalysisPage({ apiKey, onNavigate, onAuthRequired }: KeyAnaly
+     if (requestControllerRef.current === controller) {
+       requestControllerRef.current = null;
+     }
+-  }, [onAuthRequired, recoverRangeBoundsConflict, usageRangeQuery]);
++  }, [onAuthRequired, readOnly, recoverRangeBoundsConflict, usageRangeQuery]);
+ 
+   useEffect(() => {
+     void loadAnalysis();
+@@ -153,6 +154,7 @@ export function KeyAnalysisPage({ apiKey, onNavigate, onAuthRequired }: KeyAnaly
+     <KeyViewerShell
+       activePage="analysis"
+       apiKey={apiKey}
++      readOnly={readOnly}
+       loading={analysisLoading && !analysis}
+       filters={[<TimeRangeControl key="range" value={timeRange} customRange={customRange} timeZone={rangeTimeZone} onChange={handleTimeRangeChange} ariaLabel={t('usage_stats.range_filter')} labelInsideTrigger />]}
+       onRefresh={() => void handleManualRefresh()}
+@@ -176,7 +178,7 @@ export function KeyAnalysisPage({ apiKey, onNavigate, onAuthRequired }: KeyAnaly
+         latencyError={displayLatencyError}
+         isDark={isDark}
+         isMobile={isMobile}
+-        compositionDimensions={['model']}
++        compositionDimensions={readOnly ? ['api_key', 'model', 'auth_files', 'ai_provider'] : ['model']}
+       />
+     </KeyViewerShell>
+   );
+diff --git a/web/src/pages/KeyOverviewPage.tsx b/web/src/pages/KeyOverviewPage.tsx
+index 56b6ad1..1684596 100644
+--- a/web/src/pages/KeyOverviewPage.tsx
++++ b/web/src/pages/KeyOverviewPage.tsx
+@@ -133,11 +133,12 @@ export const scheduleKeyOverviewAutoRefresh = ({
+ export interface KeyOverviewPageProps {
+   page?: 'overview' | 'realtime';
+   apiKey?: AuthSessionAPIKeySummary;
++  readOnly?: boolean;
+   onNavigate: (path: KeyViewerPath) => void;
+   onAuthRequired?: () => void;
+ }
+ 
+-export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthRequired }: KeyOverviewPageProps) {
++export function KeyOverviewPage({ page = 'overview', apiKey, readOnly = false, onNavigate, onAuthRequired }: KeyOverviewPageProps) {
+   const { t } = useTranslation();
+   const isMobile = useMediaQuery('(max-width: 768px)');
+   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
+@@ -175,7 +176,7 @@ export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthR
+     requestIdentity: activityRequestIdentity,
+     loadActivity,
+   } = useUsageActivityData({
+-    viewer: 'key',
++    viewer: readOnly ? 'read_only' : 'key',
+     request: activityRangeRequest,
+     enabled: page === 'overview' && usageRangeQuery.valid,
+     onAuthRequired,
+@@ -205,7 +206,8 @@ export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthR
+     onAuthRequired,
+     onRangeBoundsConflict: recoverRangeBoundsConflict,
+     enabled: page === 'overview' && usageRangeQuery.valid,
+-    keyViewer: true,
++    keyViewer: !readOnly,
++    readOnly,
+     range: timeRange,
+     customUnit: customRange?.unit,
+     customStart: customRange?.start,
+@@ -234,7 +236,7 @@ export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthR
+     setLoading(true);
+     setError('');
+     try {
+-      const overview = await fetchKeyOverview(usageRangeQuery, controller.signal);
++      const overview = await fetchKeyOverview(usageRangeQuery, controller.signal, readOnly);
+       if (overviewRequestControllerRef.current !== controller) return;
+       setUsage(overview as UsageOverviewResponse as UsageOverviewPayload);
+       setLoadedUsageRange(usageRangeQueryKey);
+@@ -252,7 +254,7 @@ export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthR
+         overviewRequestControllerRef.current = null;
+       }
+     }
+-  }, [onAuthRequired, recoverRangeBoundsConflict, usageRangeQuery, usageRangeQueryKey]);
++  }, [onAuthRequired, readOnly, recoverRangeBoundsConflict, usageRangeQuery, usageRangeQueryKey]);
+ 
+   const loadRealtime = useCallback(async (options: KeyOverviewLoadOptions = {}) => {
+     const { controller, skipped } = startKeyOverviewRequest({
+@@ -266,6 +268,7 @@ export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthR
+     try {
+       const nextRealtime = await fetchKeyOverviewRealtime({
+         window: realtimeWindow,
++        readOnly,
+         signal: controller.signal,
+       });
+       if (realtimeRequestControllerRef.current !== controller) return;
+@@ -283,7 +286,7 @@ export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthR
+         realtimeRequestControllerRef.current = null;
+       }
+     }
+-  }, [onAuthRequired, realtimeWindow]);
++  }, [onAuthRequired, readOnly, realtimeWindow]);
+ 
+   useEffect(() => {
+     if (page !== 'overview') return;
+@@ -378,6 +381,7 @@ export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthR
+     <KeyViewerShell
+       activePage={page}
+       apiKey={apiKey}
++      readOnly={readOnly}
+       loading={page === 'overview' && loading && !usage}
+       filters={page === 'overview' ? [<TimeRangeControl key="range" value={timeRange} customRange={customRange} timeZone={rangeTimeZone} onChange={handleTimeRangeChange} ariaLabel={t('usage_stats.range_filter')} labelInsideTrigger />] : []}
+       onRefresh={() => void handleManualRefresh()}
+@@ -414,7 +418,7 @@ export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthR
+         onWindowChange={setActivityWindow}
+       />
+ 
+-      <UsageComparisonCharts isDark={resolvedTheme === 'dark'} isMobile={isMobile} comparisons={overviewComparisons ?? undefined} loading={comparisonsLoading} keyViewer />
++      <UsageComparisonCharts isDark={resolvedTheme === 'dark'} isMobile={isMobile} comparisons={overviewComparisons ?? undefined} loading={comparisonsLoading} keyViewer={!readOnly} />
+       </>}
+ 
+       {page === 'realtime' && <OverviewRealtimePanel
+@@ -426,7 +430,7 @@ export function KeyOverviewPage({ page = 'overview', apiKey, onNavigate, onAuthR
+         isDark={isDark}
+         isMobile={isMobile}
+         timezone={realtime?.timezone ?? usage?.timezone}
+-        visibleDimensions={KEY_OVERVIEW_REALTIME_VISIBLE_DIMENSIONS}
++        visibleDimensions={readOnly ? ['models', 'api_keys', 'auth_files', 'ai_providers'] : KEY_OVERVIEW_REALTIME_VISIBLE_DIMENSIONS}
+       />}
+     </KeyViewerShell>
+   );
 diff --git a/web/src/pages/KeyQuotaPage.tsx b/web/src/pages/KeyQuotaPage.tsx
-index 6f8cf57..37265ee 100644
+index 6f8cf57..ae67192 100644
 --- a/web/src/pages/KeyQuotaPage.tsx
 +++ b/web/src/pages/KeyQuotaPage.tsx
-@@ -43,7 +43,13 @@ export function KeyQuotaPage({apiKey, onNavigate, onAuthRequired}: {
+@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
+ import { KeyViewerShell } from '@/features/key-viewer/KeyViewerShell';
+ import type { KeyViewerPath } from '@/features/key-viewer/navigation';
+ import type { AuthSessionAPIKeySummary } from '@/lib/types';
+-import { ApiError, fetchKeyQuota, type ViewerQuotaAccount, type ViewerQuotaRow } from '@/lib/api';
++import { ApiError, fetchKeyQuota, fetchReadOnlyQuota, type ViewerQuotaAccount, type ViewerQuotaRow } from '@/lib/api';
+ import { Card } from '@/components/ui/Card';
+ import styles from './KeyQuotaPage.module.scss';
+ 
+@@ -13,8 +13,8 @@ export function quotaRemaining(row: ViewerQuotaRow): string {
+   return '—';
+ }
+ 
+-export function KeyQuotaPage({apiKey, onNavigate, onAuthRequired}: {
+-  apiKey?: AuthSessionAPIKeySummary; onNavigate: (path: KeyViewerPath) => void; onAuthRequired?: () => void;
++export function KeyQuotaPage({apiKey, readOnly = false, onNavigate, onAuthRequired}: {
++  apiKey?: AuthSessionAPIKeySummary; readOnly?: boolean; onNavigate: (path: KeyViewerPath) => void; onAuthRequired?: () => void;
+ }) {
+   const {t} = useTranslation();
+   const [accounts, setAccounts] = useState<ViewerQuotaAccount[]>([]);
+@@ -23,7 +23,7 @@ export function KeyQuotaPage({apiKey, onNavigate, onAuthRequired}: {
+   const refresh = useCallback(async (signal?: AbortSignal) => {
+     setLoading(true);
+     try {
+-      const data = await fetchKeyQuota(signal);
++      const data = await (readOnly ? fetchReadOnlyQuota(signal) : fetchKeyQuota(signal));
+       if (!signal?.aborted) { setAccounts(data.accounts); setError(false); }
+     } catch (err) {
+       if (!signal?.aborted) {
+@@ -31,19 +31,25 @@ export function KeyQuotaPage({apiKey, onNavigate, onAuthRequired}: {
+         setError(true);
+       }
+     } finally { if (!signal?.aborted) setLoading(false); }
+-  }, [onAuthRequired]);
++  }, [onAuthRequired, readOnly]);
+   useEffect(() => {
+     const controller = new AbortController();
+     void refresh(controller.signal);
+     const timer = window.setInterval(() => void refresh(controller.signal), 60000);
+     return () => { controller.abort(); window.clearInterval(timer); };
+   }, [refresh]);
+-  return <KeyViewerShell activePage="quota" apiKey={apiKey} onNavigate={onNavigate} onAuthRequired={onAuthRequired}
++  return <KeyViewerShell activePage="quota" apiKey={apiKey} readOnly={readOnly} onNavigate={onNavigate} onAuthRequired={onAuthRequired}
+     onRefresh={() => void refresh()} refreshing={loading} refreshDisabled={loading}>
      <p>{t('key_quota.shared')}</p>
      {error && <p role="alert">{t('key_quota.error')}</p>}
      {!loading && !error && accounts.length === 0 && <p>{t('key_quota.empty')}</p>}
@@ -847,102 +1601,31 @@ index 1fd3365..dce5f8d 100644
              </Button>
            </form>
          </Card>
-diff --git a/web/src/pages/ReadOnlyPage.module.scss b/web/src/pages/ReadOnlyPage.module.scss
-new file mode 100644
-index 0000000..0753021
---- /dev/null
-+++ b/web/src/pages/ReadOnlyPage.module.scss
-@@ -0,0 +1,15 @@
-+.page {width:100%; max-width:1440px; margin:0 auto;}
-+.content {padding:24px; display:grid; gap:20px;}
-+.toolbar {display:flex; flex-wrap:wrap; align-items:center; gap:16px;}
-+.toolbar > div {flex:1; min-width:240px;}
-+.toolbar h1 {margin:0;}
-+.toolbar select {padding:8px; border-radius:8px; background:var(--bg-primary); color:inherit; border:1px solid var(--border-color,#8884);}
-+.stats {display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;}
-+.stats strong {font-size:1.8rem;}
-+.table {overflow:auto;}
-+.table table {width:100%;border-collapse:collapse;}
-+.table th,.table td {padding:12px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--border-color,#8884);}
-+.trend {display:flex;align-items:flex-end;height:140px;gap:2px;}
-+.trend > div {flex:1;min-width:1px;background:#22a58a;border-radius:3px 3px 0 0;}
-+.period {font-size:.85rem;opacity:.7;}
-+@media(max-width:600px) {.content {padding:12px;}.toolbar {align-items:stretch;}.toolbar label {width:100%;}}
 diff --git a/web/src/pages/ReadOnlyPage.tsx b/web/src/pages/ReadOnlyPage.tsx
 new file mode 100644
-index 0000000..7174311
+index 0000000..b27dcba
 --- /dev/null
 +++ b/web/src/pages/ReadOnlyPage.tsx
-@@ -0,0 +1,70 @@
-+import {useCallback, useEffect, useState} from 'react';
-+import {useTranslation} from 'react-i18next';
-+import {DashboardHeader} from '@/components/dashboard/DashboardHeader';
-+import {Button} from '@/components/ui/Button';
-+import {Card} from '@/components/ui/Card';
-+import {ApiError, fetchReadOnlyOverview, fetchReadOnlyQuota, logout, type ReadOnlyOverview, type ViewerQuotaAccount} from '@/lib/api';
-+import {QuotaAccounts} from './KeyQuotaPage';
-+import styles from './ReadOnlyPage.module.scss';
+@@ -0,0 +1,20 @@
++import {useState} from 'react';
++import {appPath} from '@/lib/api';
++import {stripAppBasePath} from '@/lib/usageNavigation';
++import {getReadOnlyPage, KEY_VIEWER_PAGE_PATHS, READ_ONLY_PAGE_PATHS, type KeyViewerPath, type KeyViewerPage} from '@/features/key-viewer/navigation';
++import {KeyOverviewPage} from './KeyOverviewPage';
++import {KeyAnalysisPage} from './KeyAnalysisPage';
++import {KeyQuotaPage} from './KeyQuotaPage';
 +
 +export function ReadOnlyPage({onAuthRequired}: {onAuthRequired: () => void}) {
-+  const {t} = useTranslation();
-+  const [range,setRange] = useState('7d');
-+  const [data,setData] = useState<ReadOnlyOverview>();
-+  const [accounts,setAccounts] = useState<ViewerQuotaAccount[]>([]);
-+  const [loading,setLoading] = useState(true);
-+  const [usageError,setUsageError] = useState(false);
-+  const [quotaError,setQuotaError] = useState(false);
-+  const refresh = useCallback(async (signal?: AbortSignal) => {
-+    setLoading(true);
-+    const [usage,quota] = await Promise.allSettled([fetchReadOnlyOverview(range,signal),fetchReadOnlyQuota(signal)]);
-+    if (signal?.aborted) return;
-+    for (const result of [usage,quota]) {
-+      if (result.status === 'rejected' && result.reason instanceof ApiError && result.reason.status === 401) {onAuthRequired(); return;}
-+    }
-+    if (usage.status === 'fulfilled') {setData(usage.value);setUsageError(false);} else {setData(undefined);setUsageError(true);}
-+    if (quota.status === 'fulfilled') {setAccounts(quota.value.accounts);setQuotaError(false);} else {setAccounts([]);setQuotaError(true);}
-+    setLoading(false);
-+  },[range,onAuthRequired]);
-+  useEffect(() => {
-+    const controller = new AbortController();
-+    void refresh(controller.signal);
-+    const timer = window.setInterval(() => void refresh(controller.signal),60000);
-+    return () => {controller.abort();window.clearInterval(timer);};
-+  },[refresh]);
-+  const amount = (value: number) => value.toLocaleString();
-+  const cost = (value: number | null | undefined) => value == null ? '—' : value.toLocaleString(undefined,{style:'currency',currency:'USD'});
-+  const stats = data?.overview;
-+  const buckets = stats?.series?.buckets ?? [];
-+  const requests = stats?.series?.requests ?? [];
-+  const maximum = Math.max(1,...requests);
-+  return <div className={styles.page} data-keeper-page="read-only">
-+    <DashboardHeader identity={t('read_only.title')} onLogout={() => void logout().finally(onAuthRequired)} />
-+    <main className={styles.content}>
-+      <div className={styles.toolbar}>
-+        <div><h1>{t('read_only.title')}</h1><p>{t('read_only.scope')}</p></div>
-+        <label>{t('read_only.range')} <select aria-label={t('read_only.range')} value={range} onChange={(event) => {setData(undefined);setRange(event.target.value);}}>
-+          <option value="24h">{t('read_only.hours')}</option><option value="7d">{t('read_only.week')}</option><option value="30d">{t('read_only.month')}</option>
-+        </select></label>
-+        <Button loading={loading} disabled={loading} onClick={() => void refresh()}>{t('usage_stats.refresh')}</Button>
-+      </div>
-+      {usageError && <p role="alert">{t('read_only.error')}</p>}
-+      {stats && <>
-+        <div className={styles.stats}>
-+          {[['requests',amount(stats.usage.total_requests)],['tokens',amount(stats.usage.total_tokens)],['failures',amount(stats.usage.failure_count)],['cost',cost(stats.summary?.cost_available ? stats.summary.total_cost : null)]].map(([label,value]) => <Card key={label}><p>{t(`read_only.${label}`)}</p><strong>{value}</strong></Card>)}
-+        </div>
-+        <Card><h2>{t('read_only.trend')}</h2><div className={styles.trend} role="img" aria-label={t('read_only.trend')}>
-+          {buckets.map((bucket,index) => <div key={bucket} title={`${new Date(bucket).toLocaleString()}: ${amount(requests[index] ?? 0)}`} style={{height:`${Math.max(1,(requests[index] ?? 0)/maximum*100)}%`}} />)}
-+        </div><p className={styles.period}>{buckets.length > 0 && `${new Date(buckets[0]).toLocaleString()} — ${new Date(buckets[buckets.length-1]).toLocaleString()}`}</p></Card>
-+        <Card><h2>{t('read_only.keys')}</h2><div className={styles.table}><table>
-+          <thead><tr>{['keys','requests','failures','tokens','cost'].map((label) => <th key={label}>{t(`read_only.${label}`)}</th>)}</tr></thead>
-+          <tbody>{data?.keys.map((key) => <tr key={key.label}><th scope="row">{key.label}</th><td>{amount(key.requests)}</td><td>{amount(key.failures)}</td><td>{amount(key.total_tokens)}</td><td>{cost(key.cost)}</td></tr>)}</tbody>
-+        </table></div>{data?.keys.length === 0 && <p>{t('read_only.empty')}</p>}</Card>
-+      </>}
-+      <h2>{t('key_quota.tab')}</h2><p>{t('key_quota.shared')}</p>
-+      {quotaError && <p role="alert">{t('key_quota.error')}</p>}
-+      {!loading && !quotaError && accounts.length === 0 && <p>{t('key_quota.empty')}</p>}
-+      <QuotaAccounts accounts={accounts}/>
-+    </main>
-+  </div>;
++  const [page,setPage]=useState<KeyViewerPage>(()=>getReadOnlyPage(stripAppBasePath(window.location.pathname,window.__APP_BASE_PATH__) ?? '/') ?? 'overview');
++  const navigate=(path: KeyViewerPath)=>{
++    const next=(Object.keys(KEY_VIEWER_PAGE_PATHS) as KeyViewerPage[]).find(item=>KEY_VIEWER_PAGE_PATHS[item]===path);
++    if (!next || next==='ranking') return;
++    window.history.replaceState(null,'',appPath(READ_ONLY_PAGE_PATHS[next]));setPage(next);
++  };
++  const shared={readOnly:true,onNavigate:navigate,onAuthRequired};
++  if(page==='analysis') return <KeyAnalysisPage {...shared}/>;
++  if(page==='quota') return <KeyQuotaPage {...shared}/>;
++  return <KeyOverviewPage {...shared} page={page==='realtime'?'realtime':'overview'}/>;
 +}
 diff --git a/web/src/pages/test/KeyQuotaPage.test.tsx b/web/src/pages/test/KeyQuotaPage.test.tsx
 index a124f06..90d8393 100644
@@ -989,31 +1672,43 @@ index 0000000..cd37c45
 +});
 diff --git a/web/src/pages/test/ReadOnlyPage.test.tsx b/web/src/pages/test/ReadOnlyPage.test.tsx
 new file mode 100644
-index 0000000..a8c7666
+index 0000000..132330b
 --- /dev/null
 +++ b/web/src/pages/test/ReadOnlyPage.test.tsx
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,36 @@
 +// @vitest-environment happy-dom
 +import React,{act} from 'react';
 +import {createRoot} from 'react-dom/client';
 +import {expect,it,vi} from 'vitest';
 +import i18n from '@/i18n';
-+const api = vi.hoisted(() => ({fetchReadOnlyOverview:vi.fn(),fetchReadOnlyQuota:vi.fn()}));
-+vi.mock('@/lib/api',async (original) => ({...await original<typeof import('@/lib/api')>(),...api}));
++const api=vi.hoisted(()=>({fetchKeyOverview:vi.fn(),fetchKeyActivity:vi.fn(),fetchUsageOverviewComparisons:vi.fn(),fetchReadOnlyQuota:vi.fn()}));
++vi.mock('@/lib/api',async(original)=>({...await original<typeof import('@/lib/api')>(),...api}));
++vi.mock('react-chartjs-2',()=>({Line:()=>React.createElement('canvas'),Bar:()=>React.createElement('canvas'),Doughnut:()=>React.createElement('canvas'),Scatter:()=>React.createElement('canvas')}));
 +import {ReadOnlyPage} from '../ReadOnlyPage';
 +import {getRoleTargetPath} from '@/App';
-+
-+it('renders all-key totals and shared quota with only read controls',async () => {
-+  globalThis.IS_REACT_ACT_ENVIRONMENT=true;await i18n.changeLanguage('en');
-+  api.fetchReadOnlyOverview.mockResolvedValue({overview:{usage:{total_requests:7,total_tokens:700,failure_count:1},summary:{cost_available:true,total_cost:0},series:{buckets:[],requests:[]}},keys:[{label:'Client key 1',requests:2,failures:0,total_tokens:200,cost:null},{label:'Client key 2',requests:5,failures:1,total_tokens:500,cost:0}]});
-+  api.fetchReadOnlyQuota.mockResolvedValue({accounts:[{label:'Codex account 1',status:'available',rows:[{label:'Weekly',remaining_percent:96}]}]});
-+  const element=document.createElement('div');document.body.append(element);const root=createRoot(element);
-+  try {
-+    await act(async () => root.render(<ReadOnlyPage onAuthRequired={() => undefined}/>));
-+    for(const value of ['Client key 1','Client key 2','96%','Read-only overview','Estimated API cost']) expect(element.textContent).toContain(value);
-+    expect(element.textContent).not.toMatch(/Reset quota|Settings|Edit credential|Delete/);
-+    expect(api.fetchReadOnlyOverview).toHaveBeenCalledWith('7d',expect.any(AbortSignal));
-+    expect(getRoleTargetPath('read_only','/auth-files')).toBe('/read-only');
-+    expect(getRoleTargetPath('api_key_viewer','/read-only')).toBe('/key-overview');
-+  } finally {await act(async () => root.unmount());element.remove();}
++it('uses the native key dashboard with all-key requests and account usage dimensions',async()=>{
++ globalThis.IS_REACT_ACT_ENVIRONMENT=true;await i18n.changeLanguage('en');
++ window.history.replaceState(null,'','/read-only');
++ localStorage.setItem('keeper-dashboard-toolbar-collapsed','false');
++ api.fetchKeyOverview.mockResolvedValue({usage:{total_requests:7,total_tokens:700,success_count:6,failure_count:1},summary:{cost_available:true,total_cost:0},series:{buckets:[],requests:[],tokens:[],rpm:[],tpm:[],cost:[],cache_read_rate:[]},timezone:'UTC'});
++ api.fetchKeyActivity.mockResolvedValue({blocks:[],timezone:'UTC',rows:0,columns:0});
++ const row={key:'account:opaque',label:'Codex account 1',requests:7,failures:1,total_tokens:700,input_tokens:700,output_tokens:0,cache_read_tokens:0,cache_creation_tokens:0,reasoning_tokens:0,cost:0,token_series:[]};
++ api.fetchUsageOverviewComparisons.mockResolvedValue({buckets:[],granularity:'hourly',timezone:'UTC',models:[],api_keys:[{...row,key:'1',label:'Client key 1'}],auth_files:[row],ai_providers:[]});
++ api.fetchReadOnlyQuota.mockResolvedValue({accounts:[{label:'Codex account 1',status:'available',rows:[{label:'Weekly',remaining_percent:96}]}]});
++ const element=document.createElement('div');document.body.append(element);const root=createRoot(element);
++ try {
++  await act(async()=>root.render(<ReadOnlyPage onAuthRequired={()=>undefined}/>));
++  expect(element.querySelector('[data-keeper-page="key-viewer"]')).not.toBeNull();
++  expect(api.fetchKeyOverview).toHaveBeenCalledWith(expect.anything(),expect.any(AbortSignal),true);
++  expect(api.fetchKeyActivity).toHaveBeenCalledWith(expect.objectContaining({readOnly:true}));
++  expect(api.fetchUsageOverviewComparisons).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({readOnly:true}));
++  const account=element.querySelector<HTMLButtonElement>('[data-dimension="auth_files"]');expect(account).not.toBeNull();
++  await act(async()=>account!.click());expect(element.textContent).toContain('Codex account 1');
++  const quota=element.querySelector<HTMLAnchorElement>('a[href="/read-only/quota"]');expect(quota).not.toBeNull();
++  await act(async()=>quota!.click());expect(element.textContent).toContain('96%');
++  expect(element.textContent).not.toMatch(/Reset quota|Edit credential|Delete/);
++  expect(getRoleTargetPath('read_only','/auth-files')).toBe('/read-only');
++  expect(getRoleTargetPath('read_only','/read-only/analysis')).toBe('/read-only/analysis');
++  expect(getRoleTargetPath('api_key_viewer','/read-only/analysis')).toBe('/key-overview');
++ }finally{await act(async()=>root.unmount());element.remove();localStorage.clear();}
 +});

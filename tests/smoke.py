@@ -187,6 +187,20 @@ def main():
                 assert request(viewer_gateway + viewer_path + '/api/v1' + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={} if method != 'GET' else None, method=method, opener=read_only_opener)[0] == 404
             for method in ('POST', 'PATCH', 'PUT', 'DELETE'):
                 assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={}, method=method, opener=read_only_opener)[0] == 404
+            for report in ('key-overview', 'key-overview/comparisons', 'key-overview/realtime', 'key-activity', 'key-analysis', 'key-analysis/latency'):
+                report_url = viewer_gateway + viewer_path + '/api/v1/read-only/' + report + '?range=today'
+                report_status, report_body = request(report_url, opener=read_only_opener)
+                assert report_status == 200, (report, report_status)
+                report_data = json.loads(report_body)
+                assert isinstance(report_data, dict)
+                for secret in (key, management, password, read_only_password, 'fake-upstream-test-key', 'auth_index', 'base_url'):
+                    assert secret not in report_body.decode()
+                assert request(report_url)[0] == 401
+                assert request(report_url, opener=viewer_opener)[0] == 403
+                assert request(report_url, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={}, opener=read_only_opener)[0] == 404
+            for page in ('read-only', 'read-only/realtime', 'read-only/analysis', 'read-only/quota'):
+                assert request(viewer_gateway + viewer_path + '/' + page)[0] == 200
+            print('PASS: native all-key dashboard APIs/pages, account data filtering and role/write isolation', flush=True)
             print('PASS: read-only all-key reports, secret filtering, client-key separation and server/gateway write denial', flush=True)
             # Exercise the same persisted client-key setting as the management UI.
             management_auth = {'Authorization': 'Bearer ' + management}

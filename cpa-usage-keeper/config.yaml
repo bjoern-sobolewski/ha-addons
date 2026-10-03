@@ -1,5 +1,5 @@
 name: CPA Usage Keeper
-version: "0.1.4"
+version: "0.1.5"
 slug: cpa_usage_keeper
 description: Persistent usage, cost and quota dashboard for CLIProxyAPI
 url: https://github.com/bjoern-sobolewski/ha-addons/tree/main/cpa-usage-keeper

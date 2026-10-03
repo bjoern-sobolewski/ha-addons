@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5
+
+- Use the existing key dashboard layout for all-key read-only access: Overview, Realtime, Analysis and Provider quota.
+- Include usage comparisons and analysis across client keys, OAuth accounts and API provider accounts, with generic labels.
+- Retain server-enforced admin/write denial and individual key-viewer scope.
+
 ## 0.1.4
 
 - Clarify that overview login requires the separate read-only password.

@@ -52,12 +52,26 @@ missing observations do not erase existing windows. Late or equal observations
 cannot replace newer windows. Manual and scheduled provider queries remain
 available for idle accounts and providers without supported traffic metadata.
 
-Auth Files and Quota Management use the original pinned upstream interface.
+Auth Files and Quota Management retain the original provider quota interface.
 Provider queries supply plan, renewal, credit balance, manual-reset expiry and
 native quota windows where supported; Reset quota retains the original
 confirmation and eligibility checks. Traffic observations do not replace these
 management cards or add primary/secondary cache rows. Shared client-key names
 and management session diagnostics remain available.
+
+Use Refresh account data inside the account panel to reload provider account
+details. It is separate from Reset quota, which retains its confirmation and
+credit checks. Refresh credentials in the card footer renews OAuth credentials;
+it does not reload quota or mark account data as fresh. Failed account queries
+keep the last successful snapshot and capture time visible with an error.
+
+Auth Files adds a small refresh icon and compact age beside quota percentages.
+Hover, focus or tap it for the provider observation timestamp and source.
+The timestamp is captured when the quota response arrives; cache reads and
+optional metadata enrichment do not refresh it. The indicator makes no provider
+requests and does not reset quota. Dates use the viewer browser’s time zone and
+regional formatting, including its 12/24-hour preference. Observations older
+than fifteen minutes have a muted warning color.
 
 Keeper reporting reads cached traffic observations without provider queries.
 Traffic caches are in memory and can be unavailable after restart until traffic

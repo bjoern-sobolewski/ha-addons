@@ -1,5 +1,5 @@
 name: CPA Usage Keeper
-version: "0.1.2"
+version: "0.1.3"
 slug: cpa_usage_keeper
 description: Persistent usage, cost and quota dashboard for CLIProxyAPI
 url: https://github.com/bjoern-sobolewski/ha-addons/tree/main/cpa-usage-keeper
@@ -25,6 +25,7 @@ options:
   cpa_base_url: ""
   management_key: ""
   login_password: ""
+  read_only_password: ""
   timezone: Europe/Berlin
   log_retention_days: 7
   backup_retention_days: 7
@@ -36,6 +37,7 @@ schema:
   cpa_base_url: str
   management_key: password
   login_password: password
+  read_only_password: password
   timezone: str
   log_retention_days: int(1,90)
   backup_retention_days: int(1,90)

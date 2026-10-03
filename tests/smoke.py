@@ -49,7 +49,7 @@ def main():
     network = prefix + '-net'
     names = {key: prefix + '-' + key for key in ('mock', 'cpa', 'keeper')}
     volumes = [prefix + '-cpa-data', prefix + '-keeper-data']
-    key, management, password, rotated_key = (secrets.token_urlsafe(32) for _ in range(4))
+    key, management, password, rotated_key, read_only_password = (secrets.token_urlsafe(32) for _ in range(5))
     with tempfile.TemporaryDirectory() as temporary:
         temp = Path(temporary)
         provider_dir = temp / 'config'
@@ -107,7 +107,7 @@ def main():
             assert request(keeper + '/api/v1/key-quota', opener=opener)[0] == 404
             # Enable explicitly and preserve the same database across restart.
             viewer_path = "/viewer-" + secrets.token_hex(12)
-            (temp / 'keeper.json').write_text(json.dumps({'cpa_base_url': 'http://cpa:8317', 'management_key': management, 'login_password': password, 'viewer_base_path': viewer_path, 'viewer_quota_enabled': True, 'viewer_dashboard_enabled': True, 'viewer_api_gateway_enabled': True}))
+            (temp / 'keeper.json').write_text(json.dumps({'cpa_base_url': 'http://cpa:8317', 'management_key': management, 'login_password': password, 'read_only_password': read_only_password, 'viewer_base_path': viewer_path, 'viewer_quota_enabled': True, 'viewer_dashboard_enabled': True, 'viewer_api_gateway_enabled': True}))
             docker('cp', str(temp / 'keeper.json'), names['keeper'] + ':/data/options.json')
             docker('restart', names['keeper'])
             keeper = endpoint(names['keeper'], 8080)
@@ -166,6 +166,28 @@ def main():
                 assert secret.encode() not in quota_body
             assert request(keeper + '/api/v1/usage/overview', opener=viewer_opener)[0] == 401  # cookie confined to viewer_path
             print('PASS: disabled defaults, viewer login, quota serialization and public gateway method/path isolation', flush=True)
+            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=viewer_opener)[0] == 403
+            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview')[0] == 401
+            read_only_cookies = http.cookiejar.CookieJar()
+            read_only_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(read_only_cookies))
+            assert request(viewer_gateway + viewer_path + '/api/v1/auth/read-only-login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'password': password}, opener=read_only_opener)[0] == 401
+            assert request(viewer_gateway + viewer_path + '/api/v1/auth/read-only-login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'password': read_only_password}, opener=read_only_opener)[0] == 204
+            assert all(cookie.path == f'{viewer_path}/' for cookie in read_only_cookies)
+            readonly_status, readonly_body = request(viewer_gateway + viewer_path + '/api/v1/read-only/overview?range=7d&api_key_id=999', opener=read_only_opener)
+            assert readonly_status == 200 and json.loads(readonly_body)['overview']['usage']['total_requests'] >= 2
+            assert json.loads(request(viewer_gateway + viewer_path + '/api/v1/auth/session', opener=read_only_opener)[1])['role'] == 'read_only'
+            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/key-quota', opener=read_only_opener)[0] == 200
+            for secret in (key, management, password, read_only_password, 'fake-upstream-test-key', 'auth_index', 'base_url'):
+                assert secret.encode() not in readonly_body
+            # The app enforces the role even without the restricted gateway.
+            direct_read_only = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            assert request(keeper + '/api/v1/auth/read-only-login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'password': read_only_password}, opener=direct_read_only)[0] == 204
+            for method, path in (('GET', '/usage/overview'), ('GET', '/auth/sessions'), ('PATCH', '/auth-files/status'), ('DELETE', '/auth-files'), ('POST', '/quota/reset'), ('PUT', '/pricing'), ('POST', '/usage/identities/1/stats/reset')):
+                assert request(keeper + '/api/v1' + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={} if method != 'GET' else None, method=method, opener=direct_read_only)[0] == 403
+                assert request(viewer_gateway + viewer_path + '/api/v1' + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={} if method != 'GET' else None, method=method, opener=read_only_opener)[0] == 404
+            for method in ('POST', 'PATCH', 'PUT', 'DELETE'):
+                assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={}, method=method, opener=read_only_opener)[0] == 404
+            print('PASS: read-only all-key reports, secret filtering, client-key separation and server/gateway write denial', flush=True)
             # Exercise the same persisted client-key setting as the management UI.
             management_auth = {'Authorization': 'Bearer ' + management}
             keys_url = private + '/v8/management/config/access/api-keys'
@@ -193,6 +215,9 @@ def main():
             assert json.loads(request(private + '/v8/management/config/access/api-keys', management_auth)[1]) == [rotated_key]
             assert int(docker('exec', names['keeper'], 'python3', '-c', query)) >= count
             assert docker('exec', names['cpa'], 'cat', '/data/auth/persistence-marker') == 'test'
+            viewer_gateway = endpoint(names['keeper'], 8082)
+            assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=read_only_opener)[0] == 401
+            print('PASS: Keeper restart revokes read-only sessions while preserving usage', flush=True)
             print('PASS: Keeper authentication, HTTP usage ingestion and persistence across restarts', flush=True)
             print('PASS: management API key additions and revocations survive restart with an empty HA key list', flush=True)
             for service in ('cpa', 'keeper'):
@@ -204,7 +229,7 @@ def main():
             # Redact disposable credentials from any service logs before displaying.
             for name in names.values():
                 logs = docker('logs', '--tail', '40', name, check=False)
-                for secret in (key, management, password, rotated_key):
+                for secret in (key, management, password, rotated_key, read_only_password):
                     logs = logs.replace(secret, '[REDACTED]')
                 print(name + '\n' + logs)
             raise

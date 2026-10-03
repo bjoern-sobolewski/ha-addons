@@ -1,0 +1,1016 @@
+diff --git a/internal/api/auth.go b/internal/api/auth.go
+index 26a0dd2..2abe5b2 100644
+--- a/internal/api/auth.go
++++ b/internal/api/auth.go
+@@ -39,6 +39,7 @@ const (
+ type AuthConfig struct {
+ 	Enabled                         bool
+ 	LoginPassword                   string
++	ReadOnlyPassword                string
+ 	SessionTTL                      time.Duration
+ 	BasePath                        string
+ 	FrameAncestorOrigins            []string
+@@ -63,9 +64,10 @@ type apiKeyLoginRequest struct {
+ }
+ 
+ type sessionResponse struct {
+-	Authenticated bool                   `json:"authenticated"`
+-	Role          auth.Role              `json:"role,omitempty"`
+-	APIKey        *sessionAPIKeyResponse `json:"api_key,omitempty"`
++	Authenticated   bool                   `json:"authenticated"`
++	ReadOnlyEnabled bool                   `json:"read_only_enabled"`
++	Role            auth.Role              `json:"role,omitempty"`
++	APIKey          *sessionAPIKeyResponse `json:"api_key,omitempty"`
+ }
+ 
+ type sessionAPIKeyResponse struct {
+@@ -101,6 +103,11 @@ type resolvedSessionToken struct {
+ }
+ 
+ func NewAuthHandler(config AuthConfig, sessions *auth.SessionManager) *authHandler {
++	// Read-only sessions expire across restarts. Changing/removing the password
++	// therefore revokes previously issued read-only cookies without touching admins.
++	if sessions != nil {
++		sessions.DeleteByRole(auth.RoleReadOnly)
++	}
+ 	return &authHandler{
+ 		config:   config,
+ 		sessions: sessions,
+@@ -123,6 +130,7 @@ func (h *authHandler) registerRoutes(router gin.IRoutes) {
+ 	router.GET("/session", h.getSession)
+ 	router.POST("/login", h.login)
+ 	router.POST("/api-key-login", h.apiKeyLogin)
++	router.POST("/read-only-login", h.readOnlyLogin)
+ 	router.POST("/logout", h.logout)
+ }
+ 
+@@ -247,20 +255,20 @@ func (h *authHandler) getSession(c *gin.Context) {
+ 		return
+ 	}
+ 	if h.sessions == nil {
+-		c.JSON(http.StatusOK, sessionResponse{Authenticated: false})
++		c.JSON(http.StatusOK, sessionResponse{Authenticated: false, ReadOnlyEnabled: h.readOnlyEnabled()})
+ 		return
+ 	}
+ 
+ 	resolved, session, ok := h.resolveValidSession(c)
+ 	if !ok {
+-		c.JSON(http.StatusOK, sessionResponse{Authenticated: false})
++		c.JSON(http.StatusOK, sessionResponse{Authenticated: false, ReadOnlyEnabled: h.readOnlyEnabled()})
+ 		return
+ 	}
+-	response := sessionResponse{Authenticated: true, Role: session.Role}
++	response := sessionResponse{Authenticated: true, Role: session.Role, ReadOnlyEnabled: h.readOnlyEnabled()}
+ 	if session.Role == auth.RoleAPIKeyViewer {
+ 		row, ok := h.activeViewerAPIKey(c, resolved, session)
+ 		if !ok {
+-			c.JSON(http.StatusOK, sessionResponse{Authenticated: false})
++			c.JSON(http.StatusOK, sessionResponse{Authenticated: false, ReadOnlyEnabled: h.readOnlyEnabled()})
+ 			return
+ 		}
+ 		response.APIKey = &sessionAPIKeyResponse{
+diff --git a/internal/api/auth_sessions.go b/internal/api/auth_sessions.go
+index 8020994..e1f567e 100644
+--- a/internal/api/auth_sessions.go
++++ b/internal/api/auth_sessions.go
+@@ -149,6 +149,12 @@ func buildAuthSessionItems(records []auth.SessionRecord, apiKeysByID map[int64]e
+ 			items = append(items, base)
+ 			continue
+ 		}
++		if record.Role == auth.RoleReadOnly {
++			base.Kind = "read_only"
++			base.Label = "Read-only overview"
++			items = append(items, base)
++			continue
++		}
+ 		if record.Role != auth.RoleAPIKeyViewer {
+ 			continue
+ 		}
+diff --git a/internal/api/key_quota.go b/internal/api/key_quota.go
+index 5c38d93..80c2d16 100644
+--- a/internal/api/key_quota.go
++++ b/internal/api/key_quota.go
+@@ -57,7 +57,11 @@ func viewerProviderName(identity entities.UsageIdentity) string {
+ }
+ 
+ func registerKeyQuotaRoute(router gin.IRoutes, identities service.UsageIdentityProvider, provider QuotaProvider) {
+-	router.GET("/key-quota", func(c *gin.Context) {
++	registerViewerQuotaRoute(router, "/key-quota", identities, provider)
++}
++
++func registerViewerQuotaRoute(router gin.IRoutes, path string, identities service.UsageIdentityProvider, provider QuotaProvider) {
++	router.GET(path, func(c *gin.Context) {
+ 		setNoStoreHeaders(c)
+ 		if identities == nil || provider == nil {
+ 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Quota data is unavailable"})
+diff --git a/internal/api/read_only.go b/internal/api/read_only.go
+new file mode 100644
+index 0000000..e349523
+--- /dev/null
++++ b/internal/api/read_only.go
+@@ -0,0 +1,157 @@
++package api
++
++import (
++	"crypto/sha256"
++	"crypto/subtle"
++	"fmt"
++	"net/http"
++	"net/url"
++	"sort"
++	"time"
++
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/service"
++	"cpa-usage-keeper/internal/timeutil"
++	"github.com/gin-gonic/gin"
++)
++
++func (h *authHandler) readOnlyEnabled() bool {
++	return h != nil && h.config.Enabled && len(h.config.ReadOnlyPassword) >= 16 &&
++		h.config.ReadOnlyPassword != h.config.LoginPassword
++}
++
++func (h *authHandler) readOnlyMiddleware() gin.HandlerFunc {
++	return func(c *gin.Context) {
++		if !h.readOnlyEnabled() {
++			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
++			return
++		}
++		h.roleMiddleware(auth.RoleReadOnly, auth.RoleAdmin)(c)
++	}
++}
++
++func (h *authHandler) readOnlyLogin(c *gin.Context) {
++	if !h.readOnlyEnabled() || h.sessions == nil {
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
++		return
++	}
++	clientKey := loginClientKey(c)
++	if !h.allowLoginAttempt(c, clientKey) {
++		return
++	}
++	var request loginRequest
++	if err := c.ShouldBindJSON(&request); err != nil {
++		if isRequestEntityTooLarge(err) {
++			writeRequestEntityTooLarge(c)
++			return
++		}
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
++		return
++	}
++	expected := sha256.Sum256([]byte(h.config.ReadOnlyPassword))
++	actual := sha256.Sum256([]byte(request.Password))
++	if subtle.ConstantTimeCompare(expected[:], actual[:]) != 1 {
++		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
++		return
++	}
++	h.loginAttempts.Reset(clientKey)
++	resolved := resolveSessionToken(c)
++	token, expiresAt, err := h.sessions.CreateReadOnlyWithSourceAndMetadata(resolved.Source, sessionClientMetadata(c))
++	if err != nil {
++		writeInternalError(c, "create read-only session failed", err)
++		return
++	}
++	setSessionCookie(c, h.config.BasePath, resolved.CookieKind, token, expiresAt)
++	writeLoginSuccess(c, resolved, token)
++}
++
++type readOnlyKeyUsage struct {
++	Label       string   `json:"label"`
++	Requests    int64    `json:"requests"`
++	Failures    int64    `json:"failures"`
++	TotalTokens int64    `json:"total_tokens"`
++	Cost        *float64 `json:"cost"`
++}
++
++func registerReadOnlyOverviewRoute(router gin.IRoutes, provider service.UsageProvider, keys service.CPAAPIKeyProvider) {
++	router.GET("/read-only/overview", func(c *gin.Context) {
++		setNoStoreHeaders(c)
++		comparisons, ok := provider.(service.UsageComparisonProvider)
++		if provider == nil || !ok || keys == nil {
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Usage data is unavailable"})
++			return
++		}
++		// Accept only bounded time ranges. Identity, API-key, model and custom
++		// range parameters cannot widen the reporting surface or reveal metadata.
++		period := c.DefaultQuery("range", "7d")
++		if period != "24h" && period != "7d" && period != "30d" {
++			c.JSON(http.StatusBadRequest, gin.H{"error": "Choose 24h, 7d or 30d"})
++			return
++		}
++		request := c.Request.Clone(c.Request.Context())
++		request.URL = &url.URL{RawQuery: url.Values{"range": {period}}.Encode()}
++		filter, err := parseKeyUsageOverviewTimeFilterQuery(request, timeutil.NormalizeStorageTime(time.Now()))
++		if err != nil {
++			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid time range"})
++			return
++		}
++		snapshot, err := provider.GetUsageOverview(c.Request.Context(), filter)
++		if err != nil {
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Usage data is unavailable"})
++			return
++		}
++		grouped, err := comparisons.GetUsageOverviewComparisons(c.Request.Context(), filter)
++		if err != nil {
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Usage data is unavailable"})
++			return
++		}
++		active, err := keys.ListCPAAPIKeys(c.Request.Context())
++		if err != nil {
++			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Usage data is unavailable"})
++			return
++		}
++		labels := map[string]string{}
++		// All labels are generated server-side. Raw keys, key fragments, provider
++		// credential names and user-entered aliases never enter this response.
++		for _, key := range active {
++			labels[key.APIKey] = fmt.Sprintf("Client key %d", key.ID)
++		}
++		rows := map[string]readOnlyKeyUsage{}
++		for raw, label := range labels {
++			rows[raw] = readOnlyKeyUsage{Label: label}
++		}
++		if grouped != nil && grouped.Comparisons != nil {
++			for raw, item := range grouped.Comparisons.APIKeys {
++				if item == nil {
++					continue
++				}
++				label := labels[raw]
++				if label == "" {
++					digest := sha256.Sum256([]byte(raw))
++					label = fmt.Sprintf("Historical key %x", digest[:6])
++				}
++				row := readOnlyKeyUsage{Label: label, Requests: item.Requests, Failures: item.Failures, TotalTokens: item.TotalTokens}
++				if item.CostAvailable {
++					value := item.CostUSD
++					row.Cost = &value
++				}
++				rows[raw] = row
++			}
++		}
++		result := make([]readOnlyKeyUsage, 0, len(rows))
++		for _, row := range rows {
++			result = append(result, row)
++		}
++		sort.Slice(result, func(i, j int) bool {
++			if result[i].Requests == result[j].Requests {
++				return result[i].Label < result[j].Label
++			}
++			return result[i].Requests > result[j].Requests
++		})
++		overview := usageOverviewResponse{Usage: buildUsageOverviewPayload(nil), Summary: buildUsageOverviewSummary(snapshot), Series: buildUsageOverviewSeries(snapshot), Timezone: time.Local.String()}
++		if snapshot != nil {
++			overview.Usage = buildUsageOverviewPayload(snapshot.Usage)
++		}
++		c.JSON(http.StatusOK, gin.H{"overview": overview, "keys": result})
++	})
++}
+diff --git a/internal/api/request_limits.go b/internal/api/request_limits.go
+index 4b3ba41..d76591e 100644
+--- a/internal/api/request_limits.go
++++ b/internal/api/request_limits.go
+@@ -18,8 +18,9 @@ func unauthenticatedLoginRequestLimits(basePath string) gin.HandlerFunc {
+ 	prefix := strings.TrimSuffix(basePath, "/") + "/api/v1/auth/"
+ 	loginPath := prefix + "login"
+ 	apiKeyLoginPath := prefix + "api-key-login"
++	readOnlyLoginPath := prefix + "read-only-login"
+ 	return func(c *gin.Context) {
+-		if c.Request.Method != http.MethodPost || (c.Request.URL.Path != loginPath && c.Request.URL.Path != apiKeyLoginPath) {
++		if c.Request.Method != http.MethodPost || (c.Request.URL.Path != loginPath && c.Request.URL.Path != apiKeyLoginPath && c.Request.URL.Path != readOnlyLoginPath) {
+ 			c.Next()
+ 			return
+ 		}
+diff --git a/internal/api/router.go b/internal/api/router.go
+index cda67b1..4ebb665 100644
+--- a/internal/api/router.go
++++ b/internal/api/router.go
+@@ -127,9 +127,14 @@ func NewRouter(
+ 	registerUsageEventRequestLogDownloadTokenRoutes(apiV1, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
+ 
+ 	versionProtected := apiV1.Group("")
+-	versionProtected.Use(authHandler.roleMiddleware(auth.RoleAdmin, auth.RoleAPIKeyViewer))
++	versionProtected.Use(authHandler.roleMiddleware(auth.RoleAdmin, auth.RoleAPIKeyViewer, auth.RoleReadOnly))
+ 	registerVersionRoutes(versionProtected)
+ 
++	readOnlyProtected := apiV1.Group("")
++	readOnlyProtected.Use(authHandler.readOnlyMiddleware())
++	registerReadOnlyOverviewRoute(readOnlyProtected, usageProvider, cpaAPIKeyProvider)
++	registerViewerQuotaRoute(readOnlyProtected, "/read-only/key-quota", usageIdentityProvider, quotaProvider)
++
+ 	adminProtected := apiV1.Group("")
+ 	adminProtected.Use(authHandler.adminMiddleware())
+ 	registerStatusRoutes(adminProtected, statusProvider, statusConfig)
+diff --git a/internal/api/test/read_only_test.go b/internal/api/test/read_only_test.go
+new file mode 100644
+index 0000000..c96c75e
+--- /dev/null
++++ b/internal/api/test/read_only_test.go
+@@ -0,0 +1,149 @@
++package test
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/entities"
++	repodto "cpa-usage-keeper/internal/repository/dto"
++	"cpa-usage-keeper/internal/service"
++	servicedto "cpa-usage-keeper/internal/service/dto"
++)
++
++type readOnlyUsageStub struct {
++	service.UsageProvider
++	filter servicedto.UsageFilter
++}
++
++func (s *readOnlyUsageStub) GetUsageOverview(_ context.Context, f servicedto.UsageFilter) (*servicedto.UsageOverviewSnapshot, error) {
++	s.filter = f
++	return &servicedto.UsageOverviewSnapshot{Usage: &repodto.StatisticsSnapshot{TotalRequests: 7, TotalTokens: 700}}, nil
++}
++func (s *readOnlyUsageStub) GetUsageOverviewComparisons(_ context.Context, f servicedto.UsageFilter) (*servicedto.UsageOverviewSnapshot, error) {
++	s.filter = f
++	return &servicedto.UsageOverviewSnapshot{Comparisons: &repodto.UsageOverviewComparisonsRecord{
++		APIKeys: map[string]*repodto.UsageComparisonItemRecord{
++			"first-private-key":   {Key: "first-private-key", Label: "private-key-alias", Requests: 2, TotalTokens: 200},
++			"second-private-key":  {Key: "second-private-key", Requests: 3, TotalTokens: 300, CostAvailable: true, CostUSD: 0},
++			"revoked-private-key": {Key: "revoked-private-key", Requests: 2, TotalTokens: 200},
++		}, AuthFiles: map[string]*repodto.UsageComparisonItemRecord{"private-file": {Key: "private-file"}},
++	}}, nil
++}
++
++func TestReadOnlyLoginAndServerPermissions(t *testing.T) {
++	sessions := auth.NewSessionManager(time.Hour)
++	config := AuthConfig{Enabled: true, LoginPassword: "admin-password-123456", ReadOnlyPassword: "read-only-password-123456"}
++	usage := &readOnlyUsageStub{}
++	keys := &authLoginKeyStub{rowsByID: map[int64]entities.CPAAPIKey{1: {ID: 1, APIKey: "first-private-key", KeyAlias: "private-key-alias"}, 2: {ID: 2, APIKey: "second-private-key"}, 3: {ID: 3, APIKey: "unused-private-key"}}}
++	handler := NewAuthHandler(config, sessions)
++	router := NewRouter(nil, nil, usage, nil, config, handler, "", OptionalProviders{CPAAPIKeys: keys, Quota: &quotaProviderStub{}, UsageIdentity: identityMetadataStub{}})
++	for _, password := range []string{"", config.LoginPassword, "wrong-password"} {
++		response := serveCredentialMutation(router, http.MethodPost, "/api/v1/auth/read-only-login", `{"password":"`+password+`"}`)
++		if response.Code != 401 {
++			t.Fatalf("incorrect password accepted: %d", response.Code)
++		}
++	}
++	login := serveCredentialMutation(router, http.MethodPost, "/api/v1/auth/read-only-login", `{"password":"`+config.ReadOnlyPassword+`"}`)
++	if login.Code != 204 {
++		t.Fatal(login.Code)
++	}
++	cookie := login.Result().Cookies()[0]
++	state := serveAPIGet(router, "/api/v1/auth/session", cookie)
++	if !strings.Contains(state.Body.String(), `"role":"read_only"`) {
++		t.Fatal(state.Body.String())
++	}
++	response := serveAPIGet(router, "/api/v1/read-only/overview?range=7d&api_key_id=999&auth_index=private&start=bad", cookie)
++	if response.Code != 200 {
++		t.Fatal(response.Code, response.Body.String())
++	}
++	for _, private := range []string{"first-private-key", "second-private-key", "revoked-private-key", "unused-private-key", "private-key-alias", "private-file", "auth_index", "APIKey"} {
++		if strings.Contains(response.Body.String(), private) {
++			t.Fatalf("leaked %s", private)
++		}
++	}
++	var data struct {
++		Keys []struct {
++			Label    string
++			Requests int
++			Cost     *float64
++		}
++	}
++	if err := json.Unmarshal(response.Body.Bytes(), &data); err != nil {
++		t.Fatal(err)
++	}
++	if len(data.Keys) != 4 || data.Keys[0].Requests != 3 || data.Keys[0].Cost == nil || *data.Keys[0].Cost != 0 {
++		t.Fatal(response.Body.String())
++	}
++	if usage.filter.APIKeyID != "" || usage.filter.AuthIndex != "" {
++		t.Fatal("client supplied scope used")
++	}
++	if serveAPIGet(router, "/api/v1/read-only/overview?range=custom", cookie).Code != 400 {
++		t.Fatal("unbounded period accepted")
++	}
++	if serveAPIGet(router, "/api/v1/read-only/key-quota", cookie).Code != 200 {
++		t.Fatal("quota unavailable")
++	}
++	for _, path := range []string{"/api/v1/usage/overview", "/api/v1/usage/api-keys", "/api/v1/auth/sessions", "/api/v1/pricing", "/api/v1/status", "/api/v1/usage/identities"} {
++		if serveAPIGet(router, path, cookie).Code != 403 {
++			t.Fatalf("read-only session allowed admin read: %s", path)
++		}
++	}
++	for _, item := range []struct{ method, path string }{
++		{"PATCH", "/api/v1/auth-files/status"}, {"DELETE", "/api/v1/auth-files"}, {"PATCH", "/api/v1/auth-files/index/priority"},
++		{"POST", "/api/v1/quota/reset"}, {"POST", "/api/v1/quota/refresh"}, {"PUT", "/api/v1/quota/auto-refresh/settings"},
++		{"PUT", "/api/v1/pricing"}, {"PATCH", "/api/v1/usage/api-keys/1"}, {"POST", "/api/v1/usage/identities/1/stats/reset"}, {"DELETE", "/api/v1/auth/sessions/1"},
++	} {
++		req := httptest.NewRequest(item.method, item.path, strings.NewReader(`{}`))
++		req.AddCookie(cookie)
++		req.Header.Set("X-CPA-Usage-Keeper-Request", "fetch")
++		result := httptest.NewRecorder()
++		router.ServeHTTP(result, req)
++		if result.Code != 403 {
++			t.Fatalf("write access %s %s: %d", item.method, item.path, result.Code)
++		}
++	}
++	viewer, _, _ := sessions.CreateAPIKeyViewer(1)
++	if serveAPIGet(router, "/api/v1/read-only/overview", &http.Cookie{Name: "cpa_usage_keeper_session", Value: viewer}).Code != 403 {
++		t.Fatal("client-key viewer got all-key access")
++	}
++	if serveAPIGet(router, "/api/v1/read-only/overview").Code != 401 {
++		t.Fatal("anonymous all-key access")
++	}
++	admin, _, _ := sessions.Create()
++	_ = NewAuthHandler(config, sessions)
++	if sessions.Validate(cookie.Value) || !sessions.Validate(admin) || !sessions.Validate(viewer) {
++		t.Fatal("restart failed to revoke only read-only sessions")
++	}
++}
++
++func TestReadOnlyDisabledAndLoginLimits(t *testing.T) {
++	for _, password := range []string{"", "short", "same-password-123456"} {
++		sessions := auth.NewSessionManager(time.Hour)
++		config := AuthConfig{Enabled: true, LoginPassword: "same-password-123456", ReadOnlyPassword: password}
++		router := NewRouter(nil, nil, nil, nil, config, NewAuthHandler(config, sessions), "")
++		response := serveCredentialMutation(router, "POST", "/api/v1/auth/read-only-login", `{"password":"`+password+`"}`)
++		if response.Code != 401 {
++			t.Fatal("disabled or unsafe password accepted")
++		}
++	}
++	config := AuthConfig{Enabled: true, LoginPassword: "admin-password-123456", ReadOnlyPassword: "read-only-password-123456"}
++	router := NewRouter(nil, nil, nil, nil, config, NewAuthHandler(config, auth.NewSessionManager(time.Hour)), "")
++	for i := 0; i < 5; i++ {
++		if serveCredentialMutation(router, "POST", "/api/v1/auth/read-only-login", `{"password":"wrong"}`).Code != 401 {
++			t.Fatal(i)
++		}
++	}
++	if serveCredentialMutation(router, "POST", "/api/v1/auth/read-only-login", `{"password":"wrong"}`).Code != 429 {
++		t.Fatal("login not rate limited")
++	}
++	if serveCredentialMutation(router, "POST", "/api/v1/auth/read-only-login", `{"password":"`+strings.Repeat("a", 5000)+`"}`).Code != 413 {
++		t.Fatal("login body not bounded")
++	}
++}
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 6ab9413..8115685 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -322,6 +322,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+ 	authConfig := api.AuthConfig{
+ 		Enabled:                         cfg.AuthEnabled,
+ 		LoginPassword:                   cfg.LoginPassword,
++		ReadOnlyPassword:                cfg.ReadOnlyPassword,
+ 		SessionTTL:                      cfg.AuthSessionTTL,
+ 		BasePath:                        cfg.AppBasePath,
+ 		FrameAncestorOrigins:            frameAncestorOrigins(cfg),
+diff --git a/internal/auth/session.go b/internal/auth/session.go
+index 252cbc5..8739f7e 100644
+--- a/internal/auth/session.go
++++ b/internal/auth/session.go
+@@ -163,9 +163,9 @@ func authSessionFromRow(row entities.AuthSession) (Session, error) {
+ 		lastSeenAt = *row.LastSeenAt
+ 	}
+ 	switch Role(row.Role) {
+-	case RoleAdmin:
++	case RoleAdmin, RoleReadOnly:
+ 		return Session{
+-			Role: RoleAdmin, Source: source, Alias: row.Alias, LoginIP: row.LoginIP, LastSeenIP: row.LastSeenIP,
++			Role: Role(row.Role), Source: source, Alias: row.Alias, LoginIP: row.LoginIP, LastSeenIP: row.LastSeenIP,
+ 			UserAgent: row.UserAgent, LastSeenAt: lastSeenAt, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt,
+ 		}, nil
+ 	case RoleAPIKeyViewer:
+@@ -213,6 +213,7 @@ type Role string
+ const (
+ 	RoleAdmin        Role = "admin"
+ 	RoleAPIKeyViewer Role = "api_key_viewer"
++	RoleReadOnly     Role = "read_only"
+ )
+ 
+ type SessionSource string
+@@ -313,6 +314,10 @@ func (m *SessionManager) CreateWithSourceAndMetadata(source SessionSource, metad
+ 	return m.create(Session{Role: RoleAdmin, Source: NormalizeSessionSource(source)}, metadata)
+ }
+ 
++func (m *SessionManager) CreateReadOnlyWithSourceAndMetadata(source SessionSource, metadata SessionClientMetadata) (string, time.Time, error) {
++	return m.create(Session{Role: RoleReadOnly, Source: NormalizeSessionSource(source)}, metadata)
++}
++
+ func (m *SessionManager) CreateAPIKeyViewer(cpaAPIKeyID int64) (string, time.Time, error) {
+ 	return m.CreateAPIKeyViewerWithSource(cpaAPIKeyID, SessionSourceStandard)
+ }
+diff --git a/internal/config/config.go b/internal/config/config.go
+index 82d318e..c0856e9 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -101,7 +101,8 @@ type Config struct {
+ 	// AuthEnabled 控制是否启用登录保护。
+ 	AuthEnabled bool
+ 	// LoginPassword 是启用登录保护时使用的登录密码。
+-	LoginPassword string
++	LoginPassword    string
++	ReadOnlyPassword string
+ 	// AuthSessionTTL 是登录 session 有效时长。
+ 	AuthSessionTTL time.Duration
+ }
+@@ -294,6 +295,7 @@ func Load(options LoadOptions) (*Config, error) {
+ 		LogRetentionDays:                logRetentionDays,
+ 		AuthEnabled:                     authEnabled,
+ 		LoginPassword:                   strings.TrimSpace(os.Getenv("LOGIN_PASSWORD")),
++		ReadOnlyPassword:                strings.TrimSpace(os.Getenv("READ_ONLY_PASSWORD")),
+ 		AuthSessionTTL:                  authSessionTTL,
+ 	}
+ 	if appHost := strings.TrimSpace(options.AppHost); appHost != "" {
+@@ -316,6 +318,9 @@ func Load(options LoadOptions) (*Config, error) {
+ 			return nil, fmt.Errorf("LOGIN_PASSWORD must not use the public example value %q", publicLoginPasswordPlaceholder)
+ 		}
+ 	}
++	if cfg.ReadOnlyPassword != "" && (!cfg.AuthEnabled || len(cfg.ReadOnlyPassword) < 16 || cfg.ReadOnlyPassword == cfg.LoginPassword || cfg.ReadOnlyPassword == cfg.CPAManagementKey) {
++		return nil, fmt.Errorf("READ_ONLY_PASSWORD requires authentication and a distinct password of at least 16 characters")
++	}
+ 	if cfg.TLSEnabled {
+ 		if cfg.TLSCertFile == "" {
+ 			return nil, fmt.Errorf("TLS_CERT_FILE is required when TLS_ENABLED is true")
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index 814f442..5cc7088 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
+ import './index.css';
+ import './App.css';
+ import './embed/cpamcEmbed.css';
+-import { ApiError, appPath, clearEmbedSessionToken, getSession, login, loginWithCPAAPIKey } from './lib/api';
++import { ApiError, appPath, clearEmbedSessionToken, getSession, login, loginReadOnly, loginWithCPAAPIKey } from './lib/api';
+ import type { AuthRole, AuthSessionAPIKeySummary } from './lib/types';
+ import { AppFooter } from './components/AppFooter';
+ import { isKeyViewerPath, type KeyViewerPath } from './features/key-viewer';
+@@ -11,6 +11,7 @@ import { KeyAnalysisPage } from './pages/KeyAnalysisPage';
+ import { KeyOverviewPage } from './pages/KeyOverviewPage';
+ import { KeyQuotaPage } from './pages/KeyQuotaPage';
+ import { KeyRankingPage } from './pages/KeyRankingPage';
++import { ReadOnlyPage } from './pages/ReadOnlyPage';
+ import { LoginPage } from './pages/LoginPage';
+ import { UsagePage } from './pages/UsagePage';
+ import { cpamcEmbedSearch, isCPAMCEmbed, notifyCPAMCEmbedReady } from './embed/cpamcEmbed';
+@@ -24,8 +25,8 @@ const getInitialKeyViewerPath = (): KeyViewerPath => {
+   return isKeyViewerPath(currentPath) ? currentPath : '/key-overview';
+ };
+ 
+-export const getRoleHomePath = (role: AuthRole): '/' | '/key-overview' => (
+-  role === 'api_key_viewer' ? '/key-overview' : '/'
++export const getRoleHomePath = (role: AuthRole): '/' | '/key-overview' | '/read-only' => (
++  role === 'api_key_viewer' ? '/key-overview' : role === 'read_only' ? '/read-only' : '/'
+ );
+ 
+ export const getRoleTargetPath = (
+@@ -37,6 +38,7 @@ export const getRoleTargetPath = (
+   if (role === 'api_key_viewer') {
+     return isKeyViewerPath(currentPath) ? currentPath : '/key-overview';
+   }
++  if (role === 'read_only') return '/read-only';
+   if (currentPath === '/') return '/';
+ 
+   const usageTab = resolveUsageTabFromPath(currentPath);
+@@ -58,6 +60,8 @@ function App() {
+   const [keyViewerPath, setKeyViewerPath] = useState<KeyViewerPath>(getInitialKeyViewerPath);
+   const [adminLoginError, setAdminLoginError] = useState('');
+   const [apiKeyLoginError, setAPIKeyLoginError] = useState('');
++  const [readOnlyEnabled, setReadOnlyEnabled] = useState(false);
++  const [readOnlyLoginError, setReadOnlyLoginError] = useState('');
+   const [submitting, setSubmitting] = useState(false);
+   const clearUsageStats = useUsageStatsStore((state) => state.clearUsageStats);
+   const isEmbeddedInCPAMC = isCPAMCEmbed();
+@@ -71,6 +75,7 @@ function App() {
+   }, [clearUsageStats]);
+ 
+   const applySession = useCallback((session: Awaited<ReturnType<typeof getSession>>) => {
++    setReadOnlyEnabled(session.read_only_enabled === true);
+     if (!session.authenticated) {
+       clearSession();
+       return;
+@@ -133,6 +138,19 @@ function App() {
+     }
+   }, [clearSession, isEmbeddedInCPAMC, loadSession, t]);
+ 
++  const handleReadOnlyLogin = useCallback(async (password: string) => {
++    setSubmitting(true); setReadOnlyLoginError('');
++    try {
++      await loginReadOnly(password);
++      const session = await loadSession();
++      if (!session.authenticated || session.role !== 'read_only') throw new Error('Invalid session');
++      window.history.replaceState(null, '', appPath('/read-only'));
++    } catch (error) {
++      setReadOnlyLoginError(t(error instanceof ApiError && error.status === 429 ? 'auth.login_rate_limited' : 'auth.invalid_password'));
++      clearSession();
++    } finally {setSubmitting(false);}
++  }, [clearSession, loadSession, t]);
++
+   const handleAPIKeyLogin = useCallback(async (apiKey: string) => {
+     setSubmitting(true);
+     setAPIKeyLoginError('');
+@@ -172,7 +190,9 @@ function App() {
+   if (authState === 'checking') {
+     page = <div className="app-checking" aria-busy="true" />;
+   } else if (authState === 'unauthenticated') {
+-    page = <LoginPage loading={submitting} adminError={adminLoginError} apiKeyError={apiKeyLoginError} onPasswordSubmit={handlePasswordLogin} onAPIKeySubmit={handleAPIKeyLogin} />;
++    page = <LoginPage loading={submitting} adminError={adminLoginError} apiKeyError={apiKeyLoginError} onPasswordSubmit={handlePasswordLogin} onAPIKeySubmit={handleAPIKeyLogin} readOnlyEnabled={readOnlyEnabled} readOnlyError={readOnlyLoginError} onReadOnlySubmit={handleReadOnlyLogin} />;
++  } else if (authRole === 'read_only') {
++    page = <ReadOnlyPage onAuthRequired={clearSession} />;
+   } else if (authRole === 'api_key_viewer') {
+     page = keyViewerPath === '/key-quota' && sessionAPIKey?.quota_enabled
+       ? <KeyQuotaPage apiKey={sessionAPIKey} onNavigate={handleKeyViewerNavigate} onAuthRequired={clearSession} />
+diff --git a/web/src/components/usage/SessionSettingsCard.tsx b/web/src/components/usage/SessionSettingsCard.tsx
+index 8a5c49b..fe49e25 100644
+--- a/web/src/components/usage/SessionSettingsCard.tsx
++++ b/web/src/components/usage/SessionSettingsCard.tsx
+@@ -19,6 +19,9 @@ export interface SessionSettingsCardProps {
+ }
+ 
+ export function getSessionLogoutConfirmationKeys(session: AuthManagedSessionItem) {
++  if (session.kind === 'read_only') return {
++    titleKey: 'read_only.sign_out_title', bodyKey: 'read_only.sign_out_body', confirmKey: 'usage_stats.session_settings_logout_confirm',
++  };
+   if (session.kind === 'admin') {
+     return {
+       titleKey: 'usage_stats.session_settings_admin_logout_title',
+@@ -34,6 +37,7 @@ export function getSessionLogoutConfirmationKeys(session: AuthManagedSessionItem
+ }
+ 
+ function getSessionDisplayName(session: AuthManagedSessionItem, t: (key: string) => string) {
++  if (session.kind === 'read_only') return t('read_only.title');
+   if (session.kind === 'admin') {
+     return session.alias || t('usage_stats.session_settings_admin_label');
+   }
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index a8c1332..f02fa12 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -20,6 +20,7 @@ const getInitialLanguage = (): SupportedLanguage => {
+ const resources = {
+   en: {
+     translation: {
++      read_only: {sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
+       common: {
+         loading: 'Loading...',
+         save: 'Save',
+@@ -961,6 +962,7 @@ const resources = {
+   },
+   zh: {
+     translation: {
++      read_only: {sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
+       common: {
+         loading: '加载中...',
+         save: '保存',
+@@ -1902,6 +1904,7 @@ const resources = {
+   },
+   'zh-TW': {
+     translation: {
++      read_only: {sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
+       common: {
+         loading: '載入中...',
+         save: '儲存',
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index bf62a55..c78fc8c 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -242,6 +242,31 @@ export async function login(password: string): Promise<void> {
+   await activateEmbedSessionFallback(response)
+ }
+ 
++export async function loginReadOnly(password: string): Promise<void> {
++  const response = await apiFetch(apiPath('/auth/read-only-login'), {
++    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({password}),
++  });
++  if (!response.ok) return parseApiError(response, 'Unable to sign in');
++  await activateEmbedSessionFallback(response);
++}
++
++export interface ReadOnlyKeyUsage {
++  label: string; requests: number; failures: number; total_tokens: number; cost: number | null;
++}
++export interface ReadOnlyOverview {
++  overview: UsageOverviewResponse; keys: ReadOnlyKeyUsage[];
++}
++export async function fetchReadOnlyOverview(range: string, signal?: AbortSignal): Promise<ReadOnlyOverview> {
++  const response = await apiFetch(apiPath('/read-only/overview') + '?range=' + encodeURIComponent(range), {signal});
++  if (!response.ok) return parseApiError(response, 'Unable to load overview');
++  return response.json();
++}
++export async function fetchReadOnlyQuota(signal?: AbortSignal): Promise<{accounts: ViewerQuotaAccount[]}> {
++  const response = await apiFetch(apiPath('/read-only/key-quota'), {signal});
++  if (!response.ok) return parseApiError(response, 'Unable to load quota');
++  return response.json();
++}
++
+ export async function loginWithCPAAPIKey(apiKey: string): Promise<void> {
+   if (isCPAMCEmbed()) {
+     clearEmbedSessionToken()
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 3bfbfbb..df89499 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -1,4 +1,4 @@
+-export type AuthRole = 'admin' | 'api_key_viewer'
++export type AuthRole = 'admin' | 'api_key_viewer' | 'read_only'
+ 
+ export interface AuthSessionAPIKeySummary {
+   display_key: string
+@@ -9,11 +9,12 @@ export interface AuthSessionAPIKeySummary {
+ 
+ export interface AuthSessionResponse {
+   authenticated: boolean
++  read_only_enabled?: boolean
+   role?: AuthRole
+   api_key?: AuthSessionAPIKeySummary
+ }
+ 
+-export type AuthManagedSessionKind = 'admin' | 'api_key'
++export type AuthManagedSessionKind = 'admin' | 'api_key' | 'read_only'
+ export type AuthManagedSessionSource = 'standard' | 'embed'
+ 
+ export interface AuthManagedSessionItem {
+diff --git a/web/src/pages/KeyQuotaPage.tsx b/web/src/pages/KeyQuotaPage.tsx
+index 6f8cf57..37265ee 100644
+--- a/web/src/pages/KeyQuotaPage.tsx
++++ b/web/src/pages/KeyQuotaPage.tsx
+@@ -43,7 +43,13 @@ export function KeyQuotaPage({apiKey, onNavigate, onAuthRequired}: {
+     <p>{t('key_quota.shared')}</p>
+     {error && <p role="alert">{t('key_quota.error')}</p>}
+     {!loading && !error && accounts.length === 0 && <p>{t('key_quota.empty')}</p>}
+-    <div className={styles.accounts}>{accounts.map((account) => <Card key={account.label}>
++    <QuotaAccounts accounts={accounts} />
++  </KeyViewerShell>;
++}
++
++export function QuotaAccounts({accounts}: {accounts: ViewerQuotaAccount[]}) {
++  const {t} = useTranslation();
++  return <div className={styles.accounts}>{accounts.map((account) => <Card key={account.label}>
+       <h2>{account.label}</h2>
+       <p className={account.status === 'available' ? undefined : styles.notice}>{t(`key_quota.${account.status}`)}</p>
+       {account.updated_at && <p>{t('key_quota.updated')}: {new Date(account.updated_at).toLocaleString()}</p>}
+@@ -56,6 +62,5 @@ export function KeyQuotaPage({apiKey, onNavigate, onAuthRequired}: {
+         {row.limit_reached && <p className={styles.notice}>{t('key_quota.exhausted')}</p>}
+         {row.reset_at && <p>{t('key_quota.resets')}: {new Date(row.reset_at).toLocaleString()}</p>}
+       </div>)}
+-    </Card>)}</div>
+-  </KeyViewerShell>;
++    </Card>)}</div>;
+ }
+diff --git a/web/src/pages/LoginPage.tsx b/web/src/pages/LoginPage.tsx
+index 1fd3365..a2b2eb6 100644
+--- a/web/src/pages/LoginPage.tsx
++++ b/web/src/pages/LoginPage.tsx
+@@ -9,7 +9,7 @@ import type { Theme } from '@/types';
+ import { BrandLink } from '@/components/BrandLink';
+ import styles from './LoginPage.module.scss';
+ 
+-type LoginMode = 'admin' | 'api_key';
++type LoginMode = 'admin' | 'api_key' | 'read_only';
+ 
+ const THEME_OPTIONS: ReadonlyArray<{ value: Theme; labelKey: string }> = [
+   { value: 'white', labelKey: 'usage_stats.theme_light' },
+@@ -20,26 +20,29 @@ const THEME_OPTIONS: ReadonlyArray<{ value: Theme; labelKey: string }> = [
+ type LoginErrors = {
+   adminError?: string;
+   apiKeyError?: string;
++  readOnlyError?: string;
+ };
+ 
+ interface LoginPageProps extends LoginErrors {
+   loading?: boolean;
++  readOnlyEnabled?: boolean;
++  onReadOnlySubmit?: (password: string) => Promise<void>;
+   onPasswordSubmit: (password: string) => Promise<void>;
+   onAPIKeySubmit: (apiKey: string) => Promise<void>;
+ }
+ 
+-export const getLoginErrorForMode = (mode: LoginMode, { adminError = '', apiKeyError = '' }: LoginErrors) => (
+-  mode === 'api_key' ? apiKeyError : adminError
++export const getLoginErrorForMode = (mode: LoginMode, { adminError = '', apiKeyError = '', readOnlyError = '' }: LoginErrors) => (
++  mode === 'api_key' ? apiKeyError : mode === 'read_only' ? readOnlyError : adminError
+ );
+ 
+-export function LoginPage({ loading = false, adminError = '', apiKeyError = '', onPasswordSubmit, onAPIKeySubmit }: LoginPageProps) {
++export function LoginPage({ loading = false, adminError = '', apiKeyError = '', onPasswordSubmit, onAPIKeySubmit, readOnlyEnabled = false, readOnlyError = "", onReadOnlySubmit }: LoginPageProps) {
+   const { t } = useTranslation();
+   const theme = useThemeStore((state) => state.theme);
+   const setTheme = useThemeStore((state) => state.setTheme);
+   const [mode, setMode] = useState<LoginMode>(window.__KEEPER_VIEWER_ONLY__ ? 'api_key' : 'admin');
+   const [password, setPassword] = useState('');
+   const [apiKey, setApiKey] = useState('');
+-  const activeError = getLoginErrorForMode(mode, { adminError, apiKeyError });
++  const activeError = getLoginErrorForMode(mode, { adminError, apiKeyError, readOnlyError });
+   const themeOptions = useMemo(
+     () => THEME_OPTIONS.map((option) => ({ ...option, label: t(option.labelKey) })),
+     [t]
+@@ -51,6 +54,7 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+       await onAPIKeySubmit(apiKey);
+       return;
+     }
++    if (mode === 'read_only') { await onReadOnlySubmit?.(password); return; }
+     await onPasswordSubmit(password);
+   };
+ 
+@@ -113,6 +117,11 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+             >
+               {t('auth.api_key_tab')}
+             </button>
++            {readOnlyEnabled && <button type="button" role="tab" aria-selected={mode === 'read_only'}
++              className={`${styles.tab} ${mode === 'read_only' ? styles.tabActive : ''}`.trim()}
++              onClick={() => {setMode('read_only'); setPassword('');}} disabled={loading}>
++              {t('read_only.login_tab')}
++            </button>}
+           </div>
+ 
+           <form className={styles.form} onSubmit={(event) => void handleSubmit(event)}>
+@@ -131,7 +140,7 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+               <Input
+                 type="password"
+                 autoComplete="current-password"
+-                label={t('auth.password_label')}
++                label={t(mode === 'read_only' ? 'read_only.password' : 'auth.password_label')}
+                 placeholder={t('auth.password_placeholder')}
+                 value={password}
+                 onChange={(event) => setPassword(event.target.value)}
+@@ -140,7 +149,7 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',
+               />
+             )}
+             <Button type="submit" fullWidth loading={loading} disabled={!canSubmit}>
+-              {mode === 'api_key' ? t('auth.api_key_login_submit') : t('auth.login_submit')}
++              {mode === 'api_key' ? t('auth.api_key_login_submit') : mode === 'read_only' ? t('read_only.login_submit') : t('auth.login_submit')}
+             </Button>
+           </form>
+         </Card>
+diff --git a/web/src/pages/ReadOnlyPage.module.scss b/web/src/pages/ReadOnlyPage.module.scss
+new file mode 100644
+index 0000000..0753021
+--- /dev/null
++++ b/web/src/pages/ReadOnlyPage.module.scss
+@@ -0,0 +1,15 @@
++.page {width:100%; max-width:1440px; margin:0 auto;}
++.content {padding:24px; display:grid; gap:20px;}
++.toolbar {display:flex; flex-wrap:wrap; align-items:center; gap:16px;}
++.toolbar > div {flex:1; min-width:240px;}
++.toolbar h1 {margin:0;}
++.toolbar select {padding:8px; border-radius:8px; background:var(--bg-primary); color:inherit; border:1px solid var(--border-color,#8884);}
++.stats {display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;}
++.stats strong {font-size:1.8rem;}
++.table {overflow:auto;}
++.table table {width:100%;border-collapse:collapse;}
++.table th,.table td {padding:12px;text-align:left;white-space:nowrap;border-bottom:1px solid var(--border-color,#8884);}
++.trend {display:flex;align-items:flex-end;height:140px;gap:2px;}
++.trend > div {flex:1;min-width:1px;background:#22a58a;border-radius:3px 3px 0 0;}
++.period {font-size:.85rem;opacity:.7;}
++@media(max-width:600px) {.content {padding:12px;}.toolbar {align-items:stretch;}.toolbar label {width:100%;}}
+diff --git a/web/src/pages/ReadOnlyPage.tsx b/web/src/pages/ReadOnlyPage.tsx
+new file mode 100644
+index 0000000..7174311
+--- /dev/null
++++ b/web/src/pages/ReadOnlyPage.tsx
+@@ -0,0 +1,70 @@
++import {useCallback, useEffect, useState} from 'react';
++import {useTranslation} from 'react-i18next';
++import {DashboardHeader} from '@/components/dashboard/DashboardHeader';
++import {Button} from '@/components/ui/Button';
++import {Card} from '@/components/ui/Card';
++import {ApiError, fetchReadOnlyOverview, fetchReadOnlyQuota, logout, type ReadOnlyOverview, type ViewerQuotaAccount} from '@/lib/api';
++import {QuotaAccounts} from './KeyQuotaPage';
++import styles from './ReadOnlyPage.module.scss';
++
++export function ReadOnlyPage({onAuthRequired}: {onAuthRequired: () => void}) {
++  const {t} = useTranslation();
++  const [range,setRange] = useState('7d');
++  const [data,setData] = useState<ReadOnlyOverview>();
++  const [accounts,setAccounts] = useState<ViewerQuotaAccount[]>([]);
++  const [loading,setLoading] = useState(true);
++  const [usageError,setUsageError] = useState(false);
++  const [quotaError,setQuotaError] = useState(false);
++  const refresh = useCallback(async (signal?: AbortSignal) => {
++    setLoading(true);
++    const [usage,quota] = await Promise.allSettled([fetchReadOnlyOverview(range,signal),fetchReadOnlyQuota(signal)]);
++    if (signal?.aborted) return;
++    for (const result of [usage,quota]) {
++      if (result.status === 'rejected' && result.reason instanceof ApiError && result.reason.status === 401) {onAuthRequired(); return;}
++    }
++    if (usage.status === 'fulfilled') {setData(usage.value);setUsageError(false);} else {setData(undefined);setUsageError(true);}
++    if (quota.status === 'fulfilled') {setAccounts(quota.value.accounts);setQuotaError(false);} else {setAccounts([]);setQuotaError(true);}
++    setLoading(false);
++  },[range,onAuthRequired]);
++  useEffect(() => {
++    const controller = new AbortController();
++    void refresh(controller.signal);
++    const timer = window.setInterval(() => void refresh(controller.signal),60000);
++    return () => {controller.abort();window.clearInterval(timer);};
++  },[refresh]);
++  const amount = (value: number) => value.toLocaleString();
++  const cost = (value: number | null | undefined) => value == null ? '—' : value.toLocaleString(undefined,{style:'currency',currency:'USD'});
++  const stats = data?.overview;
++  const buckets = stats?.series?.buckets ?? [];
++  const requests = stats?.series?.requests ?? [];
++  const maximum = Math.max(1,...requests);
++  return <div className={styles.page} data-keeper-page="read-only">
++    <DashboardHeader identity={t('read_only.title')} onLogout={() => void logout().finally(onAuthRequired)} />
++    <main className={styles.content}>
++      <div className={styles.toolbar}>
++        <div><h1>{t('read_only.title')}</h1><p>{t('read_only.scope')}</p></div>
++        <label>{t('read_only.range')} <select aria-label={t('read_only.range')} value={range} onChange={(event) => {setData(undefined);setRange(event.target.value);}}>
++          <option value="24h">{t('read_only.hours')}</option><option value="7d">{t('read_only.week')}</option><option value="30d">{t('read_only.month')}</option>
++        </select></label>
++        <Button loading={loading} disabled={loading} onClick={() => void refresh()}>{t('usage_stats.refresh')}</Button>
++      </div>
++      {usageError && <p role="alert">{t('read_only.error')}</p>}
++      {stats && <>
++        <div className={styles.stats}>
++          {[['requests',amount(stats.usage.total_requests)],['tokens',amount(stats.usage.total_tokens)],['failures',amount(stats.usage.failure_count)],['cost',cost(stats.summary?.cost_available ? stats.summary.total_cost : null)]].map(([label,value]) => <Card key={label}><p>{t(`read_only.${label}`)}</p><strong>{value}</strong></Card>)}
++        </div>
++        <Card><h2>{t('read_only.trend')}</h2><div className={styles.trend} role="img" aria-label={t('read_only.trend')}>
++          {buckets.map((bucket,index) => <div key={bucket} title={`${new Date(bucket).toLocaleString()}: ${amount(requests[index] ?? 0)}`} style={{height:`${Math.max(1,(requests[index] ?? 0)/maximum*100)}%`}} />)}
++        </div><p className={styles.period}>{buckets.length > 0 && `${new Date(buckets[0]).toLocaleString()} — ${new Date(buckets[buckets.length-1]).toLocaleString()}`}</p></Card>
++        <Card><h2>{t('read_only.keys')}</h2><div className={styles.table}><table>
++          <thead><tr>{['keys','requests','failures','tokens','cost'].map((label) => <th key={label}>{t(`read_only.${label}`)}</th>)}</tr></thead>
++          <tbody>{data?.keys.map((key) => <tr key={key.label}><th scope="row">{key.label}</th><td>{amount(key.requests)}</td><td>{amount(key.failures)}</td><td>{amount(key.total_tokens)}</td><td>{cost(key.cost)}</td></tr>)}</tbody>
++        </table></div>{data?.keys.length === 0 && <p>{t('read_only.empty')}</p>}</Card>
++      </>}
++      <h2>{t('key_quota.tab')}</h2><p>{t('key_quota.shared')}</p>
++      {quotaError && <p role="alert">{t('key_quota.error')}</p>}
++      {!loading && !quotaError && accounts.length === 0 && <p>{t('key_quota.empty')}</p>}
++      <QuotaAccounts accounts={accounts}/>
++    </main>
++  </div>;
++}
+diff --git a/web/src/pages/test/KeyQuotaPage.test.tsx b/web/src/pages/test/KeyQuotaPage.test.tsx
+index a124f06..90d8393 100644
+--- a/web/src/pages/test/KeyQuotaPage.test.tsx
++++ b/web/src/pages/test/KeyQuotaPage.test.tsx
+@@ -19,7 +19,7 @@ it('preserves unknown and zero quota and renders stale and unavailable accounts'
+   const container=document.createElement('div');document.body.append(container);const root=createRoot(container);
+   try {
+     await act(async () => root.render(<KeyQuotaPage apiKey={{display_key:'masked',quota_enabled:true}} onNavigate={() => undefined}/>));
+-    expect(container.textContent).toContain('67.5%');
++    expect(container.textContent).toMatch(/67[.,]5%/);
+     expect(container.textContent).toContain('Stale observation');
+     expect(container.textContent).toContain('Quota unavailable');
+     expect(container.textContent).toContain('Shared provider quota');
+diff --git a/web/src/pages/test/ReadOnlyLogin.test.tsx b/web/src/pages/test/ReadOnlyLogin.test.tsx
+new file mode 100644
+index 0000000..a941c86
+--- /dev/null
++++ b/web/src/pages/test/ReadOnlyLogin.test.tsx
+@@ -0,0 +1,23 @@
++// @vitest-environment happy-dom
++import React,{act} from 'react';
++import {createRoot} from 'react-dom/client';
++import {expect,it,vi} from 'vitest';
++import i18n from '@/i18n';
++import {LoginPage,getLoginErrorForMode} from '../LoginPage';
++
++it('offers a distinct read-only login while hiding public admin login',async () => {
++  globalThis.IS_REACT_ACT_ENVIRONMENT=true;window.__KEEPER_VIEWER_ONLY__=true;await i18n.changeLanguage('en');
++  const element=document.createElement('div');document.body.append(element);const root=createRoot(element);
++  try {
++    await act(async () => root.render(<LoginPage readOnlyEnabled onPasswordSubmit={vi.fn()} onAPIKeySubmit={vi.fn()} onReadOnlySubmit={vi.fn()}/>));
++    const tabs=Array.from(element.querySelectorAll<HTMLButtonElement>('button[role="tab"]'));
++    expect(tabs.find(tab=>tab.textContent==='Admin login')?.hidden ?? true).toBe(true);
++    const readOnly=tabs.find(tab=>tab.textContent==='Read-only overview');expect(readOnly).toBeDefined();
++    await act(async()=>readOnly!.click());
++    expect(element.textContent).toContain('Read-only password');
++    expect(element.textContent).toContain('Open overview');
++    expect(getLoginErrorForMode('read_only',{adminError:'admin',readOnlyError:'read-only'})).toBe('read-only');
++    await act(async () => root.render(<LoginPage onPasswordSubmit={vi.fn()} onAPIKeySubmit={vi.fn()}/>));
++    expect(Array.from(element.querySelectorAll('button[role="tab"]')).some(tab=>tab.textContent==='Read-only overview')).toBe(false);
++  }finally{await act(async()=>root.unmount());element.remove();delete window.__KEEPER_VIEWER_ONLY__;}
++});
+diff --git a/web/src/pages/test/ReadOnlyPage.test.tsx b/web/src/pages/test/ReadOnlyPage.test.tsx
+new file mode 100644
+index 0000000..a8c7666
+--- /dev/null
++++ b/web/src/pages/test/ReadOnlyPage.test.tsx
+@@ -0,0 +1,24 @@
++// @vitest-environment happy-dom
++import React,{act} from 'react';
++import {createRoot} from 'react-dom/client';
++import {expect,it,vi} from 'vitest';
++import i18n from '@/i18n';
++const api = vi.hoisted(() => ({fetchReadOnlyOverview:vi.fn(),fetchReadOnlyQuota:vi.fn()}));
++vi.mock('@/lib/api',async (original) => ({...await original<typeof import('@/lib/api')>(),...api}));
++import {ReadOnlyPage} from '../ReadOnlyPage';
++import {getRoleTargetPath} from '@/App';
++
++it('renders all-key totals and shared quota with only read controls',async () => {
++  globalThis.IS_REACT_ACT_ENVIRONMENT=true;await i18n.changeLanguage('en');
++  api.fetchReadOnlyOverview.mockResolvedValue({overview:{usage:{total_requests:7,total_tokens:700,failure_count:1},summary:{cost_available:true,total_cost:0},series:{buckets:[],requests:[]}},keys:[{label:'Client key 1',requests:2,failures:0,total_tokens:200,cost:null},{label:'Client key 2',requests:5,failures:1,total_tokens:500,cost:0}]});
++  api.fetchReadOnlyQuota.mockResolvedValue({accounts:[{label:'Codex account 1',status:'available',rows:[{label:'Weekly',remaining_percent:96}]}]});
++  const element=document.createElement('div');document.body.append(element);const root=createRoot(element);
++  try {
++    await act(async () => root.render(<ReadOnlyPage onAuthRequired={() => undefined}/>));
++    for(const value of ['Client key 1','Client key 2','96%','Read-only overview','Estimated API cost']) expect(element.textContent).toContain(value);
++    expect(element.textContent).not.toMatch(/Reset quota|Settings|Edit credential|Delete/);
++    expect(api.fetchReadOnlyOverview).toHaveBeenCalledWith('7d',expect.any(AbortSignal));
++    expect(getRoleTargetPath('read_only','/auth-files')).toBe('/read-only');
++    expect(getRoleTargetPath('api_key_viewer','/read-only')).toBe('/key-overview');
++  } finally {await act(async () => root.unmount());element.remove();}
++});

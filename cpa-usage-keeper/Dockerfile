@@ -7,13 +7,15 @@ RUN git init && git remote add origin https://github.com/willxup/cpa-usage-keepe
     && test "$(git rev-parse HEAD)" = 3f1b29aa5b0b5284b75ec53573b5146cd50fea1b
 COPY patches/viewer-quota.patch /tmp/viewer-quota.patch
 RUN git apply --check /tmp/viewer-quota.patch && git apply /tmp/viewer-quota.patch
+COPY patches/read-only-overview.patch /tmp/read-only-overview.patch
+RUN git apply --check /tmp/read-only-overview.patch && git apply /tmp/read-only-overview.patch
 
 FROM node:24-alpine AS web-builder
 WORKDIR /src/web
 COPY --from=source /src/web/package*.json ./
 RUN npm ci
 COPY --from=source /src/web/ ./
-RUN npm run typecheck && npm test -- --run src/pages/test/KeyQuotaPage.test.tsx src/features/key-viewer/test/quotaNavigation.test.tsx && npm run build
+RUN npm run typecheck && npm test -- --run src/pages/test/KeyQuotaPage.test.tsx src/pages/test/ReadOnlyPage.test.tsx src/pages/test/ReadOnlyLogin.test.tsx src/features/key-viewer/test/quotaNavigation.test.tsx && npm run build
 
 FROM golang:1.26-alpine AS go-builder
 RUN apk add --no-cache build-base
@@ -24,8 +26,8 @@ COPY --from=source /src/cmd/ ./cmd/
 COPY --from=source /src/internal/ ./internal/
 COPY --from=source /src/web/static.go ./web/static.go
 COPY --from=web-builder /src/web/dist ./web/dist
-RUN go test ./internal/api/test ./internal/config/test
-RUN CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=1.15.9-ha.1" -o /out/cpa-usage-keeper ./cmd/server/main.go
+RUN go test ./internal/api/test ./internal/config/test ./internal/auth/test
+RUN CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=1.15.9-ha.2" -o /out/cpa-usage-keeper ./cmd/server/main.go
 
 FROM ghcr.io/willxup/cpa-usage-keeper:1.15.9@sha256:5a3f3b51f6992fe81756d5d8a0aaaf6765084ff7f612add012ce96291be1eea3
 USER root
@@ -36,7 +38,7 @@ COPY run.sh bootstrap.py nginx.conf viewer-locations.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 ENV WORK_DIR=/data TZ=Europe/Berlin
 EXPOSE 8082
-ARG BUILD_VERSION=0.1.2
+ARG BUILD_VERSION=0.1.3
 LABEL io.hass.name="CPA Usage Keeper" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

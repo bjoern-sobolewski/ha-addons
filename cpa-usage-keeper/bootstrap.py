@@ -19,11 +19,15 @@ def environment(options):
         raise ValueError('Set the same management key as the CLIProxyAPI app (24 or more characters).')
     if len(options.get('login_password', '').strip()) < 16:
         raise ValueError('Set a separate Keeper login password of 16 or more characters.')
+    read_only = options.get('read_only_password', '').strip()
+    if read_only and (len(read_only) < 16 or read_only in (options['login_password'].strip(), options['management_key'].strip())):
+        raise ValueError('Set a distinct read-only password of 16 or more characters, or leave it empty to disable overview access.')
     return {
         **os.environ,
         'CPA_BASE_URL': url,
         'CPA_MANAGEMENT_KEY': options['management_key'],
         'LOGIN_PASSWORD': options['login_password'],
+        'READ_ONLY_PASSWORD': read_only,
         'AUTH_ENABLED': 'true',
         'API_KEY_VIEWER_QUOTA_ENABLED': 'true' if options.get('viewer_quota_enabled', False) is True else 'false',
         'APP_HOST': '0.0.0.0',

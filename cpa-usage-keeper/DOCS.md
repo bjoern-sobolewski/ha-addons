@@ -18,7 +18,17 @@ The view reads Keeper's existing quota cache. It shows remaining amounts/percent
 
 ## Optional public viewer path
 
-Enable `viewer_dashboard_enabled` to start the restricted dashboard at container port **8082**, under `/keeper/`. Both options default to false. Leave the 8082 host mapping disabled when your tunnel can use add-on DNS directly. This listener only forwards client-token login/logout, session/version, viewer reads and frontend assets. Admin password login, admin APIs, and all other paths/methods return 404, even with an admin cookie. The full LAN dashboard continues to use its current root path.
+Enable `viewer_dashboard_enabled` to start the restricted dashboard at container port **8082**, under `/keeper/`. Both options default to false. Leave the 8082 host mapping disabled when your tunnel can use add-on DNS directly. This listener only forwards client-token and read-only login/logout, session/version, dedicated viewer reads and frontend assets. Admin password login, admin APIs, and all other paths/methods return 404, even with an admin cookie. The full LAN dashboard continues to use its current root path.
+
+## Read-only overview across client keys
+
+Set `read_only_password` to a separate password of at least 16 characters to enable **Read-only overview** on the login page. It must differ from the Keeper admin password and CPA management secret. An empty value disables this access; it is empty by default. Share this password only with people authorized to see every client's usage. A CPA client key continues to grant only that key's usage view and the optional shared provider quota view.
+
+The overview shows aggregate requests, failures, tokens, estimated equivalent API cost, a request timeline, per-key usage and shared cached provider quota. Choose the last 24 hours, seven days or 30 days. Key labels are generated from Keeper's internal key IDs; historical deleted keys receive independent opaque labels. Actual keys, key fragments, aliases and provider credential identities are excluded. Costs are estimates, not additional subscription charges.
+
+The read-only role has dedicated reporting endpoints and cannot access the admin APIs, even directly on the LAN. It cannot edit settings, credentials, key aliases, prices or sessions, reset statistics/quota, or trigger provider quota probes. Reports use the existing history and quota cache. Read-only sessions are revoked on every Keeper restart, including when you change or clear the password. Admin and client-key sessions retain their existing behavior. Admins can also revoke an individual read-only session in the LAN dashboard's session list.
+
+For remote access, enable `viewer_dashboard_enabled` and use the same viewer prefix and HTTPS gateway described here. No additional hostname or WAF path exception is needed. Never publish the full admin listener. Leave the read-only password empty until you are ready to grant access; upgrading alone does not enable it.
 
 Set `viewer_base_path` to choose another prefix, for example `/viewer-RANDOM_VALUE`. Use a single segment starting with a letter or digit and containing at most 64 letters, digits, hyphens or underscores, with no trailing slash. `/v1` is reserved. Generate a random value locally and save it in HA options rather than committing your deployed path to a public repository. The prefix is applied to pages, assets, allowed APIs and session cookies. Only the selected prefix is served; `/keeper/` returns 404 when another prefix is selected. Keep client-token authentication enabled regardless of the path's randomness.
 

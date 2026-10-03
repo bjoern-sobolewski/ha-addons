@@ -156,6 +156,21 @@ class ConfigurationTests(unittest.TestCase):
             self.assertNotIn('privileged', config)
             self.assertNotIn('hassio_api', config)
 
+    def test_read_only_password_is_optional_and_distinct(self):
+        options = {'cpa_base_url': 'http://cpa:8317', 'management_key': 'm' * 32, 'login_password': 'p' * 32}
+        self.assertEqual(KEEPER.environment(options)['READ_ONLY_PASSWORD'], '')
+        self.assertEqual(KEEPER.environment({**options, 'read_only_password': 'r' * 32})['READ_ONLY_PASSWORD'], 'r' * 32)
+        for value in ('short', 'p' * 32, 'm' * 32):
+            with self.subTest(value_length=len(value)), self.assertRaises(ValueError):
+                KEEPER.environment({**options, 'read_only_password': value})
+
+    def test_read_only_gateway_uses_dedicated_routes(self):
+        locations = KEEPER.viewer_gateway_locations({'viewer_dashboard_enabled': True})
+        self.assertIn('read-only/(?:overview|key-quota)', locations)
+        self.assertIn('api-key-login|read-only-login|logout', locations)
+        self.assertNotIn('usage/overview', locations)
+        self.assertNotIn('auth/(?:login|', locations)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,5 +1,12 @@
 # CPA Usage Keeper setup
 
+Request Events shows **Fast requested** when the captured outgoing Codex tier is
+`priority` or `fast`. Its tooltip separates the client tier, upstream requested
+tier, and raw upstream reported tier. Older events without outgoing capture show
+the client value with `(client)`. Pricing rules can match `upstream_service_tier`
+across events and reports. This records request intent, not a confirmed served
+or billed tier.
+
 Set `cpa_base_url` to the private **root** URL of the CLIProxyAPI app, e.g. `http://abcdef12-cliproxyapi:8317`. Do not add `/v1` and do not use the API-only gateway on port 8080. The actual hostname comes from your installed CPA app identifier with underscores replaced by hyphens.
 
 Copy CPA's management secret into `management_key`. Set a separate `login_password` (16+ characters). Keeper always requires authentication. Start CPA first, then Keeper. Open the Keeper web UI on your trusted LAN at `http://HOME_ASSISTANT_IP:8081`. You can change or disable this host mapping in **Network** settings; ingress is not enabled in this release.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.20
+
+- Show Fast requested from the captured outgoing tier, preserve raw response metadata in tooltips, and support outgoing-tier pricing across events, exports, archives, caches and overview totals. Historical rows remain uncaptured.
+
 ## 0.1.19
 
 - Show a visible sparkline marker when a range contains only one observed bucket, including isolated known cache-rate points.

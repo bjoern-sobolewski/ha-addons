@@ -1,12 +1,16 @@
 # Changelog
 
+## 0.1.10
+
+- Capture the final outgoing Codex service tier after payload overrides for HTTP and WebSocket usage events; preserve client and response tier metadata.
+
 ## 0.1.9
 
 - Add distinct Refresh account data and Refresh credentials actions; keep the original separate Reset quota confirmation and eligibility.
 - Keep successful account data visible during refresh and preserve its observation time on failures.
 - Add a tiny refresh icon and compact observation age beside native Auth Files quota percentages, preserving plan, renewal, credit balance and manual-reset controls.
 - Show the actual provider observation timestamp and source on hover, focus or tap without triggering provider queries or resets.
-- Use the viewer browser’s time zone and regional date/time preferences for observation details and Auth Files reset clocks.
+- Use the viewer browserâ€™s time zone and regional date/time preferences for observation details and Auth Files reset clocks.
 
 ## 0.1.8
 

@@ -1,0 +1,232 @@
+diff --git a/internal/redisqueue/plugin.go b/internal/redisqueue/plugin.go
+index 10ecf27..9ca810d 100644
+--- a/internal/redisqueue/plugin.go
++++ b/internal/redisqueue/plugin.go
+@@ -153,6 +153,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
+ 		IsCompaction:        clientRequestMetadata.IsCompaction,
+ 		ReasoningEffort:     reasoningEffort,
+ 		ServiceTier:         serviceTier,
++		UpstreamServiceTier: strings.TrimSpace(record.UpstreamServiceTier),
+ 		ResponseServiceTier: responseServiceTier,
+ 		ResponseModel:       responseModel,
+ 	})
+@@ -183,6 +184,7 @@ type queuedUsageDetail struct {
+ 	IsCompaction        bool                     `json:"is_compaction,omitempty"`
+ 	ReasoningEffort     string                   `json:"reasoning_effort"`
+ 	ServiceTier         string                   `json:"service_tier"`
++	UpstreamServiceTier string                   `json:"upstream_service_tier,omitempty"`
+ 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+ 	ResponseModel       string                   `json:"response_model,omitempty"`
+ }
+diff --git a/internal/runtime/executor/codex_executor_execute.go b/internal/runtime/executor/codex_executor_execute.go
+index 7fdda8b..749dbce 100644
+--- a/internal/runtime/executor/codex_executor_execute.go
++++ b/internal/runtime/executor/codex_executor_execute.go
+@@ -103,6 +103,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
+ 	})
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
++	reporter.SetUpstreamServiceTier(upstreamBody)
+ 	httpResp, err := httpClient.Do(httpReq)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+@@ -274,6 +275,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
+ 	})
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
++	reporter.SetUpstreamServiceTier(upstreamBody)
+ 	httpResp, err := httpClient.Do(httpReq)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
+index bae496f..a9be8a9 100644
+--- a/internal/runtime/executor/codex_executor_stream.go
++++ b/internal/runtime/executor/codex_executor_stream.go
+@@ -112,6 +112,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 
+ 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
+ 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
++	reporter.SetUpstreamServiceTier(upstreamBody)
+ 	httpResp, err := httpClient.Do(httpReq)
+ 	if err != nil {
+ 		helps.RecordAPIResponseError(ctx, e.cfg, err)
+diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
+index 132e416..8d3cd8d 100644
+--- a/internal/runtime/executor/codex_websockets_duplex.go
++++ b/internal/runtime/executor/codex_websockets_duplex.go
+@@ -415,6 +415,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 				snapshot := *current
+ 				snapshot.originalPayload, snapshot.wsHeaders = nil, nil
+ 				snapshot.clientBody = []byte("{}")
++				if tier := gjson.GetBytes(current.clientBody, "service_tier"); tier.Exists() {
++					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "service_tier", []byte(tier.Raw))
++				}
+ 				if reasoning := gjson.GetBytes(current.clientBody, "reasoning"); reasoning.Exists() {
+ 					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "reasoning", []byte(reasoning.Raw))
+ 				}
+@@ -433,6 +436,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 				if !firstResponse {
+ 					reporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
+ 					reporter.SetTranslatedReasoningEffort(current.clientBody, current.to.String())
++					reporter.SetUpstreamServiceTier(current.clientBody)
+ 					reporter.StartResponseTTFT()
+ 				}
+ 				firstResponse = false
+@@ -518,6 +522,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 					eventPrepared, pending = pending[0], pending[1:]
+ 					eventReporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
+ 					eventReporter.SetTranslatedReasoningEffort(eventPrepared.clientBody, eventPrepared.to.String())
++					eventReporter.SetUpstreamServiceTier(eventPrepared.clientBody)
+ 				} else if !ambiguous {
+ 					responseActive = false
+ 					automaticActive = false
+diff --git a/internal/runtime/executor/codex_websockets_execute.go b/internal/runtime/executor/codex_websockets_execute.go
+index 7c6eca0..85076da 100644
+--- a/internal/runtime/executor/codex_websockets_execute.go
++++ b/internal/runtime/executor/codex_websockets_execute.go
+@@ -193,6 +193,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+ 	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
+ 
+ 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
++	reporter.SetUpstreamServiceTier(wsReqBody)
+ 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
+ 		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
+ 		if sess != nil && !isEphemeralSession {
+@@ -241,6 +242,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+ 				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+ 				reporter.StartResponseTTFT()
+ 				cliproxyexecutor.MarkUpstreamAttempt(ctx)
++				reporter.SetUpstreamServiceTier(wsReqBodyRetry)
+ 				if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry == nil {
+ 					wsReqBody = wsReqBodyRetry
+ 				} else {
+diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
+index b6bcb49..3f5cd4a 100644
+--- a/internal/runtime/executor/codex_websockets_stream.go
++++ b/internal/runtime/executor/codex_websockets_stream.go
+@@ -153,6 +153,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
+ 	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
+ 
+ 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
++	reporter.SetUpstreamServiceTier(wsReqBody)
+ 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
+ 		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
+ 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
+@@ -208,6 +209,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
+ 			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+ 			reporter.StartResponseTTFT()
+ 			cliproxyexecutor.MarkUpstreamAttempt(ctx)
++			reporter.SetUpstreamServiceTier(wsReqBodyRetry)
+ 			if errSendRetry := writeCodexWebsocketMessage(sess, conn, wsReqBodyRetry); errSendRetry != nil {
+ 				errSendRetry = mapCodexWebsocketWriteError(sess, conn, errSendRetry)
+ 				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
+diff --git a/internal/runtime/executor/helps/upstream_service_tier.go b/internal/runtime/executor/helps/upstream_service_tier.go
+new file mode 100644
+index 0000000..6349494
+--- /dev/null
++++ b/internal/runtime/executor/helps/upstream_service_tier.go
+@@ -0,0 +1,36 @@
++package helps
++
++import (
++	"strings"
++
++	"github.com/tidwall/gjson"
++)
++
++// SetUpstreamServiceTier records the final outgoing tier for this attempt.
++// It records request intent only; response-reported tiers remain independent.
++func (r *UsageReporter) SetUpstreamServiceTier(payload []byte) {
++	if r == nil || !gjson.ValidBytes(payload) {
++		return
++	}
++	tier := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "service_tier").String()))
++	if tier == "" {
++		tier = "auto"
++	}
++	switch tier {
++	case "auto", "default", "standard", "priority", "fast", "flex", "scale", "batch":
++	default:
++		return
++	}
++	r.upstreamTierMu.Lock()
++	r.upstreamServiceTier = tier
++	r.upstreamTierMu.Unlock()
++}
++
++func (r *UsageReporter) UpstreamServiceTier() string {
++	if r == nil {
++		return ""
++	}
++	r.upstreamTierMu.RLock()
++	defer r.upstreamTierMu.RUnlock()
++	return r.upstreamServiceTier
++}
+diff --git a/internal/runtime/executor/helps/upstream_service_tier_test.go b/internal/runtime/executor/helps/upstream_service_tier_test.go
+new file mode 100644
+index 0000000..ef78f24
+--- /dev/null
++++ b/internal/runtime/executor/helps/upstream_service_tier_test.go
+@@ -0,0 +1,28 @@
++package helps
++
++import (
++	"context"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
++	"testing"
++)
++
++func TestOutgoingTierIsIndependentOfClientAndResponse(t *testing.T) {
++	r := NewUsageReporter(usage.WithServiceTier(context.Background(), "auto"), "codex", "model", nil)
++	if r.UpstreamServiceTier() != "" {
++		t.Fatal("unsent requests must remain unknown")
++	}
++	r.SetUpstreamServiceTier([]byte(`{"service_tier":"priority"}`))
++	record := r.buildRecord(usage.Detail{ResponseServiceTier: "default", TotalTokens: 1}, false)
++	if record.ServiceTier != "auto" || record.UpstreamServiceTier != "priority" || record.ResponseServiceTier != "default" {
++		t.Fatalf("tiers must remain independent: %+v", record)
++	}
++	// A subsequent attempt must use its own outgoing payload.
++	r.SetUpstreamServiceTier([]byte(`{"service_tier":"default"}`))
++	if r.UpstreamServiceTier() != "default" {
++		t.Fatal("retry tier was not updated")
++	}
++	r.SetUpstreamServiceTier([]byte(`{"model":"model"}`))
++	if r.UpstreamServiceTier() != "auto" {
++		t.Fatal("omitted outgoing tier should be auto")
++	}
++}
+diff --git a/internal/runtime/executor/helps/usage_helpers.go b/internal/runtime/executor/helps/usage_helpers.go
+index 266012a..2709286 100644
+--- a/internal/runtime/executor/helps/usage_helpers.go
++++ b/internal/runtime/executor/helps/usage_helpers.go
+@@ -44,6 +44,8 @@ type UsageReporter struct {
+ 	source              string
+ 	reasoning           string
+ 	serviceTier         string
++	upstreamTierMu      sync.RWMutex
++	upstreamServiceTier string
+ 	generate            bool
+ 	stream              bool
+ 	requestedAt         time.Time
+@@ -651,6 +653,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
+ 		AuthType:            r.authType,
+ 		ReasoningEffort:     r.reasoning,
+ 		ServiceTier:         r.serviceTier,
++		UpstreamServiceTier: r.UpstreamServiceTier(),
+ 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+ 		ResponseModel:       responseModel,
+ 		Generate:            usage.GenerateFlag(r.generate),
+diff --git a/sdk/cliproxy/usage/manager.go b/sdk/cliproxy/usage/manager.go
+index 859dda3..cecfe16 100644
+--- a/sdk/cliproxy/usage/manager.go
++++ b/sdk/cliproxy/usage/manager.go
+@@ -46,6 +46,8 @@ type Record struct {
+ 	ReasoningEffort string
+ 	// ServiceTier stores the client-requested service tier.
+ 	ServiceTier string
++	// UpstreamServiceTier is the tier in the final outgoing request, not a granted tier.
++	UpstreamServiceTier string
+ 	// RequestServiceTier is a deprecated input-only alias retained for existing
+ 	// plugin callers. It is normalized into ServiceTier and never emitted.
+ 	RequestServiceTier string

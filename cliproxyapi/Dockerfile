@@ -17,11 +17,14 @@ COPY patches/oauth-compatibility.patch /tmp/oauth-compatibility.patch
 RUN git apply --check /tmp/oauth-compatibility.patch && git apply /tmp/oauth-compatibility.patch
 COPY patches/session-cache-test.patch /tmp/session-cache-test.patch
 RUN git apply --check /tmp/session-cache-test.patch && git apply /tmp/session-cache-test.patch
+COPY patches/upstream-service-tier.patch /tmp/upstream-service-tier.patch
+RUN git apply --check /tmp/upstream-service-tier.patch && git apply /tmp/upstream-service-tier.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/ ./
 RUN go test ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
-RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.10-ha.5" -o /out/CLIProxyAPI ./cmd/server
+RUN go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
+RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.10-ha.6" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -52,7 +55,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.9
+ARG BUILD_VERSION=0.1.10
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

@@ -1,0 +1,1517 @@
+diff --git a/internal/api/read_only_reporting.go b/internal/api/read_only_reporting.go
+index cee835c..f6bb247 100644
+--- a/internal/api/read_only_reporting.go
++++ b/internal/api/read_only_reporting.go
+@@ -114,7 +114,7 @@ func safeReadOnlyEvents(rows []servicedto.UsageEventRecord, labels readOnlyDashb
+ 		key := labels.keys[row.APIGroupKey].Label
+ 		account, label := labels.account(row.AuthIndex)
+ 		result = append(result, usageEventPayload{ID: strconv.FormatInt(row.ID, 10), Timestamp: row.Timestamp.Format(time.RFC3339Nano), APIKey: key,
+-			Model: row.Model, ModelAlias: row.ModelAlias, ResponseModel: row.ResponseModel, ReasoningEffort: row.ReasoningEffort, ServiceTier: row.ServiceTier, ResponseServiceTier: row.ResponseServiceTier,
++			Model: row.Model, ModelAlias: row.ModelAlias, ResponseModel: row.ResponseModel, ReasoningEffort: row.ReasoningEffort, ServiceTier: row.ServiceTier, UpstreamServiceTier: row.UpstreamServiceTier, ResponseServiceTier: row.ResponseServiceTier,
+ 			Source: label, SourceRaw: account, Failed: row.Failed, StatusCode: row.StatusCode, Stream: row.Stream, LatencyMS: row.LatencyMS, TTFTMS: row.TTFTMS, SpeedTPS: usageEventSpeedTPS(row),
+ 			Tokens: usageEventTokenPayload{InputTokens: row.InputTokens, OutputTokens: row.OutputTokens, ReasoningTokens: row.ReasoningTokens, CacheReadTokens: row.CacheReadTokens, CacheCreationTokens: row.CacheCreationTokens, TotalTokens: row.TotalTokens}, CostUSD: row.CostUSD, CostAvailable: row.CostAvailable})
+ 	}
+diff --git a/internal/api/test/usage_events_test.go b/internal/api/test/usage_events_test.go
+index 4431e70..e7824d2 100644
+--- a/internal/api/test/usage_events_test.go
++++ b/internal/api/test/usage_events_test.go
+@@ -306,6 +306,7 @@ func TestUsageEventsReturnsFilteredRows(t *testing.T) {
+ 		ResponseModel:       "actual-model",
+ 		ReasoningEffort:     "medium",
+ 		ServiceTier:         "auto",
++		UpstreamServiceTier: "priority",
+ 		ResponseServiceTier: "default",
+ 		ClientIP:            new("192.0.2.10"),
+ 		XForwardedFor:       new("203.0.113.5, 198.51.100.8"),
+@@ -673,6 +674,7 @@ func TestUsageEventsExportCSVReturnsFilteredRowsWithoutPagination(t *testing.T)
+ 		ResponseModel:       "actual-export-model",
+ 		ReasoningEffort:     "medium",
+ 		ServiceTier:         "auto",
++		UpstreamServiceTier: "priority",
+ 		ResponseServiceTier: "default",
+ 		ClientIP:            new("192.0.2.10"),
+ 		XForwardedFor:       new("203.0.113.5, 198.51.100.8"),
+@@ -747,7 +749,7 @@ func TestUsageEventsExportCSVReturnsFilteredRowsWithoutPagination(t *testing.T)
+ 	if !contains(body, "speed_tps,client_ip,x_forwarded_for,user_agent,input_tokens") || !contains(body, ",30.5,192.0.2.10,\"203.0.113.5, 198.51.100.8\",test-client/1.0,10,") {
+ 		t.Fatalf("expected client metadata after speed in csv export, got %s", body)
+ 	}
+-	if !contains(body, "service_tier,response_service_tier,executor_type") || !contains(body, ",auto,default,responses,") {
++	if !contains(body, "service_tier,response_service_tier,executor_type") || !contains(body, ",auto,priority,default,responses,") {
+ 		t.Fatalf("expected separate request and response service tiers in csv export, got %s", body)
+ 	}
+ 	if !contains(body, "result,status_code,stream,endpoint") || !contains(body, "failed,429,false,POST /v1/responses") {
+@@ -879,6 +881,7 @@ func TestUsageEventsExportJSONIncludesAllExportFields(t *testing.T) {
+ 		Model:               "gpt-5",
+ 		ModelAlias:          "gpt-json-alias",
+ 		ServiceTier:         "auto",
++		UpstreamServiceTier: "priority",
+ 		ResponseServiceTier: "default",
+ 		ClientIP:            new("192.0.2.11"),
+ 		XForwardedFor:       new("203.0.113.6"),
+diff --git a/internal/api/usage_events.go b/internal/api/usage_events.go
+index 978b791..a52cdef 100644
+--- a/internal/api/usage_events.go
++++ b/internal/api/usage_events.go
+@@ -50,6 +50,7 @@ type usageEventPayload struct {
+ 	ResponseModel       string                 `json:"response_model,omitempty"`
+ 	ReasoningEffort     string                 `json:"reasoning_effort,omitempty"`
+ 	ServiceTier         string                 `json:"service_tier,omitempty"`
++	UpstreamServiceTier string                 `json:"upstream_service_tier,omitempty"`
+ 	ResponseServiceTier string                 `json:"response_service_tier,omitempty"`
+ 	ClientIP            *string                `json:"client_ip"`
+ 	XForwardedFor       *string                `json:"x_forwarded_for"`
+@@ -117,6 +118,7 @@ type usageEventExportPayload struct {
+ 	ResponseModel       string   `json:"response_model"`
+ 	ReasoningEffort     string   `json:"reasoning_effort"`
+ 	ServiceTier         string   `json:"service_tier"`
++	UpstreamServiceTier string   `json:"upstream_service_tier"`
+ 	ResponseServiceTier string   `json:"response_service_tier"`
+ 	ClientIP            *string  `json:"client_ip"`
+ 	XForwardedFor       *string  `json:"x_forwarded_for"`
+@@ -440,6 +442,7 @@ func buildUsageEventsPayload(rows []servicedto.UsageEventRecord, resolver usageI
+ 			ResponseModel:       strings.TrimSpace(row.ResponseModel),
+ 			ReasoningEffort:     strings.TrimSpace(row.ReasoningEffort),
+ 			ServiceTier:         strings.TrimSpace(row.ServiceTier),
++			UpstreamServiceTier: strings.TrimSpace(row.UpstreamServiceTier),
+ 			ResponseServiceTier: strings.TrimSpace(row.ResponseServiceTier),
+ 			ClientIP:            row.ClientIP,
+ 			XForwardedFor:       row.XForwardedFor,
+@@ -535,6 +538,7 @@ func buildUsageEventExportPayload(row servicedto.UsageEventRecord, resolver usag
+ 		ResponseModel:       strings.TrimSpace(row.ResponseModel),
+ 		ReasoningEffort:     strings.TrimSpace(row.ReasoningEffort),
+ 		ServiceTier:         strings.TrimSpace(row.ServiceTier),
++		UpstreamServiceTier: strings.TrimSpace(row.UpstreamServiceTier),
+ 		ResponseServiceTier: strings.TrimSpace(row.ResponseServiceTier),
+ 		ClientIP:            row.ClientIP,
+ 		XForwardedFor:       row.XForwardedFor,
+@@ -589,6 +593,7 @@ var usageEventsExportCSVHeader = []string{
+ 	"response_model",
+ 	"reasoning_effort",
+ 	"service_tier",
++	"upstream_service_tier",
+ 	"response_service_tier",
+ 	"executor_type",
+ 	"result",
+@@ -789,6 +794,7 @@ func usageEventExportCSVRecord(event usageEventExportPayload) []string {
+ 		event.ResponseModel,
+ 		event.ReasoningEffort,
+ 		event.ServiceTier,
++		event.UpstreamServiceTier,
+ 		event.ResponseServiceTier,
+ 		event.ExecutorType,
+ 		event.Result,
+diff --git a/internal/benchmark/capacity/dataset.go b/internal/benchmark/capacity/dataset.go
+index d269d81..d2e9d87 100644
+--- a/internal/benchmark/capacity/dataset.go
++++ b/internal/benchmark/capacity/dataset.go
+@@ -107,6 +107,7 @@ type generatedEvent struct {
+ 	ModelAlias          string
+ 	ReasoningEffort     string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ExecutorType        string
+ 	Timestamp           time.Time
+@@ -522,7 +523,7 @@ func eventInsertArgs(event generatedEvent) []any {
+ 	return []any{
+ 		event.ID, event.EventKey, event.APIGroupKey, event.Provider, event.Endpoint, event.AuthType, event.RequestID,
+ 		"", "",
+-		nil, nil, nil, event.Model, event.ModelAlias, "", event.ReasoningEffort, event.ServiceTier, event.ResponseServiceTier,
++		nil, nil, nil, event.Model, event.ModelAlias, "", event.ReasoningEffort, event.ServiceTier, event.UpstreamServiceTier, event.ResponseServiceTier,
+ 		event.ExecutorType, timestamp, event.Source, event.AuthIndex, event.Failed, event.StatusCode, true, event.Stream, event.LatencyMS, event.TTFTMS,
+ 		event.InputTokens, event.OutputTokens, event.ReasoningTokens, event.CachedTokens, event.CacheReadTokens,
+ 		event.CacheCreationTokens, event.TotalTokens, timestamp,
+diff --git a/internal/entities/test/entities_test.go b/internal/entities/test/entities_test.go
+index c8414b0..61a68b0 100644
+--- a/internal/entities/test/entities_test.go
++++ b/internal/entities/test/entities_test.go
+@@ -117,7 +117,7 @@ func TestUsageOverviewSchemaIncludesFiveAggregationDimensions(t *testing.T) {
+ 		t.Fatalf("AutoMigrate usage overview schema returned error: %v", err)
+ 	}
+ 
+-	dimensions := []string{"service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type"}
++	dimensions := []string{"service_tier", "upstream_service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type"}
+ 	for _, table := range []string{"usage_overview_hourly_stats", "usage_overview_daily_stats"} {
+ 		for _, dimension := range dimensions {
+ 			if !db.Migrator().HasColumn(table, dimension) {
+@@ -159,7 +159,7 @@ func assertUsageOverviewDimensionIndex(t *testing.T, db *gorm.DB, table string,
+ 	if err := db.Raw("PRAGMA index_info(" + name + ")").Scan(&rows).Error; err != nil {
+ 		t.Fatalf("load index %s columns: %v", name, err)
+ 	}
+-	want := []string{"bucket_start", "api_group_key", "model", "auth_index", "model_alias", "service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type"}
++	want := []string{"bucket_start", "api_group_key", "model", "auth_index", "model_alias", "service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type", "upstream_service_tier"}
+ 	got := make([]string, len(rows))
+ 	for index, row := range rows {
+ 		got[index] = row.Name
+diff --git a/internal/entities/usage_aggregation_checkpoint.go b/internal/entities/usage_aggregation_checkpoint.go
+index 0620526..19faccf 100644
+--- a/internal/entities/usage_aggregation_checkpoint.go
++++ b/internal/entities/usage_aggregation_checkpoint.go
+@@ -13,7 +13,7 @@ const (
+ 	// UsageAggregationCheckpointLatency 对应 Latency hour/day 的已提交水位。
+ 	UsageAggregationCheckpointLatency UsageAggregationCheckpointName = "latency"
+ 	// UsageAggregationEventProjectionColumns 是运行时和 Latency migration 共用的事件读取契约。
+-	UsageAggregationEventProjectionColumns = "id, api_group_key, model, model_alias, auth_index, service_tier, response_service_tier, reasoning_effort, endpoint, executor_type, timestamp, failed, generate, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens"
++	UsageAggregationEventProjectionColumns = "id, api_group_key, model, model_alias, auth_index, service_tier, upstream_service_tier, response_service_tier, reasoning_effort, endpoint, executor_type, timestamp, failed, generate, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens"
+ )
+ 
+ // UsageAggregationCheckpoint 用一张表保存三个独立 cursor，避免同构 checkpoint 表继续增长。
+diff --git a/internal/entities/usage_event.go b/internal/entities/usage_event.go
+index e54db8d..281a616 100644
+--- a/internal/entities/usage_event.go
++++ b/internal/entities/usage_event.go
+@@ -21,6 +21,7 @@ type UsageEvent struct {
+ 	ResponseModel       string    `gorm:"column:response_model;not null;default:''"`
+ 	ReasoningEffort     string    `gorm:"column:reasoning_effort;not null;default:''"`
+ 	ServiceTier         string    `gorm:"column:service_tier;not null;default:''"`
++	UpstreamServiceTier string    `gorm:"column:upstream_service_tier;not null;default:''"`
+ 	ResponseServiceTier string    `gorm:"column:response_service_tier;not null;default:''"`
+ 	ExecutorType        string    `gorm:"column:executor_type;not null;default:''"`
+ 	Timestamp           time.Time `gorm:"serializer:storageTime;index:idx_usage_events_timestamp_id,sort:desc,priority:1;index:idx_usage_events_auth_index_timestamp_id,priority:2;index:idx_usage_events_api_group_key_timestamp,priority:2"`
+diff --git a/internal/entities/usage_event_archive.go b/internal/entities/usage_event_archive.go
+index fb98be6..d38f5cd 100644
+--- a/internal/entities/usage_event_archive.go
++++ b/internal/entities/usage_event_archive.go
+@@ -3,7 +3,7 @@ package entities
+ import "time"
+ 
+ // UsageEventStorageColumns 是 hot/archive 原始事件复制使用的完整持久化列契约。
+-const UsageEventStorageColumns = "id, event_key, api_group_key, provider, endpoint, auth_type, request_id, session_id, parent_session_id, client_ip, x_forwarded_for, user_agent, model, model_alias, response_model, reasoning_effort, service_tier, response_service_tier, executor_type, timestamp, source, auth_index, failed, status_code, generate, stream, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, created_at"
++const UsageEventStorageColumns = "id, event_key, api_group_key, provider, endpoint, auth_type, request_id, session_id, parent_session_id, client_ip, x_forwarded_for, user_agent, model, model_alias, response_model, reasoning_effort, service_tier, upstream_service_tier, response_service_tier, executor_type, timestamp, source, auth_index, failed, status_code, generate, stream, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, created_at"
+ 
+ // UsageEventArchive 永久保存已经离开 hot usage_events 的原始事件。
+ // 字段必须与 UsageEvent 的持久化列保持一致，但 archive 不承担在线查询，因此不复制二级索引。
+@@ -25,6 +25,7 @@ type UsageEventArchive struct {
+ 	ResponseModel       string    `gorm:"column:response_model;not null;default:''"`
+ 	ReasoningEffort     string    `gorm:"column:reasoning_effort;not null;default:''"`
+ 	ServiceTier         string    `gorm:"column:service_tier;not null;default:''"`
++	UpstreamServiceTier string    `gorm:"column:upstream_service_tier;not null;default:''"`
+ 	ResponseServiceTier string    `gorm:"column:response_service_tier;not null;default:''"`
+ 	ExecutorType        string    `gorm:"column:executor_type;not null;default:''"`
+ 	Timestamp           time.Time `gorm:"serializer:storageTime"`
+diff --git a/internal/entities/usage_overview_daily_stat.go b/internal/entities/usage_overview_daily_stat.go
+index d98bf96..43fe346 100644
+--- a/internal/entities/usage_overview_daily_stat.go
++++ b/internal/entities/usage_overview_daily_stat.go
+@@ -11,6 +11,7 @@ type UsageOverviewDailyStat struct {
+ 	AuthIndex           string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_daily_stats_dimensions,priority:4;index:idx_usage_overview_daily_stats_auth_bucket,priority:1"`
+ 	ModelAlias          string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_daily_stats_dimensions,priority:5;index:idx_usage_overview_daily_stats_model_alias_bucket,priority:1"`
+ 	ServiceTier         string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_daily_stats_dimensions,priority:6"`
++	UpstreamServiceTier string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_daily_stats_dimensions,priority:11"`
+ 	ResponseServiceTier string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_daily_stats_dimensions,priority:7"`
+ 	ReasoningEffort     string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_daily_stats_dimensions,priority:8"`
+ 	Endpoint            string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_daily_stats_dimensions,priority:9"`
+diff --git a/internal/entities/usage_overview_hourly_stat.go b/internal/entities/usage_overview_hourly_stat.go
+index 3fd43f7..5272d18 100644
+--- a/internal/entities/usage_overview_hourly_stat.go
++++ b/internal/entities/usage_overview_hourly_stat.go
+@@ -11,6 +11,7 @@ type UsageOverviewHourlyStat struct {
+ 	AuthIndex           string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_hourly_stats_dimensions,priority:4;index:idx_usage_overview_hourly_stats_auth_bucket,priority:1"`
+ 	ModelAlias          string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_hourly_stats_dimensions,priority:5;index:idx_usage_overview_hourly_stats_model_alias_bucket,priority:1"`
+ 	ServiceTier         string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_hourly_stats_dimensions,priority:6"`
++	UpstreamServiceTier string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_hourly_stats_dimensions,priority:11"`
+ 	ResponseServiceTier string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_hourly_stats_dimensions,priority:7"`
+ 	ReasoningEffort     string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_hourly_stats_dimensions,priority:8"`
+ 	Endpoint            string    `gorm:"not null;default:'';uniqueIndex:uniq_usage_overview_hourly_stats_dimensions,priority:9"`
+diff --git a/internal/overview/aggregate.go b/internal/overview/aggregate.go
+index 084e4e9..a065604 100644
+--- a/internal/overview/aggregate.go
++++ b/internal/overview/aggregate.go
+@@ -16,6 +16,7 @@ type aggregateKey struct {
+ 	AuthIndex           string
+ 	ModelAlias          string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ReasoningEffort     string
+ 	Endpoint            string
+@@ -40,6 +41,7 @@ func BuildRows(events []entities.UsageEvent) ([]entities.UsageOverviewHourlyStat
+ 			Model:               normalizeRequiredDimension(event.Model),
+ 			AuthIndex:           normalizeOptionalDimension(event.AuthIndex),
+ 			ServiceTier:         normalizeOptionalDimension(event.ServiceTier),
++			UpstreamServiceTier: normalizeOptionalDimension(event.UpstreamServiceTier),
+ 			ResponseServiceTier: normalizeOptionalDimension(event.ResponseServiceTier),
+ 			ReasoningEffort:     normalizeOptionalDimension(event.ReasoningEffort),
+ 			Endpoint:            normalizeOptionalDimension(event.Endpoint),
+@@ -62,6 +64,7 @@ func BuildRows(events []entities.UsageEvent) ([]entities.UsageOverviewHourlyStat
+ 			hourly[hourKey] = &entities.UsageOverviewHourlyStat{
+ 				BucketStart: hourKey.BucketStart, APIGroupKey: hourKey.APIGroupKey, Model: hourKey.Model,
+ 				AuthIndex: hourKey.AuthIndex, ModelAlias: hourKey.ModelAlias, ServiceTier: hourKey.ServiceTier,
++				UpstreamServiceTier: hourKey.UpstreamServiceTier,
+ 				ResponseServiceTier: hourKey.ResponseServiceTier, ReasoningEffort: hourKey.ReasoningEffort,
+ 				Endpoint: hourKey.Endpoint, ExecutorType: hourKey.ExecutorType,
+ 			}
+@@ -70,6 +73,7 @@ func BuildRows(events []entities.UsageEvent) ([]entities.UsageOverviewHourlyStat
+ 			daily[dayKey] = &entities.UsageOverviewDailyStat{
+ 				BucketStart: dayKey.BucketStart, APIGroupKey: dayKey.APIGroupKey, Model: dayKey.Model,
+ 				AuthIndex: dayKey.AuthIndex, ModelAlias: dayKey.ModelAlias, ServiceTier: dayKey.ServiceTier,
++				UpstreamServiceTier: dayKey.UpstreamServiceTier,
+ 				ResponseServiceTier: dayKey.ResponseServiceTier, ReasoningEffort: dayKey.ReasoningEffort,
+ 				Endpoint: dayKey.Endpoint, ExecutorType: dayKey.ExecutorType,
+ 			}
+@@ -142,15 +146,15 @@ func addEventToDailyRow(row *entities.UsageOverviewDailyStat, event entities.Usa
+ 
+ func hourlyRowLess(left, right entities.UsageOverviewHourlyStat) bool {
+ 	return dimensionsLess(
+-		aggregateKey{left.BucketStart, left.APIGroupKey, left.Model, left.AuthIndex, left.ModelAlias, left.ServiceTier, left.ResponseServiceTier, left.ReasoningEffort, left.Endpoint, left.ExecutorType},
+-		aggregateKey{right.BucketStart, right.APIGroupKey, right.Model, right.AuthIndex, right.ModelAlias, right.ServiceTier, right.ResponseServiceTier, right.ReasoningEffort, right.Endpoint, right.ExecutorType},
++		aggregateKey{left.BucketStart, left.APIGroupKey, left.Model, left.AuthIndex, left.ModelAlias, left.ServiceTier, left.UpstreamServiceTier, left.ResponseServiceTier, left.ReasoningEffort, left.Endpoint, left.ExecutorType},
++		aggregateKey{right.BucketStart, right.APIGroupKey, right.Model, right.AuthIndex, right.ModelAlias, right.ServiceTier, right.UpstreamServiceTier, right.ResponseServiceTier, right.ReasoningEffort, right.Endpoint, right.ExecutorType},
+ 	)
+ }
+ 
+ func dailyRowLess(left, right entities.UsageOverviewDailyStat) bool {
+ 	return dimensionsLess(
+-		aggregateKey{left.BucketStart, left.APIGroupKey, left.Model, left.AuthIndex, left.ModelAlias, left.ServiceTier, left.ResponseServiceTier, left.ReasoningEffort, left.Endpoint, left.ExecutorType},
+-		aggregateKey{right.BucketStart, right.APIGroupKey, right.Model, right.AuthIndex, right.ModelAlias, right.ServiceTier, right.ResponseServiceTier, right.ReasoningEffort, right.Endpoint, right.ExecutorType},
++		aggregateKey{left.BucketStart, left.APIGroupKey, left.Model, left.AuthIndex, left.ModelAlias, left.ServiceTier, left.UpstreamServiceTier, left.ResponseServiceTier, left.ReasoningEffort, left.Endpoint, left.ExecutorType},
++		aggregateKey{right.BucketStart, right.APIGroupKey, right.Model, right.AuthIndex, right.ModelAlias, right.ServiceTier, right.UpstreamServiceTier, right.ResponseServiceTier, right.ReasoningEffort, right.Endpoint, right.ExecutorType},
+ 	)
+ }
+ 
+@@ -158,8 +162,8 @@ func dimensionsLess(left, right aggregateKey) bool {
+ 	if !left.BucketStart.Equal(right.BucketStart) {
+ 		return left.BucketStart.Before(right.BucketStart)
+ 	}
+-	leftValues := [...]string{left.APIGroupKey, left.Model, left.AuthIndex, left.ModelAlias, left.ServiceTier, left.ResponseServiceTier, left.ReasoningEffort, left.Endpoint, left.ExecutorType}
+-	rightValues := [...]string{right.APIGroupKey, right.Model, right.AuthIndex, right.ModelAlias, right.ServiceTier, right.ResponseServiceTier, right.ReasoningEffort, right.Endpoint, right.ExecutorType}
++	leftValues := [...]string{left.APIGroupKey, left.Model, left.AuthIndex, left.ModelAlias, left.ServiceTier, left.UpstreamServiceTier, left.ResponseServiceTier, left.ReasoningEffort, left.Endpoint, left.ExecutorType}
++	rightValues := [...]string{right.APIGroupKey, right.Model, right.AuthIndex, right.ModelAlias, right.ServiceTier, right.UpstreamServiceTier, right.ResponseServiceTier, right.ReasoningEffort, right.Endpoint, right.ExecutorType}
+ 	for index := range leftValues {
+ 		if leftValues[index] != rightValues[index] {
+ 			return leftValues[index] < rightValues[index]
+diff --git a/internal/pricing/fields.go b/internal/pricing/fields.go
+index b5fecf5..66cd846 100644
+--- a/internal/pricing/fields.go
++++ b/internal/pricing/fields.go
+@@ -19,6 +19,7 @@ const (
+ 	RuleFieldReasoningEffort
+ 	RuleFieldEndpoint
+ 	RuleFieldExecutorType
++	RuleFieldUpstreamServiceTier
+ 	ruleFieldCount
+ )
+ 
+@@ -28,6 +29,7 @@ var ruleFieldNames = [...]string{
+ 	RuleFieldAuthIndex:           "auth_index",
+ 	RuleFieldModelAlias:          "model_alias",
+ 	RuleFieldServiceTier:         "service_tier",
++	RuleFieldUpstreamServiceTier: "upstream_service_tier",
+ 	RuleFieldResponseServiceTier: "response_service_tier",
+ 	RuleFieldReasoningEffort:     "reasoning_effort",
+ 	RuleFieldEndpoint:            "endpoint",
+@@ -86,6 +88,7 @@ type UsageDimensions struct {
+ 	AuthIndex           string
+ 	ModelAlias          string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ReasoningEffort     string
+ 	Endpoint            string
+@@ -104,6 +107,8 @@ func (d UsageDimensions) Value(field RuleField) string {
+ 		return d.ModelAlias
+ 	case RuleFieldServiceTier:
+ 		return d.ServiceTier
++	case RuleFieldUpstreamServiceTier:
++		return d.UpstreamServiceTier
+ 	case RuleFieldResponseServiceTier:
+ 		return d.ResponseServiceTier
+ 	case RuleFieldReasoningEffort:
+@@ -123,6 +128,7 @@ func canonicalizeUsageDimensions(dimensions UsageDimensions) UsageDimensions {
+ 	dimensions.AuthIndex = strings.TrimSpace(dimensions.AuthIndex)
+ 	dimensions.ModelAlias = strings.TrimSpace(dimensions.ModelAlias)
+ 	dimensions.ServiceTier = strings.TrimSpace(dimensions.ServiceTier)
++	dimensions.UpstreamServiceTier = strings.TrimSpace(dimensions.UpstreamServiceTier)
+ 	dimensions.ResponseServiceTier = strings.TrimSpace(dimensions.ResponseServiceTier)
+ 	dimensions.ReasoningEffort = strings.TrimSpace(dimensions.ReasoningEffort)
+ 	dimensions.Endpoint = strings.TrimSpace(dimensions.Endpoint)
+diff --git a/internal/pricing/test/fields_test.go b/internal/pricing/test/fields_test.go
+index 7d26c48..02bfb5e 100644
+--- a/internal/pricing/test/fields_test.go
++++ b/internal/pricing/test/fields_test.go
+@@ -56,6 +56,7 @@ func TestNewCostSubjectCanonicalizesEveryPricingDimension(t *testing.T) {
+ 		AuthIndex:           " auth-1 ",
+ 		ModelAlias:          " alias-1 ",
+ 		ServiceTier:         " priority ",
++		UpstreamServiceTier: "",
+ 		ResponseServiceTier: " default ",
+ 		ReasoningEffort:     " xhigh ",
+ 		Endpoint:            " /v1/responses ",
+diff --git a/internal/pricing/test/resolver_test.go b/internal/pricing/test/resolver_test.go
+index cce9de1..89f11a4 100644
+--- a/internal/pricing/test/resolver_test.go
++++ b/internal/pricing/test/resolver_test.go
+@@ -150,6 +150,7 @@ func TestResolverSupportsAllNineRuleFields(t *testing.T) {
+ 		AuthIndex:           "auth",
+ 		ModelAlias:          "alias",
+ 		ServiceTier:         "priority",
++		UpstreamServiceTier: "",
+ 		ResponseServiceTier: "priority",
+ 		ReasoningEffort:     "xhigh",
+ 		Endpoint:            "/v1/responses",
+diff --git a/internal/repository/codex_quota_efficiency.go b/internal/repository/codex_quota_efficiency.go
+index 9fdfc91..efad45f 100644
+--- a/internal/repository/codex_quota_efficiency.go
++++ b/internal/repository/codex_quota_efficiency.go
+@@ -40,6 +40,7 @@ type codexQuotaEfficiencyUsageEventRow struct {
+ 	Model               string
+ 	ModelAlias          string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ReasoningEffort     string
+ 	Endpoint            string
+@@ -60,6 +61,7 @@ type codexQuotaEfficiencyPricingKey struct {
+ 	Model               string
+ 	ModelAlias          string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ReasoningEffort     string
+ 	Endpoint            string
+@@ -466,7 +468,7 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 	for rows.Next() {
+ 		if err := rows.Scan(
+ 			&event.APIGroupKey, &event.Model, &event.ModelAlias,
+-			&event.ServiceTier, &event.ResponseServiceTier, &event.ReasoningEffort, &event.Endpoint, &event.ExecutorType,
++			&event.ServiceTier, &event.UpstreamServiceTier, &event.ResponseServiceTier, &event.ReasoningEffort, &event.Endpoint, &event.ExecutorType,
+ 			&event.Timestamp, &event.Failed, &event.InputTokens, &event.OutputTokens, &event.ReasoningTokens,
+ 			&event.CacheReadTokens, &event.CacheCreationTokens, &event.TotalTokens,
+ 		); err != nil {
+@@ -530,7 +532,7 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ }
+ 
+ func codexQuotaEfficiencyPricingProjection(active pricing.ActiveFields, keepAll bool) string {
+-	columns := []string{"api_group_key", "model", "model_alias", "service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type"}
++	columns := []string{"api_group_key", "model", "model_alias", "service_tier", "upstream_service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type"}
+ 	activeColumns := UsagePricingDimensionColumns(active)
+ 	for index, column := range columns {
+ 		// 固定列位置供直接 Scan；未参与本次价格规则的维度不读取，也不拆分计价组。
+@@ -578,6 +580,7 @@ func (a *codexQuotaEfficiencyUsageAccumulator) add(event codexQuotaEfficiencyUsa
+ 		Model:               event.Model,
+ 		ModelAlias:          event.ModelAlias,
+ 		ServiceTier:         event.ServiceTier,
++		UpstreamServiceTier: event.UpstreamServiceTier,
+ 		ResponseServiceTier: event.ResponseServiceTier,
+ 		ReasoningEffort:     event.ReasoningEffort,
+ 		Endpoint:            event.Endpoint,
+@@ -598,7 +601,7 @@ func (a *codexQuotaEfficiencyUsageAccumulator) finalize(authIndex string, costRe
+ 	}
+ 	for key, tokens := range a.pricingTokens {
+ 		cost := costResolver.Calculate(newUsagePricingCostSubject(
+-			key.APIGroupKey, key.Model, authIndex, key.ModelAlias, key.ServiceTier, key.ResponseServiceTier,
++			key.APIGroupKey, key.Model, authIndex, key.ModelAlias, key.ServiceTier, key.UpstreamServiceTier, key.ResponseServiceTier,
+ 			key.ReasoningEffort, key.Endpoint, key.ExecutorType,
+ 			tokens.InputTokens, tokens.OutputTokens, tokens.CacheReadTokens, tokens.CacheCreationTokens,
+ 		))
+diff --git a/internal/repository/dto/usage_events.go b/internal/repository/dto/usage_events.go
+index fa57871..7ef3810 100644
+--- a/internal/repository/dto/usage_events.go
++++ b/internal/repository/dto/usage_events.go
+@@ -27,6 +27,7 @@ type UsageEventRecord struct {
+ 	ResponseModel       string
+ 	ReasoningEffort     string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ClientIP            *string
+ 	XForwardedFor       *string
+diff --git a/internal/repository/migration/20260723_usage_overview_five_dimensions.go b/internal/repository/migration/20260723_usage_overview_five_dimensions.go
+index 649f30b..b08038a 100644
+--- a/internal/repository/migration/20260723_usage_overview_five_dimensions.go
++++ b/internal/repository/migration/20260723_usage_overview_five_dimensions.go
+@@ -146,6 +146,7 @@ func addUsageOverviewFiveDimensionColumns(tx *gorm.DB, rollup usageOverviewFiveD
+ 		field string
+ 	}{
+ 		{name: "service_tier", field: "ServiceTier"},
++		{name: "upstream_service_tier", field: "UpstreamServiceTier"},
+ 		{name: "response_service_tier", field: "ResponseServiceTier"},
+ 		{name: "reasoning_effort", field: "ReasoningEffort"},
+ 		{name: "endpoint", field: "Endpoint"},
+diff --git a/internal/repository/migration/20260726_usage_latency_stats.go b/internal/repository/migration/20260726_usage_latency_stats.go
+index 6929d5d..b4ccdf3 100644
+--- a/internal/repository/migration/20260726_usage_latency_stats.go
++++ b/internal/repository/migration/20260726_usage_latency_stats.go
+@@ -2,6 +2,7 @@ package migration
+ 
+ import (
+ 	"fmt"
++	"strings"
+ 	"time"
+ 
+ 	"cpa-usage-keeper/internal/entities"
+@@ -64,7 +65,7 @@ func migrateUsageLatencyBatch(db *gorm.DB, now time.Time, targetEventID int64) (
+ 
+ 		// migration 与运行时共享同一固定字段投影，避免历史回填悄悄形成第二套数据契约。
+ 		var events []entities.UsageEvent
+-		if err := tx.Select(entities.UsageAggregationEventProjectionColumns).
++		if err := tx.Select(strings.Replace(entities.UsageAggregationEventProjectionColumns, "upstream_service_tier, ", "", 1)).
+ 			Where("id > ? AND id <= ?", checkpoint.LastAggregatedUsageEventID, targetEventID).
+ 			Order("id asc").
+ 			Limit(usageLatencyMigrationBatchSize).
+diff --git a/internal/repository/migration/20261005_usage_upstream_service_tier.go b/internal/repository/migration/20261005_usage_upstream_service_tier.go
+new file mode 100644
+index 0000000..0a1970e
+--- /dev/null
++++ b/internal/repository/migration/20261005_usage_upstream_service_tier.go
+@@ -0,0 +1,41 @@
++package migration
++
++import (
++	"fmt"
++
++	"cpa-usage-keeper/internal/entities"
++	"gorm.io/gorm"
++)
++
++// Historical rows stay empty: an alias cannot prove the payload sent upstream.
++func addUsageUpstreamServiceTierMigration(tx *gorm.DB) error {
++	for _, model := range []any{
++		&entities.UsageEvent{}, &entities.UsageEventArchive{},
++		&entities.UsageOverviewHourlyStat{}, &entities.UsageOverviewDailyStat{},
++	} {
++		if !tx.Migrator().HasColumn(model, "upstream_service_tier") {
++			if err := tx.Migrator().AddColumn(model, "UpstreamServiceTier"); err != nil {
++				return fmt.Errorf("add outgoing service tier: %w", err)
++			}
++		}
++	}
++	// Keep captured request tiers separate in rollups, including when the response
++	// reports the same value for Standard and Fast requests.
++	for _, item := range []struct {
++		model any
++		index string
++	}{
++		{&entities.UsageOverviewHourlyStat{}, "uniq_usage_overview_hourly_stats_dimensions"},
++		{&entities.UsageOverviewDailyStat{}, "uniq_usage_overview_daily_stats_dimensions"},
++	} {
++		if tx.Migrator().HasIndex(item.model, item.index) {
++			if err := tx.Migrator().DropIndex(item.model, item.index); err != nil {
++				return fmt.Errorf("replace outgoing tier rollup index: %w", err)
++			}
++		}
++		if err := tx.Migrator().CreateIndex(item.model, item.index); err != nil {
++			return fmt.Errorf("create outgoing tier rollup index: %w", err)
++		}
++	}
++	return nil
++}
+diff --git a/internal/repository/migration/migration.go b/internal/repository/migration/migration.go
+index 22c55d3..61c681c 100644
+--- a/internal/repository/migration/migration.go
++++ b/internal/repository/migration/migration.go
+@@ -252,6 +252,7 @@ func orderedMigrations() []databaseMigration {
+ 		{version: migrationAddUsageEventStreamStatusCode, run: addUsageEventStreamStatusCodeMigration},
+ 		{version: migrationNormalizeUsageEventParentSessionNull, run: normalizeUsageEventParentSessionNullMigration},
+ 		{version: migrationLimitLatencySamplePoints, run: limitLatencySamplePointsMigration, destructive: true},
++		{version: "20261005_usage_upstream_service_tier", run: addUsageUpstreamServiceTierMigration},
+ 	}
+ }
+ 
+diff --git a/internal/repository/migration/test/migration_test.go b/internal/repository/migration/test/migration_test.go
+index 651131d..7d5fd17 100644
+--- a/internal/repository/migration/test/migration_test.go
++++ b/internal/repository/migration/test/migration_test.go
+@@ -94,6 +94,7 @@ func TestOrderedMigrationsPreservesExecutionOrder(t *testing.T) {
+ 		"20260919_usage_event_stream_status_code",
+ 		"20260922_normalize_usage_event_parent_session_null",
+ 		"20260925_limit_latency_sample_points",
++		"20261005_usage_upstream_service_tier",
+ 	}
+ 	assertStringSlicesEqual(t, want, got)
+ }
+diff --git a/internal/repository/migration/test/upstream_service_tier_test.go b/internal/repository/migration/test/upstream_service_tier_test.go
+new file mode 100644
+index 0000000..6dfccb2
+--- /dev/null
++++ b/internal/repository/migration/test/upstream_service_tier_test.go
+@@ -0,0 +1,42 @@
++package test
++
++import (
++	"cpa-usage-keeper/internal/entities"
++	"testing"
++)
++
++func TestOutgoingTierMigrationPreservesUncapturedHistory(t *testing.T) {
++	db := openUnmigratedTestDatabase(t)
++	if err := db.AutoMigrate(&entities.UsageEvent{}, &entities.UsageEventArchive{}, &entities.UsageOverviewHourlyStat{}, &entities.UsageOverviewDailyStat{}); err != nil {
++		t.Fatal(err)
++	}
++	tables := []string{"usage_events", "usage_events_archive", "usage_overview_hourly_stats", "usage_overview_daily_stats"}
++	for _, table := range tables {
++		if table == "usage_overview_hourly_stats" || table == "usage_overview_daily_stats" {
++			if err := db.Exec("DROP INDEX uniq_" + table + "_dimensions").Error; err != nil {
++				t.Fatal(err)
++			}
++		}
++		if err := db.Exec("ALTER TABLE " + table + " DROP COLUMN upstream_service_tier").Error; err != nil {
++			t.Fatal(err)
++		}
++		columns, values := "id, api_group_key, model, model_alias, service_tier, response_service_tier", "1, 'group', 'model', 'model-fast', 'auto', 'default'"
++		if table == "usage_overview_hourly_stats" || table == "usage_overview_daily_stats" {
++			columns += ", bucket_start, created_at, updated_at"
++			values += ", '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z'"
++		}
++		if err := db.Exec("INSERT INTO " + table + " (" + columns + ") VALUES (" + values + ")").Error; err != nil {
++			t.Fatal(err)
++		}
++	}
++	runOnlyMigration(t, db, "20261005_usage_upstream_service_tier")
++	for _, table := range tables {
++		var tier string
++		if err := db.Table(table).Select("upstream_service_tier").Where("id = 1").Scan(&tier).Error; err != nil {
++			t.Fatal(err)
++		}
++		if tier != "" {
++			t.Fatalf("%s fabricated historical tier: %q", table, tier)
++		}
++	}
++}
+diff --git a/internal/repository/migration/test/usage_overview_five_dimensions_test.go b/internal/repository/migration/test/usage_overview_five_dimensions_test.go
+index 50f6870..2523a56 100644
+--- a/internal/repository/migration/test/usage_overview_five_dimensions_test.go
++++ b/internal/repository/migration/test/usage_overview_five_dimensions_test.go
+@@ -323,7 +323,7 @@ func assertUsageOverviewFiveDimensionIndex(t *testing.T, db *gorm.DB, table stri
+ 	if err := db.Raw("SELECT name FROM pragma_index_info(?) ORDER BY seqno", name).Scan(&got).Error; err != nil {
+ 		t.Fatalf("load index %s columns: %v", name, err)
+ 	}
+-	want := []string{"bucket_start", "api_group_key", "model", "auth_index", "model_alias", "service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type"}
++	want := []string{"bucket_start", "api_group_key", "model", "auth_index", "model_alias", "service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type", "upstream_service_tier"}
+ 
+ 	if !slices.Equal(got, want) {
+ 		t.Fatalf("unexpected %s columns: got %v want %v", name, got, want)
+diff --git a/internal/repository/migration/usage_event_replay.go b/internal/repository/migration/usage_event_replay.go
+index c72403f..12efe87 100644
+--- a/internal/repository/migration/usage_event_replay.go
++++ b/internal/repository/migration/usage_event_replay.go
+@@ -2,6 +2,7 @@ package migration
+ 
+ import (
+ 	"fmt"
++	"strings"
+ 
+ 	"cpa-usage-keeper/internal/entities"
+ 
+@@ -46,6 +47,14 @@ func LoadUsageAggregationReplayEventPage(db *gorm.DB, afterID, targetID int64, l
+ 
+ 	// 两个分支都按 INTEGER PRIMARY KEY 范围读取，SQLite 会用 MERGE UNION 恢复全局入库顺序。
+ 	columns := entities.UsageEventStorageColumns
++	// Older upgrades replay history before the outgoing-tier migration runs.
++	// Missing capture is represented as empty, never inferred from the alias.
++	projection := func(table string) string {
++		if db.Migrator().HasColumn(table, "upstream_service_tier") {
++			return columns
++		}
++		return strings.Replace(columns, "upstream_service_tier", "'' AS upstream_service_tier", 1)
++	}
+ 	query := fmt.Sprintf(`
+ 		SELECT %s FROM (
+ 			SELECT %s FROM usage_events_archive WHERE id > ? AND id <= ?
+@@ -53,7 +62,7 @@ func LoadUsageAggregationReplayEventPage(db *gorm.DB, afterID, targetID int64, l
+ 			SELECT %s FROM usage_events WHERE id > ? AND id <= ?
+ 		) AS usage_event_replay
+ 		ORDER BY id ASC
+-		LIMIT ?`, columns, columns, columns)
++		LIMIT ?`, columns, projection("usage_events_archive"), projection("usage_events"))
+ 	var events []entities.UsageEvent
+ 	if err := db.Raw(query, afterID, targetID, afterID, targetID, limit).Scan(&events).Error; err != nil {
+ 		return nil, fmt.Errorf("load usage event replay page: %w", err)
+diff --git a/internal/repository/overviewstore/store.go b/internal/repository/overviewstore/store.go
+index 2f39c1f..66a0910 100644
+--- a/internal/repository/overviewstore/store.go
++++ b/internal/repository/overviewstore/store.go
+@@ -10,7 +10,7 @@ import (
+ 	"gorm.io/gorm"
+ )
+ 
+-const overviewDimensionsPredicate = "bucket_start = ? AND api_group_key = ? AND model = ? AND auth_index = ? AND model_alias = ? AND service_tier = ? AND response_service_tier = ? AND reasoning_effort = ? AND endpoint = ? AND executor_type = ?"
++const overviewDimensionsPredicate = "bucket_start = ? AND api_group_key = ? AND model = ? AND auth_index = ? AND model_alias = ? AND service_tier = ? AND upstream_service_tier = ? AND response_service_tier = ? AND reasoning_effort = ? AND endpoint = ? AND executor_type = ?"
+ 
+ // ApplyRows 用同一套五维唯一键把 hourly 和 daily 增量写入当前事务。
+ func ApplyRows(tx *gorm.DB, hourlyRows []entities.UsageOverviewHourlyStat, dailyRows []entities.UsageOverviewDailyStat, now time.Time) error {
+@@ -85,14 +85,14 @@ func applyDailyRow(tx *gorm.DB, row entities.UsageOverviewDailyStat, now time.Ti
+ func hourlyDimensionArgs(row entities.UsageOverviewHourlyStat) []any {
+ 	return []any{
+ 		timeutil.FormatStorageTime(row.BucketStart), row.APIGroupKey, row.Model, row.AuthIndex, row.ModelAlias,
+-		row.ServiceTier, row.ResponseServiceTier, row.ReasoningEffort, row.Endpoint, row.ExecutorType,
++		row.ServiceTier, row.UpstreamServiceTier, row.ResponseServiceTier, row.ReasoningEffort, row.Endpoint, row.ExecutorType,
+ 	}
+ }
+ 
+ func dailyDimensionArgs(row entities.UsageOverviewDailyStat) []any {
+ 	return []any{
+ 		timeutil.FormatStorageTime(row.BucketStart), row.APIGroupKey, row.Model, row.AuthIndex, row.ModelAlias,
+-		row.ServiceTier, row.ResponseServiceTier, row.ReasoningEffort, row.Endpoint, row.ExecutorType,
++		row.ServiceTier, row.UpstreamServiceTier, row.ResponseServiceTier, row.ReasoningEffort, row.Endpoint, row.ExecutorType,
+ 	}
+ }
+ 
+diff --git a/internal/repository/test/codex_quota_efficiency_query_test.go b/internal/repository/test/codex_quota_efficiency_query_test.go
+index 8caa250..442ce35 100644
+--- a/internal/repository/test/codex_quota_efficiency_query_test.go
++++ b/internal/repository/test/codex_quota_efficiency_query_test.go
+@@ -16,7 +16,7 @@ import (
+ )
+ 
+ func TestCodexQuotaEfficiencyPricingProjectionFollowsSnapshot(t *testing.T) {
+-	for _, field := range []string{"api_group_key", "service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type", "model_alias"} {
++	for _, field := range []string{"api_group_key", "service_tier", "upstream_service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type", "model_alias"} {
+ 		t.Run(field, func(t *testing.T) {
+ 			db := openTestDatabase(t)
+ 			now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+diff --git a/internal/repository/test/usage_analysis_projection_test.go b/internal/repository/test/usage_analysis_projection_test.go
+index ddb0938..70bf60c 100644
+--- a/internal/repository/test/usage_analysis_projection_test.go
++++ b/internal/repository/test/usage_analysis_projection_test.go
+@@ -223,6 +223,7 @@ func TestAnalysisProjectionPreservesDailyResultsWithoutBoundaryHourlyRows(t *tes
+ 	sharedHourly := func(bucket time.Time, requests, input, output, reasoning, cacheRead, cacheCreation, total int64) entities.UsageOverviewHourlyStat {
+ 		return entities.UsageOverviewHourlyStat{
+ 			BucketStart: bucket, APIGroupKey: "group-a", Model: "model-a", AuthIndex: "identity-a", ModelAlias: "alias-a",
++			UpstreamServiceTier: "",
+ 			ResponseServiceTier: "batch", ReasoningEffort: "xhigh", ExecutorType: "cli", RequestCount: requests,
+ 			InputTokens: input, OutputTokens: output, ReasoningTokens: reasoning, CacheReadTokens: cacheRead,
+ 			CacheCreationTokens: cacheCreation, TotalTokens: total,
+diff --git a/internal/repository/test/usage_event_response_service_tier_test.go b/internal/repository/test/usage_event_response_service_tier_test.go
+index 0eeece6..289da87 100644
+--- a/internal/repository/test/usage_event_response_service_tier_test.go
++++ b/internal/repository/test/usage_event_response_service_tier_test.go
+@@ -16,6 +16,7 @@ func TestUsageEventsPersistAndListResponseServiceTier(t *testing.T) {
+ 		APIGroupKey:         "provider-a",
+ 		Model:               "gpt-5.4",
+ 		ServiceTier:         "auto",
++		UpstreamServiceTier: "priority",
+ 		ResponseServiceTier: "default",
+ 		Timestamp:           time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC),
+ 		Source:              "source-a",
+@@ -38,7 +39,7 @@ func TestUsageEventsPersistAndListResponseServiceTier(t *testing.T) {
+ 	if len(page.Events) != 1 {
+ 		t.Fatalf("expected one usage event, got %d", len(page.Events))
+ 	}
+-	if page.Events[0].ServiceTier != "auto" || page.Events[0].ResponseServiceTier != "default" {
++	if page.Events[0].ServiceTier != "auto" || page.Events[0].UpstreamServiceTier != "priority" || page.Events[0].ResponseServiceTier != "default" {
+ 		t.Fatalf("expected separate request/response tiers, got %+v", page.Events[0])
+ 	}
+ }
+diff --git a/internal/repository/test/usage_overview_custom_rollup_test.go b/internal/repository/test/usage_overview_custom_rollup_test.go
+index bbf0dbb..028862d 100644
+--- a/internal/repository/test/usage_overview_custom_rollup_test.go
++++ b/internal/repository/test/usage_overview_custom_rollup_test.go
+@@ -176,7 +176,9 @@ func captureOverviewDataQueries(t *testing.T, db *gorm.DB, suffix ...string) *[]
+ 	t.Helper()
+ 	queries := make([]string, 0, 3)
+ 	callbackName := "test:capture_overview_data_queries"
+-	if len(suffix) > 0 && suffix[0] != "" { callbackName += "_" + suffix[0] }
++	if len(suffix) > 0 && suffix[0] != "" {
++		callbackName += "_" + suffix[0]
++	}
+ 	capture := func(tx *gorm.DB) {
+ 		queries = append(queries, strings.ToLower(tx.Statement.SQL.String()))
+ 	}
+diff --git a/internal/repository/test/usage_overview_five_dimensions_test.go b/internal/repository/test/usage_overview_five_dimensions_test.go
+index 705a816..a92398e 100644
+--- a/internal/repository/test/usage_overview_five_dimensions_test.go
++++ b/internal/repository/test/usage_overview_five_dimensions_test.go
+@@ -12,6 +12,7 @@ import (
+ 
+ type usageOverviewFiveDimensionRow struct {
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ReasoningEffort     string
+ 	Endpoint            string
+@@ -22,6 +23,7 @@ type usageOverviewFiveDimensionRow struct {
+ 
+ type usageOverviewFiveDimensionKey struct {
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ReasoningEffort     string
+ 	Endpoint            string
+@@ -92,7 +94,7 @@ func assertUsageOverviewFiveDimensionRows(t *testing.T, db *gorm.DB, table strin
+ 	t.Helper()
+ 	var rows []usageOverviewFiveDimensionRow
+ 	if err := db.Table(table).
+-		Select("service_tier, response_service_tier, reasoning_effort, endpoint, executor_type, request_count, total_tokens").
++		Select("service_tier, upstream_service_tier, response_service_tier, reasoning_effort, endpoint, executor_type, request_count, total_tokens").
+ 		Where("api_group_key = ? AND model = ? AND auth_index = ? AND model_alias = ?", "api-a", "gpt-a", "auth-a", "gpt-alias").
+ 		Find(&rows).Error; err != nil {
+ 		t.Fatalf("load %s five-dimension rows: %v", table, err)
+diff --git a/internal/repository/test/usage_pricing_dimensions_test.go b/internal/repository/test/usage_pricing_dimensions_test.go
+index 97b8ef7..ab10d4d 100644
+--- a/internal/repository/test/usage_pricing_dimensions_test.go
++++ b/internal/repository/test/usage_pricing_dimensions_test.go
+@@ -35,13 +35,14 @@ func TestPricingDimensionColumnsCoverAllAllowedRuleFields(t *testing.T) {
+ 		{Key: "auth_index", Value: "i", Multiplier: 2},
+ 		{Key: "model_alias", Value: "a", Multiplier: 2},
+ 		{Key: "service_tier", Value: "s", Multiplier: 2},
++		{Key: "upstream_service_tier", Value: "u", Multiplier: 2},
+ 		{Key: "response_service_tier", Value: "r", Multiplier: 2},
+ 		{Key: "reasoning_effort", Value: "e", Multiplier: 2},
+ 		{Key: "endpoint", Value: "p", Multiplier: 2},
+ 		{Key: "executor_type", Value: "x", Multiplier: 2},
+ 	}
+ 	resolver := repositoryPricingResolver(t, rules)
+-	want := []string{"model", "model_alias", "api_group_key", "auth_index", "service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type"}
++	want := []string{"model", "model_alias", "api_group_key", "auth_index", "service_tier", "upstream_service_tier", "response_service_tier", "reasoning_effort", "endpoint", "executor_type"}
+ 	if got := repository.UsagePricingDimensionColumns(resolver.ActiveFields()); !slices.Equal(got, want) {
+ 		t.Fatalf("all active columns = %#v, want %#v", got, want)
+ 	}
+diff --git a/internal/repository/test/usage_pricing_subject_test.go b/internal/repository/test/usage_pricing_subject_test.go
+index 30252e0..d75cc68 100644
+--- a/internal/repository/test/usage_pricing_subject_test.go
++++ b/internal/repository/test/usage_pricing_subject_test.go
+@@ -18,6 +18,7 @@ func TestPricingDimensionSubjectsMapAllNineFieldsAndFourTokenSegments(t *testing
+ 		AuthIndex:           " auth-a ",
+ 		ModelAlias:          &alias,
+ 		ServiceTier:         " priority ",
++		UpstreamServiceTier: "",
+ 		ResponseServiceTier: " default ",
+ 		ReasoningEffort:     " xhigh ",
+ 		Endpoint:            " /v1/responses ",
+@@ -33,6 +34,7 @@ func TestPricingDimensionSubjectsMapAllNineFieldsAndFourTokenSegments(t *testing
+ 		AuthIndex:           event.AuthIndex,
+ 		ModelAlias:          alias,
+ 		ServiceTier:         event.ServiceTier,
++		UpstreamServiceTier: event.UpstreamServiceTier,
+ 		ResponseServiceTier: event.ResponseServiceTier,
+ 		ReasoningEffort:     event.ReasoningEffort,
+ 		Endpoint:            event.Endpoint,
+@@ -48,6 +50,7 @@ func TestPricingDimensionSubjectsMapAllNineFieldsAndFourTokenSegments(t *testing
+ 		AuthIndex:           hourly.AuthIndex,
+ 		ModelAlias:          hourly.ModelAlias,
+ 		ServiceTier:         hourly.ServiceTier,
++		UpstreamServiceTier: hourly.UpstreamServiceTier,
+ 		ResponseServiceTier: hourly.ResponseServiceTier,
+ 		ReasoningEffort:     hourly.ReasoningEffort,
+ 		Endpoint:            hourly.Endpoint,
+@@ -63,6 +66,7 @@ func TestPricingDimensionSubjectsMapAllNineFieldsAndFourTokenSegments(t *testing
+ 		AuthIndex:           event.AuthIndex,
+ 		ModelAlias:          alias,
+ 		ServiceTier:         event.ServiceTier,
++		UpstreamServiceTier: event.UpstreamServiceTier,
+ 		ResponseServiceTier: event.ResponseServiceTier,
+ 		ReasoningEffort:     event.ReasoningEffort,
+ 		Endpoint:            event.Endpoint,
+diff --git a/internal/repository/test/usage_recent_event_pricing_rules_test.go b/internal/repository/test/usage_recent_event_pricing_rules_test.go
+index bdb74ae..229fbe8 100644
+--- a/internal/repository/test/usage_recent_event_pricing_rules_test.go
++++ b/internal/repository/test/usage_recent_event_pricing_rules_test.go
+@@ -20,6 +20,7 @@ func TestUsageRecentEventCachePreservesAllPricingDimensions(t *testing.T) {
+ 		AuthIndex:           "auth-a",
+ 		ModelAlias:          &alias,
+ 		ServiceTier:         "priority",
++		UpstreamServiceTier: "priority",
+ 		ResponseServiceTier: "default",
+ 		ReasoningEffort:     "xhigh",
+ 		Endpoint:            "/v1/responses",
+@@ -38,7 +39,7 @@ func TestUsageRecentEventCachePreservesAllPricingDimensions(t *testing.T) {
+ 		t.Fatalf("expected one cached event, got ok=%v events=%+v", ok, events)
+ 	}
+ 	event := events[0]
+-	if event.ServiceTier != "priority" || event.ResponseServiceTier != "default" || event.ReasoningEffort != "xhigh" || event.Endpoint != "/v1/responses" || event.ExecutorType != "openai" {
++	if event.ServiceTier != "priority" || event.UpstreamServiceTier != "priority" || event.ResponseServiceTier != "default" || event.ReasoningEffort != "xhigh" || event.Endpoint != "/v1/responses" || event.ExecutorType != "openai" {
+ 		t.Fatalf("cached pricing dimensions missing: %+v", event)
+ 	}
+ 
+diff --git a/internal/repository/test/usage_upstream_service_tier_test.go b/internal/repository/test/usage_upstream_service_tier_test.go
+new file mode 100644
+index 0000000..38123a4
+--- /dev/null
++++ b/internal/repository/test/usage_upstream_service_tier_test.go
+@@ -0,0 +1,83 @@
++package test
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/helper"
++	"cpa-usage-keeper/internal/pricing"
++	"cpa-usage-keeper/internal/repository"
++	repodto "cpa-usage-keeper/internal/repository/dto"
++	"testing"
++	"time"
++)
++
++func TestOutgoingTierPricesRawCacheAndRollupsWithoutHistoricalInference(t *testing.T) {
++	db := openTestDatabase(t)
++	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
++	alias := "model-fast"
++	events := []entities.UsageEvent{}
++	// All client/response values and aliases are identical. Only captured outgoing
++	// priority incurs the multiplier; a historical alias is not proof of Fast.
++	for i, tier := range []string{"priority", "default", ""} {
++		events = append(events, entities.UsageEvent{EventKey: tier + "-capture", APIGroupKey: "group-a", Model: "model-a", ModelAlias: &alias,
++			ServiceTier: "auto", UpstreamServiceTier: tier, ResponseServiceTier: "default",
++			Timestamp: now.Add(time.Duration(-30+i) * time.Minute), InputTokens: 1_000_000, TotalTokens: 1_000_000})
++	}
++	if _, _, err := repository.InsertUsageEvents(db, events); err != nil {
++		t.Fatal(err)
++	}
++	resolver := repositoryPricingResolver(t, []pricing.RuleConfig{{Key: "upstream_service_tier", Value: "priority", Multiplier: 2}})
++	page, err := repository.ListUsageEventsWithFilter(db, repodto.UsageQueryFilter{Page: 1, PageSize: 10}, resolver)
++	if err != nil {
++		t.Fatal(err)
++	}
++	total := 0.0
++	for _, row := range page.Events {
++		total += row.CostUSD
++	}
++	if total != 4 {
++		t.Fatalf("raw cost=%v, want 4", total)
++	}
++	cache, err := repository.NewUsageRecentEventCache(db, repository.UsageRecentEventCacheOptions{Now: func() time.Time { return now }})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer cache.Close()
++	cached, ok := cache.Events(now.Add(-time.Hour), now, false, "group-a")
++	if !ok || len(cached) != 3 {
++		t.Fatalf("cached rows=%+v", cached)
++	}
++	total = 0
++	for _, row := range cached {
++		total += resolver.Calculate(pricing.CostSubject{Dimensions: pricing.UsageDimensions{Model: row.Model, UpstreamServiceTier: row.UpstreamServiceTier}, Tokens: helper.UsageTokenCostInput{InputTokens: row.InputTokens}}).Cost.TotalCostUSD
++	}
++	if total != 4 {
++		t.Fatalf("cache cost=%v, want 4", total)
++	}
++	if err := repository.AggregateUsageOverviewStats(context.Background(), db, now); err != nil {
++		t.Fatal(err)
++	}
++	for _, unit := range []string{"hour", "day"} {
++		start := now.Add(-time.Hour)
++		if unit == "day" {
++			start = time.Date(2026, 10, 5, 0, 0, 0, 0, time.Local)
++		}
++		end := now.Add(time.Hour)
++		overview, err := repository.BuildUsageOverviewWithFilter(db, repodto.UsageQueryFilter{Range: "custom", CustomUnit: unit, StartTime: &start, EndTime: &end, EndExclusive: true}, resolver)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if overview.Summary.TotalCost != 4 {
++			t.Fatalf("%s cost=%v, want 4", unit, overview.Summary.TotalCost)
++		}
++	}
++	for _, table := range []string{"usage_overview_hourly_stats", "usage_overview_daily_stats"} {
++		var count int64
++		if err := db.Table(table).Count(&count).Error; err != nil {
++			t.Fatal(err)
++		}
++		if count != 3 {
++			t.Fatalf("%s combined distinct outgoing tiers: %d rows", table, count)
++		}
++	}
++}
+diff --git a/internal/repository/usage.go b/internal/repository/usage.go
+index 590966e..65f0899 100644
+--- a/internal/repository/usage.go
++++ b/internal/repository/usage.go
+@@ -17,7 +17,7 @@ import (
+ )
+ 
+ // usageEventProjectionColumns 限制 usage_events 查询列，避免 Overview 和列表页把 RawJSON 等大字段读入内存。
+-const usageEventProjectionColumns = "id, api_group_key, provider, auth_type, request_id, client_ip, x_forwarded_for, user_agent, model, model_alias, response_model, reasoning_effort, service_tier, response_service_tier, executor_type, endpoint, timestamp, source, auth_index, failed, status_code, stream, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_creation_tokens, total_tokens"
++const usageEventProjectionColumns = "id, api_group_key, provider, auth_type, request_id, client_ip, x_forwarded_for, user_agent, model, model_alias, response_model, reasoning_effort, service_tier, upstream_service_tier, response_service_tier, executor_type, endpoint, timestamp, source, auth_index, failed, status_code, stream, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_creation_tokens, total_tokens"
+ 
+ // usageOverviewBoundaryEventProjectionColumns 只包含非 Custom Overview 边界卡片计算需要的字段。
+ const usageOverviewBoundaryEventProjectionColumns = "api_group_key, model, model_alias, timestamp, failed, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, auth_index"
+@@ -40,6 +40,7 @@ type usageEventProjection struct {
+ 	ResponseModel       string  `gorm:"column:response_model"`
+ 	ReasoningEffort     string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ExecutorType        string
+ 	Endpoint            string
+@@ -260,6 +261,7 @@ func usageEventProjectionToRecord(event usageEventProjection) dto.UsageEventReco
+ 		ResponseModel:       strings.TrimSpace(event.ResponseModel),
+ 		ReasoningEffort:     strings.TrimSpace(event.ReasoningEffort),
+ 		ServiceTier:         strings.TrimSpace(event.ServiceTier),
++		UpstreamServiceTier: strings.TrimSpace(event.UpstreamServiceTier),
+ 		ResponseServiceTier: strings.TrimSpace(event.ResponseServiceTier),
+ 		ClientIP:            event.ClientIP,
+ 		XForwardedFor:       event.XForwardedFor,
+@@ -302,6 +304,7 @@ func usageEventProjectionToEntity(event usageEventProjection) entities.UsageEven
+ 		ModelAlias:          event.ModelAlias,
+ 		ReasoningEffort:     event.ReasoningEffort,
+ 		ServiceTier:         event.ServiceTier,
++		UpstreamServiceTier: event.UpstreamServiceTier,
+ 		ResponseServiceTier: event.ResponseServiceTier,
+ 		ExecutorType:        event.ExecutorType,
+ 		Endpoint:            event.Endpoint,
+diff --git a/internal/repository/usage_analysis_projection.go b/internal/repository/usage_analysis_projection.go
+index a02dedd..fa98fc8 100644
+--- a/internal/repository/usage_analysis_projection.go
++++ b/internal/repository/usage_analysis_projection.go
+@@ -21,6 +21,7 @@ type analysisOverviewStatProjection struct {
+ 	AuthIndex           string
+ 	ModelAlias          string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ReasoningEffort     string
+ 	Endpoint            string
+@@ -101,6 +102,7 @@ func calculateAnalysisOverviewProjectionCost(costResolver pricing.Resolver, row
+ 		row.AuthIndex,
+ 		row.ModelAlias,
+ 		row.ServiceTier,
++		row.UpstreamServiceTier,
+ 		row.ResponseServiceTier,
+ 		row.ReasoningEffort,
+ 		row.Endpoint,
+diff --git a/internal/repository/usage_overview_comparisons.go b/internal/repository/usage_overview_comparisons.go
+index 4daf51e..73eda54 100644
+--- a/internal/repository/usage_overview_comparisons.go
++++ b/internal/repository/usage_overview_comparisons.go
+@@ -96,7 +96,7 @@ func addUsageOverviewComparison(items map[string]*dto.UsageComparisonItemRecord,
+ }
+ 
+ func calculateUsageOverviewComparisonProjectionCost(costResolver pricing.Resolver, row usageOverviewComparisonProjection) pricing.CostResult {
+-	return costResolver.Calculate(newUsagePricingCostSubject(row.APIGroupKey, row.Model, row.AuthIndex, row.ModelAlias, row.ServiceTier, row.ResponseServiceTier, row.ReasoningEffort, row.Endpoint, row.ExecutorType, row.CostUncachedInputTokens+row.CostCacheReadTokens+row.CostCacheCreationTokens, row.CostOutputTokens, row.CostCacheReadTokens, row.CostCacheCreationTokens))
++	return costResolver.Calculate(newUsagePricingCostSubject(row.APIGroupKey, row.Model, row.AuthIndex, row.ModelAlias, row.ServiceTier, row.UpstreamServiceTier, row.ResponseServiceTier, row.ReasoningEffort, row.Endpoint, row.ExecutorType, row.CostUncachedInputTokens+row.CostCacheReadTokens+row.CostCacheCreationTokens, row.CostOutputTokens, row.CostCacheReadTokens, row.CostCacheCreationTokens))
+ }
+ 
+ // 区间汇总保留定价维度，Token 趋势单独按时间和分类聚合，避免将费用明细按时间展开。
+diff --git a/internal/repository/usage_overview_pricing.go b/internal/repository/usage_overview_pricing.go
+index 93c2e1f..b510232 100644
+--- a/internal/repository/usage_overview_pricing.go
++++ b/internal/repository/usage_overview_pricing.go
+@@ -19,6 +19,7 @@ type usageOverviewStatProjection struct {
+ 	AuthIndex               string
+ 	ModelAlias              string
+ 	ServiceTier             string
++	UpstreamServiceTier     string
+ 	ResponseServiceTier     string
+ 	ReasoningEffort         string
+ 	Endpoint                string
+@@ -102,6 +103,7 @@ type usageOverviewComparisonProjection struct {
+ 	AuthIndex               string
+ 	ModelAlias              string
+ 	ServiceTier             string
++	UpstreamServiceTier     string
+ 	ResponseServiceTier     string
+ 	ReasoningEffort         string
+ 	Endpoint                string
+@@ -181,6 +183,7 @@ func calculateUsageOverviewProjectionCost(costResolver pricing.Resolver, row usa
+ 		row.AuthIndex,
+ 		row.ModelAlias,
+ 		row.ServiceTier,
++		row.UpstreamServiceTier,
+ 		row.ResponseServiceTier,
+ 		row.ReasoningEffort,
+ 		row.Endpoint,
+diff --git a/internal/repository/usage_pricing_dimensions.go b/internal/repository/usage_pricing_dimensions.go
+index 2ca88d2..626b35a 100644
+--- a/internal/repository/usage_pricing_dimensions.go
++++ b/internal/repository/usage_pricing_dimensions.go
+@@ -11,6 +11,7 @@ var optionalUsagePricingDimensionColumns = [...]usagePricingDimensionColumn{
+ 	{field: pricing.RuleFieldAPIGroupKey, column: "api_group_key"},
+ 	{field: pricing.RuleFieldAuthIndex, column: "auth_index"},
+ 	{field: pricing.RuleFieldServiceTier, column: "service_tier"},
++	{field: pricing.RuleFieldUpstreamServiceTier, column: "upstream_service_tier"},
+ 	{field: pricing.RuleFieldResponseServiceTier, column: "response_service_tier"},
+ 	{field: pricing.RuleFieldReasoningEffort, column: "reasoning_effort"},
+ 	{field: pricing.RuleFieldEndpoint, column: "endpoint"},
+diff --git a/internal/repository/usage_pricing_subject.go b/internal/repository/usage_pricing_subject.go
+index f49d84e..32f6b01 100644
+--- a/internal/repository/usage_pricing_subject.go
++++ b/internal/repository/usage_pricing_subject.go
+@@ -18,6 +18,7 @@ func UsageEventCostSubject(event entities.UsageEvent) pricing.CostSubject {
+ 		event.AuthIndex,
+ 		modelAlias,
+ 		event.ServiceTier,
++		event.UpstreamServiceTier,
+ 		event.ResponseServiceTier,
+ 		event.ReasoningEffort,
+ 		event.Endpoint,
+@@ -36,6 +37,7 @@ func UsageEventRecordCostSubject(record dto.UsageEventRecord) pricing.CostSubjec
+ 		record.AuthIndex,
+ 		record.ModelAlias,
+ 		record.ServiceTier,
++		record.UpstreamServiceTier,
+ 		record.ResponseServiceTier,
+ 		record.ReasoningEffort,
+ 		record.Endpoint,
+@@ -54,6 +56,7 @@ func UsageOverviewHourlyCostSubject(row entities.UsageOverviewHourlyStat) pricin
+ 		row.AuthIndex,
+ 		row.ModelAlias,
+ 		row.ServiceTier,
++		row.UpstreamServiceTier,
+ 		row.ResponseServiceTier,
+ 		row.ReasoningEffort,
+ 		row.Endpoint,
+@@ -72,6 +75,7 @@ func UsageOverviewDailyCostSubject(row entities.UsageOverviewDailyStat) pricing.
+ 		row.AuthIndex,
+ 		row.ModelAlias,
+ 		row.ServiceTier,
++		row.UpstreamServiceTier,
+ 		row.ResponseServiceTier,
+ 		row.ReasoningEffort,
+ 		row.Endpoint,
+@@ -84,7 +88,7 @@ func UsageOverviewDailyCostSubject(row entities.UsageOverviewDailyStat) pricing.
+ }
+ 
+ func newUsagePricingCostSubject(
+-	apiGroupKey, model, authIndex, modelAlias, serviceTier, responseServiceTier, reasoningEffort, endpoint, executorType string,
++	apiGroupKey, model, authIndex, modelAlias, serviceTier, upstreamServiceTier, responseServiceTier, reasoningEffort, endpoint, executorType string,
+ 	inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int64,
+ ) pricing.CostSubject {
+ 	return pricing.NewCostSubject(pricing.UsageDimensions{
+@@ -93,6 +97,7 @@ func newUsagePricingCostSubject(
+ 		AuthIndex:           authIndex,
+ 		ModelAlias:          modelAlias,
+ 		ServiceTier:         serviceTier,
++		UpstreamServiceTier: upstreamServiceTier,
+ 		ResponseServiceTier: responseServiceTier,
+ 		ReasoningEffort:     reasoningEffort,
+ 		Endpoint:            endpoint,
+diff --git a/internal/repository/usage_recent_event_cache.go b/internal/repository/usage_recent_event_cache.go
+index 76947e6..4ee60cd 100644
+--- a/internal/repository/usage_recent_event_cache.go
++++ b/internal/repository/usage_recent_event_cache.go
+@@ -44,6 +44,7 @@ type RecentUsageEvent struct {
+ 	AuthIndex string
+ 	// 以下五个字段补齐 hourly/daily 已有的规则维度，并继续通过字符串池复用。
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ReasoningEffort     string
+ 	Endpoint            string
+@@ -118,6 +119,7 @@ type recentUsageEventLoadRow struct {
+ 	Source              string
+ 	AuthIndex           string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ReasoningEffort     string
+ 	Endpoint            string
+@@ -336,6 +338,7 @@ func (c *UsageRecentEventCache) appendEvents(events []entities.UsageEvent) {
+ 			Source:              event.Source,
+ 			AuthIndex:           event.AuthIndex,
+ 			ServiceTier:         event.ServiceTier,
++			UpstreamServiceTier: event.UpstreamServiceTier,
+ 			ResponseServiceTier: event.ResponseServiceTier,
+ 			ReasoningEffort:     event.ReasoningEffort,
+ 			Endpoint:            event.Endpoint,
+@@ -452,7 +455,7 @@ func loadUsageRecentEventCacheRows(db *gorm.DB, start time.Time) ([]recentUsageE
+ 	var rows []recentUsageEventLoadRow
+ 	// 只 select 最近缓存和 realtime 必需字段，避免大字段进入 70 分钟内存窗口。
+ 	if err := db.Model(&entities.UsageEvent{}).
+-		Select("api_group_key, provider, auth_type, model, model_alias, timestamp, source, auth_index, service_tier, response_service_tier, reasoning_effort, endpoint, executor_type, failed, generate, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens").
++		Select("api_group_key, provider, auth_type, model, model_alias, timestamp, source, auth_index, service_tier, upstream_service_tier, response_service_tier, reasoning_effort, endpoint, executor_type, failed, generate, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens").
+ 		// 启动加载只取 retention 左边界之后的数据。
+ 		Where("timestamp >= ?", timeutil.FormatStorageTime(start)).
+ 		// 按时间排序让后续剪枝和调试输出更直观。
+@@ -484,6 +487,7 @@ func (c *UsageRecentEventCache) recentEventFromRowLocked(row recentUsageEventLoa
+ 		ModelAlias:            c.pool.intern(strings.TrimSpace(row.ModelAlias)),
+ 		AuthIndex:             c.pool.intern(strings.TrimSpace(row.AuthIndex)),
+ 		ServiceTier:           c.pool.intern(strings.TrimSpace(row.ServiceTier)),
++		UpstreamServiceTier:   c.pool.intern(strings.TrimSpace(row.UpstreamServiceTier)),
+ 		ResponseServiceTier:   c.pool.intern(strings.TrimSpace(row.ResponseServiceTier)),
+ 		ReasoningEffort:       c.pool.intern(strings.TrimSpace(row.ReasoningEffort)),
+ 		Endpoint:              c.pool.intern(strings.TrimSpace(row.Endpoint)),
+@@ -533,6 +537,7 @@ func (c *UsageRecentEventCache) releaseEventStringsLocked(event RecentUsageEvent
+ 	c.pool.release(event.ModelAlias)
+ 	c.pool.release(event.AuthIndex)
+ 	c.pool.release(event.ServiceTier)
++	c.pool.release(event.UpstreamServiceTier)
+ 	c.pool.release(event.ResponseServiceTier)
+ 	c.pool.release(event.ReasoningEffort)
+ 	c.pool.release(event.Endpoint)
+@@ -639,6 +644,7 @@ func recentUsageEventToEntity(event RecentUsageEvent) entities.UsageEvent {
+ 		Timestamp:           event.Timestamp,
+ 		AuthIndex:           event.AuthIndex,
+ 		ServiceTier:         event.ServiceTier,
++		UpstreamServiceTier: event.UpstreamServiceTier,
+ 		ResponseServiceTier: event.ResponseServiceTier,
+ 		ReasoningEffort:     event.ReasoningEffort,
+ 		Endpoint:            event.Endpoint,
+diff --git a/internal/repository/usage_window_stats.go b/internal/repository/usage_window_stats.go
+index a5011a6..5c24df0 100644
+--- a/internal/repository/usage_window_stats.go
++++ b/internal/repository/usage_window_stats.go
+@@ -42,6 +42,7 @@ type usageWindowTokenStats struct {
+ 	AuthIndex           string `gorm:"column:auth_index"`
+ 	ModelAlias          string `gorm:"column:model_alias"`
+ 	ServiceTier         string `gorm:"column:service_tier"`
++	UpstreamServiceTier string `gorm:"column:upstream_service_tier"`
+ 	ResponseServiceTier string `gorm:"column:response_service_tier"`
+ 	ReasoningEffort     string `gorm:"column:reasoning_effort"`
+ 	Endpoint            string `gorm:"column:endpoint"`
+@@ -291,6 +292,7 @@ func mergeUsageWindowTokenStats(merged map[usageWindowTokenStatsKey]usageWindowT
+ 			row.AuthIndex,
+ 			row.ModelAlias,
+ 			row.ServiceTier,
++			row.UpstreamServiceTier,
+ 			row.ResponseServiceTier,
+ 			row.ReasoningEffort,
+ 			row.Endpoint,
+@@ -306,6 +308,7 @@ func mergeUsageWindowTokenStats(merged map[usageWindowTokenStatsKey]usageWindowT
+ 		current.AuthIndex = dimensions.AuthIndex
+ 		current.ModelAlias = dimensions.ModelAlias
+ 		current.ServiceTier = dimensions.ServiceTier
++		current.UpstreamServiceTier = dimensions.UpstreamServiceTier
+ 		current.ResponseServiceTier = dimensions.ResponseServiceTier
+ 		current.ReasoningEffort = dimensions.ReasoningEffort
+ 		current.Endpoint = dimensions.Endpoint
+@@ -377,6 +380,7 @@ func addUsageWindowTokenStats(stats UsageWindowStats, row usageWindowTokenStats,
+ 		row.AuthIndex,
+ 		row.ModelAlias,
+ 		row.ServiceTier,
++		row.UpstreamServiceTier,
+ 		row.ResponseServiceTier,
+ 		row.ReasoningEffort,
+ 		row.Endpoint,
+diff --git a/internal/service/dto/usage.go b/internal/service/dto/usage.go
+index 2b424b0..c5389e4 100644
+--- a/internal/service/dto/usage.go
++++ b/internal/service/dto/usage.go
+@@ -68,6 +68,7 @@ type UsageEventRecord struct {
+ 	ResponseModel       string
+ 	ReasoningEffort     string
+ 	ServiceTier         string
++	UpstreamServiceTier string
+ 	ResponseServiceTier string
+ 	ClientIP            *string
+ 	XForwardedFor       *string
+diff --git a/internal/service/redis_usage.go b/internal/service/redis_usage.go
+index 781558d..68f7e60 100644
+--- a/internal/service/redis_usage.go
++++ b/internal/service/redis_usage.go
+@@ -55,6 +55,7 @@ type queuedUsageDetail struct {
+ 	ResponseModel       string          `json:"response_model"`
+ 	ReasoningEffort     string          `json:"reasoning_effort"`
+ 	ServiceTier         string          `json:"service_tier"`
++	UpstreamServiceTier string          `json:"upstream_service_tier"`
+ 	ResponseServiceTier string          `json:"response_service_tier"`
+ 	ExecutorType        string          `json:"executor_type"`
+ 	Endpoint            string          `json:"endpoint"`
+@@ -151,6 +152,7 @@ func (d queuedUsageDetail) toUsageEvent(fetchedAt time.Time) entities.UsageEvent
+ 		ResponseModel:       strings.TrimSpace(d.ResponseModel),
+ 		ReasoningEffort:     strings.TrimSpace(d.ReasoningEffort),
+ 		ServiceTier:         strings.TrimSpace(d.ServiceTier),
++		UpstreamServiceTier: strings.TrimSpace(d.UpstreamServiceTier),
+ 		ResponseServiceTier: strings.TrimSpace(d.ResponseServiceTier),
+ 		ExecutorType:        strings.TrimSpace(d.ExecutorType),
+ 		Timestamp:           timestamp,
+diff --git a/internal/service/test/redis_usage_test.go b/internal/service/test/redis_usage_test.go
+index c0632cf..e494187 100644
+--- a/internal/service/test/redis_usage_test.go
++++ b/internal/service/test/redis_usage_test.go
+@@ -20,6 +20,8 @@ func TestDecodeRedisUsageMessageMapsPayloadToUsageEvent(t *testing.T) {
+ 		"latency_ms":1234,
+ 		"ttft_ms":456,
+ 		"service_tier":"standard",
++		"upstream_service_tier":"priority",
++		"response_service_tier":"default",
+ 		"source":"sk-test",
+ 		"auth_index":"auth-1",
+ 		"tokens":{"input_tokens":10,"output_tokens":20,"reasoning_tokens":3,"cached_tokens":4,"cache_read_tokens":5,"cache_creation_tokens":6,"total_tokens":0},
+@@ -55,7 +57,7 @@ func TestDecodeRedisUsageMessageMapsPayloadToUsageEvent(t *testing.T) {
+ 	if event.ModelAlias == nil || *event.ModelAlias != "claude-sonnet-alias" {
+ 		t.Fatalf("expected model alias to decode, got %+v", event.ModelAlias)
+ 	}
+-	if event.ReasoningEffort != "medium" || event.ExecutorType != "responses" || event.ServiceTier != "standard" {
++	if event.ReasoningEffort != "medium" || event.ExecutorType != "responses" || event.ServiceTier != "standard" || event.UpstreamServiceTier != "priority" || event.ResponseServiceTier != "default" {
+ 		t.Fatalf("unexpected request metadata: %+v", event)
+ 	}
+ 	if event.InputTokens != 10 || event.OutputTokens != 20 || event.ReasoningTokens != 3 || event.CachedTokens != 4 || event.CacheReadTokens != 5 || event.CacheCreationTokens != 6 || event.TotalTokens != 0 {
+diff --git a/internal/service/test/usage_events_model_alias_test.go b/internal/service/test/usage_events_model_alias_test.go
+index 437370a..718e381 100644
+--- a/internal/service/test/usage_events_model_alias_test.go
++++ b/internal/service/test/usage_events_model_alias_test.go
+@@ -24,6 +24,7 @@ func TestUsageServicePreservesEventMetadataForListAndStream(t *testing.T) {
+ 		ModelAlias:          &modelAlias,
+ 		ResponseModel:       responseModel,
+ 		ServiceTier:         "auto",
++		UpstreamServiceTier: "",
+ 		ResponseServiceTier: "default",
+ 		StatusCode:          &statusCode,
+ 		Stream:              &stream,
+diff --git a/internal/service/usage.go b/internal/service/usage.go
+index 5a854ab..220cec2 100644
+--- a/internal/service/usage.go
++++ b/internal/service/usage.go
+@@ -693,6 +693,7 @@ func (s *usageService) ListUsageEvents(ctx context.Context, filter servicedto.Us
+ 			ResponseModel:       row.ResponseModel,
+ 			ReasoningEffort:     row.ReasoningEffort,
+ 			ServiceTier:         row.ServiceTier,
++			UpstreamServiceTier: row.UpstreamServiceTier,
+ 			ResponseServiceTier: row.ResponseServiceTier,
+ 			ClientIP:            row.ClientIP,
+ 			XForwardedFor:       row.XForwardedFor,
+@@ -751,6 +752,7 @@ func (s *usageService) StreamUsageEvents(ctx context.Context, filter servicedto.
+ 			ResponseModel:       row.ResponseModel,
+ 			ReasoningEffort:     row.ReasoningEffort,
+ 			ServiceTier:         row.ServiceTier,
++			UpstreamServiceTier: row.UpstreamServiceTier,
+ 			ResponseServiceTier: row.ResponseServiceTier,
+ 			ClientIP:            row.ClientIP,
+ 			XForwardedFor:       row.XForwardedFor,
+diff --git a/web/src/components/usage/RequestEventsDetailsCard.tsx b/web/src/components/usage/RequestEventsDetailsCard.tsx
+index 48170ba..5ad4daf 100644
+--- a/web/src/components/usage/RequestEventsDetailsCard.tsx
++++ b/web/src/components/usage/RequestEventsDetailsCard.tsx
+@@ -128,7 +128,9 @@ type RequestEventRow = {
+   reasoningEffort: string;
+   speedMode: string;
+   speedModeRaw: string;
+-  responseSpeedMode: string;
++  upstreamSpeedMode: string;
++  upstreamSpeedModeRaw: string;
++  requestedSpeedMode: string;
+   responseSpeedModeRaw: string;
+   requestType: string;
+   endpoint: string;
+@@ -442,13 +444,16 @@ const buildSpeedModeTooltipLines = (
+   row: RequestEventRow,
+   t: (key: string, options?: Record<string, string>) => string,
+ ): string[] => [
+-  formatSpeedModeTooltipLine(t('usage_stats.speed_mode'), row.speedMode, row.speedModeRaw, t),
++  formatSpeedModeTooltipLine(t('usage_stats.client_service_tier'), row.speedMode, row.speedModeRaw, t),
+   formatSpeedModeTooltipLine(
+-    t('usage_stats.response_speed_mode'),
+-    row.responseSpeedMode,
+-    row.responseSpeedModeRaw,
++    t('usage_stats.upstream_requested_tier'),
++    row.upstreamSpeedMode,
++    row.upstreamSpeedModeRaw,
+     t,
+   ),
++  t('usage_stats.request_events_metric_tooltip_line', {
++    label: t('usage_stats.upstream_reported_tier'), value: row.responseSpeedModeRaw,
++  }),
+ ];
+ 
+ const formatRequestEventMetricTooltipLine = (
+@@ -646,7 +651,11 @@ export function RequestEventsDetailsCard({
+       const speedModeRaw = String(event.service_tier ?? '').trim() || '-';
+       const responseSpeedModeRaw = String(event.response_service_tier ?? '').trim() || '-';
+       const speedMode = formatSpeedMode(speedModeRaw, t);
+-      const responseSpeedMode = formatSpeedMode(responseSpeedModeRaw, t);
++      const upstreamSpeedModeRaw = String(event.upstream_service_tier ?? '').trim() || '-';
++      const upstreamSpeedMode = formatSpeedMode(upstreamSpeedModeRaw, t);
++      const requestedSpeedMode = upstreamSpeedModeRaw !== '-'
++        ? t('usage_stats.speed_mode_requested', { mode: upstreamSpeedMode })
++        : speedModeRaw !== '-' ? t('usage_stats.speed_mode_client_value', { mode: speedMode }) : '-';
+       const endpointFields = parseRequestEndpoint(event.endpoint);
+       const timestampLabels = formatRequestEventTimestamp(timestamp);
+       const inputTokens = Math.max(toNumber(event.tokens?.input_tokens), 0);
+@@ -687,7 +696,9 @@ export function RequestEventsDetailsCard({
+         reasoningEffort,
+         speedMode,
+         speedModeRaw,
+-        responseSpeedMode,
++        upstreamSpeedMode,
++        upstreamSpeedModeRaw,
++        requestedSpeedMode,
+         responseSpeedModeRaw,
+         requestType: endpointFields.requestType,
+         endpoint: endpointFields.endpoint,
+@@ -975,7 +986,7 @@ export function RequestEventsDetailsCard({
+               onFocus={(event) => handleRequestEventsTooltipFocus(tooltipLines, event.currentTarget)}
+               onBlur={(event) => handleRequestEventsTooltipBlur(event.currentTarget)}
+             >
+-              {`${row.speedMode} / ${row.responseSpeedMode}`}
++              {row.requestedSpeedMode}
+             </td>
+           );
+         },
+diff --git a/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
+index 872d70e..d18cbd0 100644
+--- a/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
++++ b/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
+@@ -73,14 +73,14 @@ describe('RequestEventsDetailsCard', () => {
+   });
+ 
+   it.each([
+-    ['auto', 'priority', 'Auto / Fast'],
+-    ['default', 'priority', 'Standard / Fast'],
+-    ['standard', 'priority', 'Standard / Fast'],
+-    ['priority', 'default', 'Fast / Standard'],
+-    ['fast', 'default', 'Fast / Standard'],
+-    ['flex', 'default', 'Flex / Standard'],
+-    ['', 'priority', '- / Fast'],
+-    ['batch', 'default', 'batch / Standard'],
++    ['auto', 'priority', 'Auto (client)'],
++    ['default', 'priority', 'Standard (client)'],
++    ['standard', 'priority', 'Standard (client)'],
++    ['priority', 'default', 'Fast (client)'],
++    ['fast', 'default', 'Fast (client)'],
++    ['flex', 'default', 'Flex (client)'],
++    ['', 'priority', '-'],
++    ['batch', 'default', 'batch (client)'],
+   ])('maps request mode %j independently of response mode %j', (request, response, expected) => {
+     const html = renderCard({
+       visibleColumnIds: ['service_tier'],
+diff --git a/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx
+index 5149363..fcaa71d 100644
+--- a/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx
++++ b/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx
+@@ -70,16 +70,16 @@ const extractSpeedModeCells = (html: string) => (
+ 
+ describe('RequestEventsDetailsCard Speed Mode column', () => {
+   it('shows an immediate localized tooltip with mapped and raw request and response modes', async () => {
+-    const events = [{ ...baseEvent, service_tier: 'auto', response_service_tier: 'default' }];
++    const events = [{ ...baseEvent, service_tier: 'auto', upstream_service_tier: 'priority', response_service_tier: 'default' }];
+     const mounted = await mountCard(events);
+     const localizedLines = [
+-      ['en', 'Speed Mode: Auto (auto)', 'Response Speed Mode: Standard (default)'],
+-      ['zh', '速度模式：自动 (auto)', '响应速度模式：标准 (default)'],
+-      ['zh-TW', '速度模式：自動 (auto)', '回應速度模式：標準 (default)'],
++      ['en', 'Client tier: Auto (auto)', 'Upstream requested tier: Fast (priority)', 'Upstream reported tier: default'],
++      ['zh', '客户端层级：自动 (auto)', '上游请求层级：快速 (priority)', '上游报告层级：default'],
++      ['zh-TW', '用戶端層級：自動 (auto)', '上游請求層級：快速 (priority)', '上游回報層級：default'],
+     ] as const;
+ 
+     try {
+-      for (const [language, requestLine, responseLine] of localizedLines) {
++      for (const [language, requestLine, upstreamLine, responseLine] of localizedLines) {
+         await act(async () => {
+           await i18n.changeLanguage(language);
+           mounted.root.render(renderCardElement(events));
+@@ -99,6 +99,7 @@ describe('RequestEventsDetailsCard Speed Mode column', () => {
+         const tooltip = document.body.querySelector('[role="tooltip"]')!;
+         expect(Array.from(tooltip.querySelectorAll('span'), (line) => line.textContent)).toEqual([
+           requestLine,
++          upstreamLine,
+           responseLine,
+         ]);
+ 
+@@ -115,27 +116,27 @@ describe('RequestEventsDetailsCard Speed Mode column', () => {
+ 
+   it('shows mapped request and response modes in one column', () => {
+     const html = renderCard([
+-      { ...baseEvent, service_tier: 'auto', response_service_tier: 'default' },
++      { ...baseEvent, service_tier: 'auto', upstream_service_tier: 'priority', response_service_tier: 'default' },
+       { ...baseEvent, id: '102', service_tier: 'standard', response_service_tier: 'standard' },
+     ]);
+ 
+     expect(REQUEST_EVENT_COLUMN_IDS).not.toContain('response_service_tier');
+     expect(html).toContain('>Speed Mode</th>');
+     expect(html).not.toContain('>Response Speed Mode</th>');
+-    expect(extractSpeedModeCells(html)).toEqual(['Auto / Standard', 'Standard / Standard']);
+-    expect(html).toContain('aria-label="Speed Mode: Auto (auto); Response Speed Mode: Standard (default)"');
++    expect(extractSpeedModeCells(html)).toEqual(['Fast requested', 'Standard (client)']);
++    expect(html).toContain('aria-label="Client tier: Auto (auto); Upstream requested tier: Fast (priority); Upstream reported tier: default"');
+   });
+ 
+   it('keeps the tooltip open while focus remains after the mouse leaves', async () => {
+     await i18n.changeLanguage('en');
+     const mounted = await mountCard([
+-      { ...baseEvent, service_tier: 'auto', response_service_tier: 'default' },
++      { ...baseEvent, service_tier: 'auto', upstream_service_tier: 'priority', response_service_tier: 'default' },
+     ]);
+ 
+     try {
+       const cell = mounted.container.querySelector<HTMLTableCellElement>('tbody td')!;
+       await act(async () => cell.focus());
+-      expect(cell.getAttribute('aria-label')).toBe('Speed Mode: Auto (auto); Response Speed Mode: Standard (default)');
++      expect(cell.getAttribute('aria-label')).toBe('Client tier: Auto (auto); Upstream requested tier: Fast (priority); Upstream reported tier: default');
+       expect(cell.getAttribute('aria-describedby')).toBeNull();
+       expect(document.body.querySelector('[role="tooltip"]')).not.toBeNull();
+ 
+@@ -163,7 +164,7 @@ describe('RequestEventsDetailsCard Speed Mode column', () => {
+   it('repositions the tooltip when its scroll container or viewport changes', async () => {
+     await i18n.changeLanguage('en');
+     const mounted = await mountCard([
+-      { ...baseEvent, service_tier: 'auto', response_service_tier: 'default' },
++      { ...baseEvent, service_tier: 'auto', upstream_service_tier: 'priority', response_service_tier: 'default' },
+     ]);
+ 
+     try {
+@@ -201,10 +202,10 @@ describe('RequestEventsDetailsCard Speed Mode column', () => {
+       { ...baseEvent, id: '103', service_tier: '', response_service_tier: '' },
+     ]);
+ 
+-    expect(extractSpeedModeCells(html)).toEqual(['Fast / -', '- / Standard', '- / -']);
+-    expect(html).toContain('aria-label="Speed Mode: Fast (priority); Response Speed Mode: -"');
+-    expect(html).toContain('aria-label="Speed Mode: -; Response Speed Mode: Standard (default)"');
+-    expect(html).toContain('aria-label="Speed Mode: -; Response Speed Mode: -"');
++    expect(extractSpeedModeCells(html)).toEqual(['Fast (client)', '-', '-']);
++    expect(html).toContain('aria-label="Client tier: Fast (priority); Upstream requested tier: -; Upstream reported tier: -"');
++    expect(html).toContain('aria-label="Client tier: -; Upstream requested tier: -; Upstream reported tier: default"');
++    expect(html).toContain('aria-label="Client tier: -; Upstream requested tier: -; Upstream reported tier: -"');
+     expect(html).not.toContain('(-)');
+   });
+ });
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index 28a955e..2c1bc2a 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -241,6 +241,11 @@ const resources = {
+         user_agent: 'User Agent',
+         speed_mode: 'Speed Mode',
+         response_speed_mode: 'Response Speed Mode',
++        client_service_tier: 'Client tier',
++        upstream_requested_tier: 'Upstream requested tier',
++        upstream_reported_tier: 'Upstream reported tier',
++        speed_mode_requested: '{{mode}} requested',
++        speed_mode_client_value: '{{mode}} (client)',
+         speed_mode_auto: 'Auto',
+         speed_mode_standard: 'Standard',
+         speed_mode_fast: 'Fast',
+@@ -744,7 +749,7 @@ const resources = {
+         model_price_rules_help_label: 'How pricing rules work',
+         model_price_rules_help: 'When a field equals the configured value, its multiplier applies. All matching rules multiply together.',
+         model_price_rules_help_examples: 'Examples:',
+-        model_price_rules_help_service_tier: 'service_tier = priority, then set a multiplier.',
++        model_price_rules_help_service_tier: 'upstream_service_tier = priority, then set a multiplier.',
+         model_price_rules_help_reasoning_effort: 'reasoning_effort = xhigh, then set a multiplier.',
+         model_price_rules_loading: 'Loading rules...',
+         model_price_rules_load_failed: 'Unable to load pricing rules.',
+@@ -1189,6 +1194,11 @@ const resources = {
+         user_agent: '用户代理',
+         speed_mode: '速度模式',
+         response_speed_mode: '响应速度模式',
++        client_service_tier: '客户端层级',
++        upstream_requested_tier: '上游请求层级',
++        upstream_reported_tier: '上游报告层级',
++        speed_mode_requested: '已请求{{mode}}',
++        speed_mode_client_value: '{{mode}}（客户端）',
+         speed_mode_auto: '自动',
+         speed_mode_standard: '标准',
+         speed_mode_fast: '快速',
+@@ -1692,7 +1702,7 @@ const resources = {
+         model_price_rules_help_label: '价格规则说明',
+         model_price_rules_help: '字段等于设定值时应用对应倍率；同时命中的规则会连续相乘。',
+         model_price_rules_help_examples: '示例：',
+-        model_price_rules_help_service_tier: 'service_tier = priority，再设置倍率。',
++        model_price_rules_help_service_tier: 'upstream_service_tier = priority，再设置倍率。',
+         model_price_rules_help_reasoning_effort: 'reasoning_effort = xhigh，再设置倍率。',
+         model_price_rules_loading: '正在加载规则…',
+         model_price_rules_load_failed: '无法加载价格规则。',
+@@ -2137,6 +2147,11 @@ const resources = {
+         user_agent: '使用者代理',
+         speed_mode: '速度模式',
+         response_speed_mode: '回應速度模式',
++        client_service_tier: '用戶端層級',
++        upstream_requested_tier: '上游請求層級',
++        upstream_reported_tier: '上游回報層級',
++        speed_mode_requested: '已請求{{mode}}',
++        speed_mode_client_value: '{{mode}}（用戶端）',
+         speed_mode_auto: '自動',
+         speed_mode_standard: '標準',
+         speed_mode_fast: '快速',
+@@ -2640,7 +2655,7 @@ const resources = {
+         model_price_rules_help_label: '價格規則說明',
+         model_price_rules_help: '欄位等於設定值時套用對應倍率；同時符合的規則會連續相乘。',
+         model_price_rules_help_examples: '範例：',
+-        model_price_rules_help_service_tier: 'service_tier = priority，再設定倍率。',
++        model_price_rules_help_service_tier: 'upstream_service_tier = priority，再設定倍率。',
+         model_price_rules_help_reasoning_effort: 'reasoning_effort = xhigh，再設定倍率。',
+         model_price_rules_loading: '正在載入規則…',
+         model_price_rules_load_failed: '無法載入價格規則。',
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index e48201e..4f3baaf 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -277,6 +277,7 @@ export interface UsageEvent {
+   response_model?: string
+   reasoning_effort?: string
+   service_tier?: string
++  upstream_service_tier?: string
+   response_service_tier?: string
+   executor_type?: string
+   endpoint?: string

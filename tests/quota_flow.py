@@ -15,7 +15,7 @@ def main():
  def endpoint(name,port):return 'http://'+docker('port',names[name],f'{port}/tcp').splitlines()[0]
  with tempfile.TemporaryDirectory() as directory:
   tmp=Path(directory);config=tmp/'config';config.mkdir()
-  (config/'providers.yaml').write_text(yaml.safe_dump({'api-keys':{'codex':[{'name':'test-'+a,'keys':[{'api-key':'fake-account-'+a,'websockets':True}],'base-url':'http://mock:9000','prefix':a,'models':[{'name':'gpt-5.5','alias':'quota-test'}]} for a in ('a','b')]}}))
+  (config/'providers.yaml').write_text(yaml.safe_dump({'api-keys':{'codex':[{'name':'test-'+a,'keys':[{'api-key':'fake-account-'+a,'websockets':True}],'base-url':'http://mock:9000','prefix':a,'models':[{'name':'gpt-5.5','alias':'quota-test'}]} for a in ('a','b')]},'requests':{'payload':{'override':[{'models':[{'name':'*','protocol':'codex'}],'params':{'service_tier':'priority'}}]}}}))
   (tmp/'cpa.json').write_text(json.dumps({'api_keys':[key],'management_key':management}))
   (tmp/'keeper.json').write_text(json.dumps({'cpa_base_url':'http://cpa:8317','management_key':management,'login_password':password,'read_only_password':readonly,'viewer_base_path':'/test-quota','viewer_dashboard_enabled':True,'viewer_quota_enabled':True,'viewer_api_gateway_enabled':True}))
   try:
@@ -61,6 +61,14 @@ def main():
      event=json.loads(ws.recv(timeout=20));assert event.get('type')!='error',event;got_quota |= event.get('type')=='codex.rate_limits'
      if event.get('type')=='response.completed':break
    assert got_quota,'upstream WebSocket event not forwarded'
+   # Capture after overrides, independently of client auto and response default,
+   # on both HTTP and WebSocket requests, including the read-only API/export.
+   events=lambda:json.loads(request(gateway+'/test-quota/api/v1/read-only/events?range=today',opener=ro)[1])['events']
+   eventually(lambda:len(events())>=3)
+   assert all(e.get('upstream_service_tier')=='priority' and e.get('response_service_tier')=='default' for e in events())
+   assert all(e.get('service_tier')=='auto' for e in events())
+   exported=json.loads(request(gateway+'/test-quota/api/v1/read-only/events/export?range=today&format=json',opener=ro)[1])
+   assert '"upstream_service_tier": "priority"' in json.dumps(exported)
    eventually(lambda:any(i['source']=='websocket_event' and i['headers'].get('X-Codex-Primary-Used-Percent')==['23'] for i in cached()))
    eventually(lambda:any(any(r.get('source')=='websocket_event' and round(r.get('remaining_percent',-1))==77 for r in a['rows']) for a in view()))
    assert allview()==view()

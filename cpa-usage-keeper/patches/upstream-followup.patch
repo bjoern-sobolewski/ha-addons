@@ -1,5 +1,5 @@
 diff --git a/internal/api/key_quota.go b/internal/api/key_quota.go
-index 2dde871..7e50dce 100644
+index 2dde871..bb50a66 100644
 --- a/internal/api/key_quota.go
 +++ b/internal/api/key_quota.go
 @@ -17,7 +17,7 @@ import (
@@ -11,7 +11,17 @@ index 2dde871..7e50dce 100644
  	Source           quota.RefreshSource `json:"source,omitempty"`
  	Stale            bool                `json:"stale"`
  	Label            string              `json:"label"`
-@@ -131,19 +131,16 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
+@@ -119,6 +119,9 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
+ 				account.Kind = "api"
+ 			}
+ 			item, ok := byIndex[identity.Identity]
++			if item.ProviderType != "" && !strings.EqualFold(strings.TrimSpace(item.ProviderType), strings.TrimSpace(identity.Type)) {
++				ok = false
++			}
+ 			if ok && item.Status == quota.RefreshTaskStatusCompleted && item.Quota != nil && len(item.Quota.Quota) > 0 {
+ 				account.UpdatedAt = item.RefreshedAt
+ 				account.Status = "available"
+@@ -131,19 +134,16 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
  					if label == "" {
  						label = "Quota window"
  					}
@@ -39,7 +49,7 @@ index 2dde871..7e50dce 100644
  					if row.RemainingFraction != nil {
  						value := *row.RemainingFraction * 100
  						safe.RemainingPercent = &value
-@@ -151,11 +148,15 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
+@@ -151,11 +151,15 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
  						value := 100 - *row.UsedPercent
  						safe.RemainingPercent = &value
  					}
@@ -57,7 +67,7 @@ index 2dde871..7e50dce 100644
  					}
  					account.Rows = append(account.Rows, safe)
  				}
-@@ -165,3 +166,12 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
+@@ -165,3 +169,12 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
  		c.JSON(http.StatusOK, gin.H{"accounts": accounts})
  	})
  }
@@ -83,6 +93,65 @@ index cee835c..b12f197 100644
  				}
  			}
  			items = append(items, gin.H{"auth_index": safe, "status": item.Status, "refreshed_at": item.RefreshedAt, "quota": gin.H{"quota": windows}})
+diff --git a/internal/api/test/api_provider_quota_test.go b/internal/api/test/api_provider_quota_test.go
+new file mode 100644
+index 0000000..2432acd
+--- /dev/null
++++ b/internal/api/test/api_provider_quota_test.go
+@@ -0,0 +1,53 @@
++package test
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++)
++
++func TestAPIProviderViewerQuotaUsesOnlyActiveSanitizedCache(t *testing.T) {
++	sessions := auth.NewSessionManager(time.Hour)
++	token, _, _ := sessions.CreateAPIKeyViewer(42)
++	at := time.Now()
++	used := 25.0
++	provider := &quotaProviderStub{cacheResponse: quota.CacheResponse{Items: []quota.CachedQuotaItem{{AuthIndex: "api-fixture", Status: quota.RefreshTaskStatusCompleted, RefreshedAt: &at, Quota: &quota.CheckResponse{ID: "private-id", Quota: []quota.QuotaRow{{Label: "Weekly", UsedPercent: &used, CapturedAt: at, Source: "api_response_headers"}}}}}}}
++	identities := identityMetadataStub{items: []entities.UsageIdentity{
++		{ID: 1, Identity: "api-fixture", AuthType: entities.UsageIdentityAuthTypeAIProvider, Type: "codex", Name: "private name", BaseURL: "https://private.example.invalid"},
++		{ID: 2, Identity: "disabled-api", AuthType: entities.UsageIdentityAuthTypeAIProvider, Type: "codex", Disabled: new(true)},
++		{ID: 3, Identity: "deleted-api", AuthType: entities.UsageIdentityAuthTypeAIProvider, Type: "claude", IsDeleted: true},
++	}}
++	config := AuthConfig{Enabled: true, APIKeyViewerQuotaEnabled: true}
++	router := NewRouter(nil, nil, nil, nil, config, NewAuthHandler(config, sessions), "", OptionalProviders{Quota: provider, UsageIdentity: identities, CPAAPIKeys: &keyViewerRankingKeyStub{row: entities.CPAAPIKey{ID: 42}}})
++	response := httptest.NewRecorder()
++	router.ServeHTTP(response, viewerRankingRequest(http.MethodGet, "/api/v1/key-quota?auth_indexes=disabled-api", token))
++	if response.Code != http.StatusOK {
++		t.Fatal(response.Code, response.Body.String())
++	}
++	for _, expected := range []string{`"kind":"api"`, `"status":"available"`, `"remaining_percent":75`, `"source":"api_response_headers"`} {
++		if !strings.Contains(response.Body.String(), expected) {
++			t.Fatal(response.Body.String())
++		}
++	}
++	for _, secret := range []string{"api-fixture", "disabled-api", "deleted-api", "private name", "private.example.invalid", "private-id"} {
++		if strings.Contains(response.Body.String(), secret) {
++			t.Fatalf("API quota leaked %q", secret)
++		}
++	}
++	if len(provider.cacheRequest.AuthIndexes) != 1 || provider.cacheRequest.AuthIndexes[0] != "api-fixture" {
++		t.Fatal(provider.cacheRequest)
++	}
++	provider.cacheResponse.Items[0].ProviderType = "claude"
++	changed := httptest.NewRecorder()
++	router.ServeHTTP(changed, viewerRankingRequest(http.MethodGet, "/api/v1/key-quota", token))
++	if changed.Code != http.StatusOK || !strings.Contains(changed.Body.String(), `"status":"unavailable"`) || strings.Contains(changed.Body.String(), `"remaining_percent"`) {
++		t.Fatal("previous-provider cache shown under current account", changed.Body.String())
++	}
++}
 diff --git a/internal/api/test/key_quota_freshness_test.go b/internal/api/test/key_quota_freshness_test.go
 new file mode 100644
 index 0000000..313db04
@@ -162,6 +231,196 @@ index 0000000..313db04
 +		})
 +	}
 +}
+diff --git a/internal/quota/api_provider_traffic_test.go b/internal/quota/api_provider_traffic_test.go
+new file mode 100644
+index 0000000..b1f47cb
+--- /dev/null
++++ b/internal/quota/api_provider_traffic_test.go
+@@ -0,0 +1,139 @@
++package quota
++
++import (
++	"context"
++	"net/http"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"cpa-usage-keeper/internal/cpa"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/pricing"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++type apiQuotaObservationFixture []cpa.QuotaObservation
++
++func (f apiQuotaObservationFixture) FetchQuotaObservations(context.Context) ([]cpa.QuotaObservation, error) {
++	return f, nil
++}
++
++func apiQuotaTestService(t *testing.T) (*Service, *gorm.DB, entities.UsageIdentity) {
++	t.Helper()
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "fixture.db")), &gorm.Config{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = db.AutoMigrate(entities.All()...); err != nil {
++		t.Fatal(err)
++	}
++	if err = db.AutoMigrate(&entities.CodexQuotaCycle{}, &entities.CodexQuotaPercentSegment{}); err != nil {
++		t.Fatal(err)
++	}
++	conn, err := db.DB()
++	if err != nil {
++		t.Fatal(err)
++	}
++	conn.SetMaxOpenConns(1)
++	t.Cleanup(func() { _ = conn.Close() })
++	identity := entities.UsageIdentity{AuthType: entities.UsageIdentityAuthTypeAIProvider, Identity: "api-fixture", Type: "codex", IsDeleted: false}
++	if err = db.Create(&identity).Error; err != nil {
++		t.Fatal(err)
++	}
++	service := NewService(db, nil, pricing.NewCatalog(pricing.EmptySnapshot()))
++	t.Cleanup(service.StopRefreshTasks)
++	return service, db, identity
++}
++
++func apiQuotaFixture(t *testing.T, at time.Time) (cpa.QuotaObservation, *UsageHeaderSnapshot) {
++	t.Helper()
++	item := cpa.QuotaObservation{AuthIndex: "api-fixture", Provider: "codex", Window: "primary", ObservedAt: at, Source: "api_response_headers", Headers: http.Header{"X-Codex-Primary-Used-Percent": {"25"}, "X-Codex-Primary-Window-Minutes": {"300"}, "X-Codex-Primary-Reset-After-Seconds": {"120"}}}
++	snapshot, ok := BuildUsageHeaderSnapshot(UsageHeaderSnapshotInput{AuthType: "oauth", AuthIndex: item.AuthIndex, Provider: item.Provider, ObservedAt: at, Headers: item.Headers, Source: trafficQuotaSource(item.Source)})
++	if !ok {
++		t.Fatal("invalid fixture")
++	}
++	return item, snapshot
++}
++
++func TestAPIProviderTrafficOnlyUpdatesCacheAndDeduplicates(t *testing.T) {
++	service, db, _ := apiQuotaTestService(t)
++	at := time.Now().Add(-time.Second)
++	item, _ := apiQuotaFixture(t, at)
++	seen, err := service.syncTrafficQuota(context.Background(), apiQuotaObservationFixture{item, item}, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(seen) != 1 {
++		t.Fatal(seen)
++	}
++	for _, captured := range seen {
++		if !captured.Equal(at) {
++			t.Fatal("duplicate observation lost its successful timestamp", seen)
++		}
++	}
++	service.refreshMu.Lock()
++	cache := service.refreshTasks[item.AuthIndex]
++	service.refreshMu.Unlock()
++	if cache == nil || cache.Quota == nil || len(cache.Quota.Quota) != 1 || !cache.Quota.Quota[0].CapturedAt.Equal(at) || cache.Quota.Quota[0].Source != "api_response_headers" {
++		t.Fatalf("incorrect API cache: %+v", cache)
++	}
++	next, err := service.syncTrafficQuota(context.Background(), apiQuotaObservationFixture{item}, seen)
++	if err != nil || len(next) != 1 {
++		t.Fatal(next, err)
++	}
++	service.usageHeaderMu.Lock()
++	pending := len(service.usageHeaderPending)
++	service.usageHeaderMu.Unlock()
++	if pending != 0 {
++		t.Fatal("API provider entered Auth File pending worker")
++	}
++	service.StopRefreshTasks()
++	for _, model := range []any{&entities.CodexQuotaCycle{}, &entities.CodexQuotaPercentSegment{}, &entities.QuotaCycle{}, &entities.QuotaPercentSegment{}} {
++		var count int64
++		if err = db.Model(model).Count(&count).Error; err != nil || count != 0 {
++			t.Fatalf("API observation entered quota history: %T count=%d err=%v", model, count, err)
++		}
++	}
++}
++
++func TestAPIProviderTrafficRevalidatesChangedAccounts(t *testing.T) {
++	for _, change := range []map[string]any{{"disabled": true}, {"is_deleted": true}, {"auth_type": entities.UsageIdentityAuthTypeAuthFile}, {"type": "claude"}, {"identity": "replacement"}} {
++		service, db, identity := apiQuotaTestService(t)
++		_, snapshot := apiQuotaFixture(t, time.Now())
++		if err := db.Model(&entities.UsageIdentity{}).Where("id = ?", identity.ID).Updates(change).Error; err != nil {
++			t.Fatal(err)
++		}
++		if service.applyTrafficAPIProviderQuota(context.Background(), snapshot, identity) {
++			t.Fatalf("stale account accepted: %v", change)
++		}
++		service.refreshMu.Lock()
++		if len(service.refreshTasks) != 0 {
++			t.Fatal("stale account populated cache")
++		}
++		service.refreshMu.Unlock()
++	}
++}
++
++func TestAPIProviderTrafficPreservesActiveAndNewerCache(t *testing.T) {
++	service, _, identity := apiQuotaTestService(t)
++	at := time.Now()
++	_, snapshot := apiQuotaFixture(t, at)
++	service.refreshMu.Lock()
++	service.refreshTasks[identity.Identity] = &RefreshTaskRecord{AuthIndex: identity.Identity, Type: "codex", Status: RefreshTaskStatusRunning}
++	service.refreshMu.Unlock()
++	if service.applyTrafficAPIProviderQuota(context.Background(), snapshot, identity) {
++		t.Fatal("active task replaced")
++	}
++	service.refreshMu.Lock()
++	delete(service.refreshTasks, identity.Identity)
++	service.refreshMu.Unlock()
++	if !service.applyTrafficAPIProviderQuota(context.Background(), snapshot, identity) {
++		t.Fatal("initial API cache missing")
++	}
++	_, older := apiQuotaFixture(t, at.Add(-time.Minute))
++	if service.applyTrafficAPIProviderQuota(context.Background(), older, identity) {
++		t.Fatal("older window replaced newer cache")
++	}
++}
+diff --git a/internal/quota/refresh.go b/internal/quota/refresh.go
+index 87ba6f3..7ccba98 100644
+--- a/internal/quota/refresh.go
++++ b/internal/quota/refresh.go
+@@ -45,6 +45,7 @@ type CacheResponse struct {
+ }
+ 
+ type CachedQuotaItem struct {
++	ProviderType      string             `json:"-"`
+ 	AuthIndex         string             `json:"auth_index"`
+ 	FileName          *string            `json:"file_name,omitempty"`
+ 	Status            RefreshTaskStatus  `json:"status"`
+@@ -139,11 +140,11 @@ func (s *Service) GetCachedQuota(ctx context.Context, request CacheRequest) (Cac
+ 		case task.Status == RefreshTaskStatusCompleted && task.Quota != nil:
+ 			quota := *task.Quota
+ 			refreshedAt := task.RefreshedAt
+-			response.Items = append(response.Items, CachedQuotaItem{AuthIndex: authIndex, FileName: task.FileName, Status: RefreshTaskStatusCompleted, Quota: &quota, RefreshedAt: &refreshedAt, UpstreamResponses: cloneUpstreamResponses(task.UpstreamResponses)})
++			response.Items = append(response.Items, CachedQuotaItem{ProviderType: task.Type, AuthIndex: authIndex, FileName: task.FileName, Status: RefreshTaskStatusCompleted, Quota: &quota, RefreshedAt: &refreshedAt, UpstreamResponses: cloneUpstreamResponses(task.UpstreamResponses)})
+ 		case task.Status == RefreshTaskStatusFailed && task.HTTPStatusCode != nil && isRefreshCacheableHTTPStatus(*task.HTTPStatusCode):
+ 			expiresAt := task.ExpiresAt
+ 			refreshedAt := task.RefreshedAt
+-			response.Items = append(response.Items, CachedQuotaItem{AuthIndex: authIndex, FileName: task.FileName, Status: RefreshTaskStatusFailed, Error: task.Error, HTTPStatusCode: task.HTTPStatusCode, ExpiresAt: &expiresAt, RefreshedAt: &refreshedAt, UpstreamResponses: cloneUpstreamResponses(task.UpstreamResponses)})
++			response.Items = append(response.Items, CachedQuotaItem{ProviderType: task.Type, AuthIndex: authIndex, FileName: task.FileName, Status: RefreshTaskStatusFailed, Error: task.Error, HTTPStatusCode: task.HTTPStatusCode, ExpiresAt: &expiresAt, RefreshedAt: &refreshedAt, UpstreamResponses: cloneUpstreamResponses(task.UpstreamResponses)})
+ 		}
+ 	}
+ 	return response, nil
+diff --git a/internal/quota/traffic_sync.go b/internal/quota/traffic_sync.go
+index e7da77d..9c52db7 100644
+--- a/internal/quota/traffic_sync.go
++++ b/internal/quota/traffic_sync.go
+@@ -91,8 +91,12 @@ func (s *Service) syncTrafficQuota(ctx context.Context, reader trafficQuotaReade
+ 			continue
+ 		}
+ 		key := snapshot.AuthIndex + "\x00" + snapshot.Provider + "\x00" + validItems[i].Window
+-		next[key] = seen[key]
+-		if snapshot.ObservedAt.After(seen[key]) && s.applyTrafficAPIProviderQuota(ctx, snapshot, identity) {
++		previous := seen[key]
++		if next[key].After(previous) {
++			previous = next[key]
++		}
++		next[key] = previous
++		if snapshot.ObservedAt.After(previous) && s.applyTrafficAPIProviderQuota(ctx, snapshot, identity) {
+ 			next[key] = snapshot.ObservedAt
+ 		}
+ 	}
 diff --git a/internal/service/redis_usage.go b/internal/service/redis_usage.go
 index 781558d..f240c9e 100644
 --- a/internal/service/redis_usage.go
@@ -188,6 +447,185 @@ index 38ac0b0..066d58e 100644
                  quotaSourceLabel(row.source),
                  ...(stale ? [t('overview_limits.stale')] : []),
                ];
+diff --git a/web/src/components/usage/credentials/ApiProviderQuota.tsx b/web/src/components/usage/credentials/ApiProviderQuota.tsx
+index 72e40c5..597a0c9 100644
+--- a/web/src/components/usage/credentials/ApiProviderQuota.tsx
++++ b/web/src/components/usage/credentials/ApiProviderQuota.tsx
+@@ -1,9 +1,39 @@
+-import {useEffect,useState} from 'react';
+-import {fetchAdminProviderQuota,type ViewerQuotaAccount} from '@/lib/api';
+-import {startQuotaPolling} from '@/lib/quotaPolling';
+-import {QuotaAccounts} from '@/pages/KeyQuotaPage';
+-export function ApiProviderQuota(){
+- const [accounts,setAccounts]=useState<ViewerQuotaAccount[]>([]);
+- useEffect(()=>startQuotaPolling(async(signal)=>{const data=await fetchAdminProviderQuota(signal);if(!signal.aborted)setAccounts(data.accounts.filter(a=>a.kind==='api'&&a.rows.length>0))}),[]);
+- return accounts.length ? <details open><summary>API provider quota</summary><QuotaAccounts accounts={accounts}/></details> : null;
++import { useEffect, useState } from "react";
++import { useTranslation } from "react-i18next";
++import { fetchAdminProviderQuota, type ViewerQuotaAccount } from "@/lib/api";
++import { startQuotaPolling } from "@/lib/quotaPolling";
++import { QuotaAccounts } from "@/pages/KeyQuotaPage";
++
++export function ApiProviderQuota() {
++  const { t } = useTranslation();
++  const [accounts, setAccounts] = useState<ViewerQuotaAccount[]>([]);
++  const [error, setError] = useState(false);
++  useEffect(
++    () =>
++      startQuotaPolling(async (signal) => {
++        try {
++          const data = await fetchAdminProviderQuota(signal);
++          if (!signal.aborted) {
++            setAccounts(
++              data.accounts.filter(
++                (account) => account.kind === "api" && account.rows.length > 0,
++              ),
++            );
++            setError(false);
++          }
++        } catch (failure) {
++          if (!signal.aborted) setError(true);
++          throw failure;
++        }
++      }),
++    [],
++  );
++  if (!accounts.length && !error) return null;
++  return (
++    <details open>
++      <summary>{t("key_quota.api_provider_title")}</summary>
++      {error && <p role="alert">{t("key_quota.error")}</p>}
++      <QuotaAccounts accounts={accounts} />
++    </details>
++  );
+ }
+diff --git a/web/src/components/usage/credentials/test/ApiProviderQuota.test.tsx b/web/src/components/usage/credentials/test/ApiProviderQuota.test.tsx
+new file mode 100644
+index 0000000..462a0f2
+--- /dev/null
++++ b/web/src/components/usage/credentials/test/ApiProviderQuota.test.tsx
+@@ -0,0 +1,121 @@
++// @vitest-environment happy-dom
++import React, { act } from "react";
++import { createRoot, type Root } from "react-dom/client";
++import { afterEach, expect, it, vi } from "vitest";
++import i18n from "@/i18n";
++const api = vi.hoisted(() => ({ fetchAdminProviderQuota: vi.fn() }));
++vi.mock("@/lib/api", async (original) => ({
++  ...(await original<typeof import("@/lib/api")>()),
++  ...api,
++}));
++import { ApiProviderQuota } from "../ApiProviderQuota";
++import { AiProviderCredentialsSection } from "../AiProviderCredentialsSection";
++
++let root: Root | undefined;
++let container: HTMLDivElement;
++async function mount(element: React.ReactNode) {
++  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++  await i18n.changeLanguage("en");
++  container = document.createElement("div");
++  document.body.append(container);
++  root = createRoot(container);
++  await act(async () => {
++    root!.render(element);
++  });
++}
++afterEach(async () => {
++  if (root)
++    await act(async () => {
++      root!.unmount();
++    });
++  root = undefined;
++  container?.remove();
++  api.fetchAdminProviderQuota.mockReset();
++  vi.useRealTimers();
++  vi.restoreAllMocks();
++});
++
++it("shows only observed API providers and preserves their quota after read failure", async () => {
++  vi.useFakeTimers();
++  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
++  api.fetchAdminProviderQuota.mockResolvedValue({
++    accounts: [
++      {
++        kind: "api",
++        label: "Codex account 1",
++        status: "available",
++        rows: [{ label: "Weekly", remaining_percent: 75 }],
++      },
++      {
++        kind: "oauth",
++        label: "OAuth account hidden",
++        status: "available",
++        rows: [{ label: "Weekly", remaining_percent: 25 }],
++      },
++      {
++        kind: "api",
++        label: "Unsupported account hidden",
++        status: "unavailable",
++        rows: [],
++      },
++    ],
++  });
++  await mount(<ApiProviderQuota />);
++  expect(container.textContent).toContain("API provider quota");
++  expect(container.textContent).toContain("75%");
++  expect(container.textContent).not.toContain("hidden");
++  api.fetchAdminProviderQuota.mockRejectedValue(
++    new Error("Synthetic unavailable"),
++  );
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(10_000);
++  });
++  expect(container.querySelector('[role="alert"]')).not.toBeNull();
++  expect(container.textContent).toContain("75%");
++});
++
++it("aborts and ignores a late cache response after unmount", async () => {
++  let finish: (data: unknown) => void = () => {};
++  api.fetchAdminProviderQuota.mockImplementation(
++    () =>
++      new Promise((resolve) => {
++        finish = resolve;
++      }),
++  );
++  await mount(<ApiProviderQuota />);
++  const signal = api.fetchAdminProviderQuota.mock.calls[0][0] as AbortSignal;
++  await act(async () => {
++    root!.unmount();
++  });
++  root = undefined;
++  expect(signal.aborted).toBe(true);
++  await act(async () => {
++    finish({
++      accounts: [
++        { kind: "api", label: "Late account", rows: [{ label: "Weekly" }] },
++      ],
++    });
++  });
++  expect(container.textContent).toBe("");
++});
++
++it("reporting-only AI Provider views never mount the administrator quota reader", async () => {
++  await mount(
++    <AiProviderCredentialsSection
++      reportingOnly
++      rows={[]}
++      total={0}
++      page={1}
++      totalPages={1}
++      pageSize={20}
++      activeOnly={false}
++      sort={"total_requests"}
++      loading={false}
++      onPageChange={() => {}}
++      onPageSizeChange={() => {}}
++      onActiveOnlyChange={() => {}}
++      onSortChange={() => {}}
++    />,
++  );
++  expect(api.fetchAdminProviderQuota).not.toHaveBeenCalled();
++});
 diff --git a/web/src/components/usage/test/OverviewQuotaPanel.test.tsx b/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
 index 5712080..1641b9e 100644
 --- a/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
@@ -216,6 +654,34 @@ index 5712080..1641b9e 100644
        expect(api.fetchAdminProviderQuota).toHaveBeenCalledTimes(1);
      } finally { await act(async () => root.unmount()); container.remove(); }
      expect(vi.getTimerCount()).toBe(0);
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index 28a955e..5cbb64c 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -75,6 +75,7 @@ const resources = {
+         session_expired: 'Your session expired. Please sign in again.'
+       },
+       key_quota: {
++        api_provider_title: 'API provider quota',
+         tab: 'Provider quota',
+         shared: 'Shared provider quota across all users. Accounts and windows are shown separately. Reload reads the latest stored observations.',
+         available: 'Available', stale: 'Stale observation - current quota may differ',
+@@ -1023,6 +1024,7 @@ const resources = {
+         session_expired: '登录状态已失效，请重新登录。'
+       },
+       key_quota: {
++        api_provider_title: 'API 供应商额度',
+         tab: 'Provider quota',
+         shared: 'Shared provider quota across all users. Accounts and windows are shown separately. Reload reads the latest stored observations.',
+         available: 'Available', stale: 'Stale observation - current quota may differ',
+@@ -1971,6 +1973,7 @@ const resources = {
+         session_expired: '登入狀態已失效，請重新登入。'
+       },
+       key_quota: {
++        api_provider_title: 'API 供應商額度',
+         tab: 'Provider quota',
+         shared: 'Shared provider quota across all users. Accounts and windows are shown separately. Reload reads the latest stored observations.',
+         available: 'Available', stale: 'Stale observation - current quota may differ',
 diff --git a/web/src/lib/quotaPolling.ts b/web/src/lib/quotaPolling.ts
 index f5fe57c..0429dec 100644
 --- a/web/src/lib/quotaPolling.ts

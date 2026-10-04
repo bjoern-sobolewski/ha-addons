@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Retain API-provider cache progress across duplicate observations and reject old provider types.
+- Show quota read errors while retaining the last successful API Provider widget data.
+
 - Omit unknown quota capture timestamps and unrecognized provenance from sanitized reporting.
 - Mark elapsed relative quota resets stale.
 - Include actual capture timestamps in Overview quota details.

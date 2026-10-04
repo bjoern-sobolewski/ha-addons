@@ -22,6 +22,8 @@ COPY patches/release-review.patch /tmp/release-review.patch
 RUN git apply --check /tmp/release-review.patch && git apply /tmp/release-review.patch
 COPY patches/consolidation.patch /tmp/consolidation.patch
 RUN git apply --check /tmp/consolidation.patch && git apply /tmp/consolidation.patch
+COPY patches/upstream-followup.patch /tmp/upstream-followup.patch
+RUN git apply --check /tmp/upstream-followup.patch && git apply /tmp/upstream-followup.patch
 FROM node:24-alpine AS web-builder
 WORKDIR /src/web
 COPY --from=source /src/web/package*.json ./

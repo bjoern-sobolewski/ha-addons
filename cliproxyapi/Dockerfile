@@ -36,6 +36,8 @@ COPY patches/cpamc-auth-errors.patch /tmp/cpamc-auth-errors.patch
 RUN git apply --check /tmp/cpamc-auth-errors.patch && git apply /tmp/cpamc-auth-errors.patch
 COPY patches/cpamc-native-age.patch /tmp/cpamc-native-age.patch
 RUN git apply --check /tmp/cpamc-native-age.patch && git apply /tmp/cpamc-native-age.patch
+COPY patches/upstream-followup.patch /tmp/upstream-followup.patch
+RUN git apply --check /tmp/upstream-followup.patch && git apply /tmp/upstream-followup.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/ ./

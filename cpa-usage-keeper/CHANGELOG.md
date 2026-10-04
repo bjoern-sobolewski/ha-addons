@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Omit unknown quota capture timestamps and unrecognized provenance from sanitized reporting.
+- Mark elapsed relative quota resets stale.
+- Include actual capture timestamps in Overview quota details.
+- Refresh cached quota after a hidden-tab request finishes during return to visibility.
+
 ## 0.1.19
 
 - Show a visible sparkline marker when a range contains only one observed bucket, including isolated known cache-rate points.

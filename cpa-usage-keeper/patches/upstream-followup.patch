@@ -1,0 +1,372 @@
+diff --git a/internal/api/key_quota.go b/internal/api/key_quota.go
+index 2dde871..7e50dce 100644
+--- a/internal/api/key_quota.go
++++ b/internal/api/key_quota.go
+@@ -17,7 +17,7 @@ import (
+ // Deliberately separate DTOs: never serialize identities, raw provider payloads,
+ // auth indexes, upstream errors, reset credits or local billing statistics.
+ type viewerQuotaRow struct {
+-	CapturedAt       time.Time           `json:"captured_at,omitempty"`
++	CapturedAt       *time.Time          `json:"captured_at,omitempty"`
+ 	Source           quota.RefreshSource `json:"source,omitempty"`
+ 	Stale            bool                `json:"stale"`
+ 	Label            string              `json:"label"`
+@@ -131,19 +131,16 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
+ 					if label == "" {
+ 						label = "Quota window"
+ 					}
+-					safe := viewerQuotaRow{Label: label, Metric: row.Metric, Remaining: row.Remaining, Limit: row.Limit, ResetAt: row.ResetAt, LimitReached: row.LimitReached}
+-					safe.CapturedAt = row.CapturedAt
+-					safe.Source = row.Source
+-					if safe.CapturedAt.IsZero() && item.RefreshedAt != nil {
+-						safe.CapturedAt = *item.RefreshedAt
+-					}
+-					safe.Stale = safe.CapturedAt.IsZero() || now.Sub(safe.CapturedAt) > 15*time.Minute
+-					if reset, e := time.Parse(time.RFC3339, safe.ResetAt); e == nil && !reset.After(now) {
+-						safe.Stale = true
++					capture := row.CapturedAt
++					if capture.IsZero() && item.RefreshedAt != nil {
++						capture = *item.RefreshedAt
+ 					}
+-					if safe.Stale {
+-						account.Status = "stale"
++					safe := viewerQuotaRow{Label: label, Metric: row.Metric, Remaining: row.Remaining, Limit: row.Limit, ResetAt: row.ResetAt, LimitReached: row.LimitReached}
++					if !capture.IsZero() {
++						safe.CapturedAt = &capture
+ 					}
++					safe.Source = safeQuotaSource(row.Source)
++					safe.Stale = capture.IsZero() || now.Sub(capture) > 15*time.Minute
+ 					if row.RemainingFraction != nil {
+ 						value := *row.RemainingFraction * 100
+ 						safe.RemainingPercent = &value
+@@ -151,11 +148,15 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
+ 						value := 100 - *row.UsedPercent
+ 						safe.RemainingPercent = &value
+ 					}
+-					if safe.ResetAt == "" && row.ResetAfterSeconds != nil && *row.ResetAfterSeconds >= 0 && *row.ResetAfterSeconds <= math.MaxInt64/int64(time.Second) && item.RefreshedAt != nil {
+-						safe.ResetAt = safe.CapturedAt.Add(time.Duration(*row.ResetAfterSeconds) * time.Second).UTC().Format(time.RFC3339)
++					if safe.ResetAt == "" && row.ResetAfterSeconds != nil && *row.ResetAfterSeconds >= 0 && *row.ResetAfterSeconds <= math.MaxInt64/int64(time.Second) && !capture.IsZero() {
++						safe.ResetAt = capture.Add(time.Duration(*row.ResetAfterSeconds) * time.Second).UTC().Format(time.RFC3339)
+ 					}
+ 					if reset, err := time.Parse(time.RFC3339, safe.ResetAt); err == nil && !reset.After(now) {
+ 						account.Status = "stale"
++						safe.Stale = true
++					}
++					if safe.Stale {
++						account.Status = "stale"
+ 					}
+ 					account.Rows = append(account.Rows, safe)
+ 				}
+@@ -165,3 +166,12 @@ func registerViewerQuotaRoute(router gin.IRoutes, path string, identities servic
+ 		c.JSON(http.StatusOK, gin.H{"accounts": accounts})
+ 	})
+ }
++
++func safeQuotaSource(source quota.RefreshSource) quota.RefreshSource {
++	switch source {
++	case "api_response_headers", "usage_header", "websocket_event", "scheduled", "scheduled_provider_query", "manual", "manual_provider_query", "inspection", "cache_backfill":
++		return source
++	default:
++		return ""
++	}
++}
+diff --git a/internal/api/read_only_reporting.go b/internal/api/read_only_reporting.go
+index cee835c..b12f197 100644
+--- a/internal/api/read_only_reporting.go
++++ b/internal/api/read_only_reporting.go
+@@ -270,7 +270,7 @@ func registerReadOnlyReportingRoutes(router *gin.RouterGroup, usage service.Usag
+ 			windows := []quota.QuotaRow{}
+ 			if item.Quota != nil {
+ 				for i, row := range item.Quota.Quota {
+-					windows = append(windows, quota.QuotaRow{Key: fmt.Sprintf("window-%d", i), Label: row.Label, Metric: row.Metric, Used: row.Used, Limit: row.Limit, Remaining: row.Remaining, UsedPercent: row.UsedPercent, RemainingFraction: row.RemainingFraction, Allowed: row.Allowed, LimitReached: row.LimitReached, Window: row.Window, ResetAt: row.ResetAt, ResetAfterSeconds: row.ResetAfterSeconds, CapturedAt: row.CapturedAt, Source: row.Source})
++					windows = append(windows, quota.QuotaRow{Key: fmt.Sprintf("window-%d", i), Label: row.Label, Metric: row.Metric, Used: row.Used, Limit: row.Limit, Remaining: row.Remaining, UsedPercent: row.UsedPercent, RemainingFraction: row.RemainingFraction, Allowed: row.Allowed, LimitReached: row.LimitReached, Window: row.Window, ResetAt: row.ResetAt, ResetAfterSeconds: row.ResetAfterSeconds, CapturedAt: row.CapturedAt, Source: safeQuotaSource(row.Source)})
+ 				}
+ 			}
+ 			items = append(items, gin.H{"auth_index": safe, "status": item.Status, "refreshed_at": item.RefreshedAt, "quota": gin.H{"quota": windows}})
+diff --git a/internal/api/test/key_quota_freshness_test.go b/internal/api/test/key_quota_freshness_test.go
+new file mode 100644
+index 0000000..313db04
+--- /dev/null
++++ b/internal/api/test/key_quota_freshness_test.go
+@@ -0,0 +1,73 @@
++package test
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++)
++
++func TestKeyQuotaMissingCaptureAndElapsedRelativeReset(t *testing.T) {
++	for _, withCapture := range []bool{false, true} {
++		t.Run(map[bool]string{false: "missing capture", true: "elapsed relative reset"}[withCapture], func(t *testing.T) {
++			var capture *time.Time
++			if withCapture {
++				at := time.Now().Add(-time.Minute)
++				capture = &at
++			}
++			delay := int64(10)
++			used := 25.0
++			provider := &quotaProviderStub{cacheResponse: quota.CacheResponse{Items: []quota.CachedQuotaItem{{
++				AuthIndex: "fixture-index", Status: quota.RefreshTaskStatusCompleted, RefreshedAt: capture,
++				Quota: &quota.CheckResponse{Quota: []quota.QuotaRow{{Label: "Weekly", UsedPercent: &used, ResetAfterSeconds: &delay, Source: "private arbitrary source"}}},
++			}}}}
++			identities := identityMetadataStub{items: []entities.UsageIdentity{{ID: 1, Identity: "fixture-index", Type: "codex", AuthType: entities.UsageIdentityAuthTypeAuthFile}}}
++			sessions := auth.NewSessionManager(time.Hour)
++			token, _, _ := sessions.CreateAPIKeyViewer(42)
++			config := AuthConfig{Enabled: true, APIKeyViewerQuotaEnabled: true}
++			router := NewRouter(nil, nil, nil, nil, config, NewAuthHandler(config, sessions), "", OptionalProviders{Quota: provider, UsageIdentity: identities, CPAAPIKeys: &keyViewerRankingKeyStub{row: entities.CPAAPIKey{ID: 42}}})
++			response := httptest.NewRecorder()
++			router.ServeHTTP(response, viewerRankingRequest(http.MethodGet, "/api/v1/key-quota", token))
++			if response.Code != http.StatusOK {
++				t.Fatal(response.Code, response.Body.String())
++			}
++			var data struct {
++				Accounts []struct {
++					Status string
++					Rows   []struct {
++						CapturedAt *time.Time `json:"captured_at"`
++						ResetAt    string     `json:"reset_at"`
++						Source     string     `json:"source"`
++						Stale      bool       `json:"stale"`
++					}
++				}
++			}
++			if err := json.Unmarshal(response.Body.Bytes(), &data); err != nil {
++				t.Fatal(err)
++			}
++			if len(data.Accounts) != 1 || len(data.Accounts[0].Rows) != 1 {
++				t.Fatal(response.Body.String())
++			}
++			row := data.Accounts[0].Rows[0]
++			if !row.Stale || data.Accounts[0].Status != "stale" || row.Source != "" || strings.Contains(response.Body.String(), "private arbitrary source") {
++				t.Fatal(response.Body.String())
++			}
++			if !withCapture {
++				if row.CapturedAt != nil || row.ResetAt != "" || strings.Contains(response.Body.String(), "0001-") {
++					t.Fatal(response.Body.String())
++				}
++			} else {
++				if row.CapturedAt == nil || !row.CapturedAt.Equal(*capture) || row.ResetAt != capture.Add(10*time.Second).UTC().Format(time.RFC3339) {
++					t.Fatal(response.Body.String())
++				}
++			}
++		})
++	}
++}
+diff --git a/internal/service/redis_usage.go b/internal/service/redis_usage.go
+index 781558d..f240c9e 100644
+--- a/internal/service/redis_usage.go
++++ b/internal/service/redis_usage.go
+@@ -188,7 +188,7 @@ func (d queuedUsageDetail) toUsageHeaderSnapshot(event entities.UsageEvent) *quo
+ 			observedAt = at
+ 		}
+ 	}
+-	source := quota.RefreshSource(headers.Get("X-CPA-Quota-Source"))
++	source := quota.RefreshSourceUsageHeader
+ 	snapshot, ok := quota.BuildUsageHeaderSnapshot(quota.UsageHeaderSnapshotInput{
+ 		AuthType:   event.AuthType,
+ 		AuthIndex:  event.AuthIndex,
+diff --git a/web/src/components/usage/OverviewQuotaPanel.tsx b/web/src/components/usage/OverviewQuotaPanel.tsx
+index 38ac0b0..066d58e 100644
+--- a/web/src/components/usage/OverviewQuotaPanel.tsx
++++ b/web/src/components/usage/OverviewQuotaPanel.tsx
+@@ -100,7 +100,7 @@ export function OverviewQuotaTable({ accounts, now, notice }: {
+               const tooltipKey = `${account.kind}:${account.provider}:${account.label}:${index}`;
+               const details = [account.label, `${t('overview_limits.window')}: ${label}`,
+                 ...(Number.isFinite(reset) ? [`${t('key_quota.resets')}: ${localizedResetDate(reset)}`] : []),
+-                Number.isFinite(captured) ? `${t('key_quota.updated')}: ${t('overview_limits.observed_ago', observationAge(captured, now))}` : t('overview_limits.capture_unknown'),
++                Number.isFinite(captured) ? `${t('key_quota.updated')}: ${new Date(captured).toLocaleString()} · ${t('overview_limits.observed_ago', observationAge(captured, now))}` : t('overview_limits.capture_unknown'),
+                 quotaSourceLabel(row.source),
+                 ...(stale ? [t('overview_limits.stale')] : []),
+               ];
+diff --git a/web/src/components/usage/test/OverviewQuotaPanel.test.tsx b/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
+index 5712080..1641b9e 100644
+--- a/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
++++ b/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
+@@ -67,8 +67,8 @@ describe('overview quota data', () => {
+       expect(tooltip.textContent).toContain('Codex account 1');
+       expect(tooltip.textContent).toContain('API response headers');
+       expect(tooltip.textContent).toContain('Window: 7d');
+-      expect(tooltip.textContent).toContain('Last observed: 2m 00s ago');
+-      expect(tooltip.textContent).not.toContain(new Date(accounts[0].rows[1].captured_at!).toLocaleString());
++      expect(tooltip.textContent).toContain('2m 00s ago');
++      expect(tooltip.textContent).toContain(new Date(accounts[0].rows[1].captured_at!).toLocaleString());
+       expect(tooltip.textContent).toContain(localizedResetDate(Date.parse(accounts[0].rows[1].reset_at!)));
+       expect(container.contains(tooltip)).toBe(false);
+     } finally { await act(async () => root.unmount()); container.remove(); }
+@@ -80,9 +80,10 @@ describe('overview quota data', () => {
+     try {
+       await act(async () => root.render(<OverviewQuotaPanel />));
+       await act(async () => container.querySelectorAll('button')[1].focus());
+-      expect(document.querySelector('[role="tooltip"]')?.textContent).toContain('Last observed: 2m 00s ago');
++      expect(document.querySelector('[role="tooltip"]')?.textContent).toContain('2m 00s ago');
+       await act(async () => vi.advanceTimersByTimeAsync(3_000));
+-      expect(document.querySelector('[role="tooltip"]')?.textContent).toContain('Last observed: 2m 03s ago');
++      expect(document.querySelector('[role="tooltip"]')?.textContent).toContain('2m 03s ago');
++      expect(document.querySelector('[role="tooltip"]')?.textContent).toContain(new Date(accounts[0].rows[1].captured_at!).toLocaleString());
+       expect(api.fetchAdminProviderQuota).toHaveBeenCalledTimes(1);
+     } finally { await act(async () => root.unmount()); container.remove(); }
+     expect(vi.getTimerCount()).toBe(0);
+diff --git a/web/src/lib/quotaPolling.ts b/web/src/lib/quotaPolling.ts
+index f5fe57c..0429dec 100644
+--- a/web/src/lib/quotaPolling.ts
++++ b/web/src/lib/quotaPolling.ts
+@@ -1,16 +1,40 @@
+-export function startQuotaPolling(refresh: (signal: AbortSignal) => Promise<unknown>, interval = 10_000) {
+- let stopped = false;
+- let visibleRefreshPending=false;
+- let controller: AbortController | null = null;
+- const run = async () => {
+-  if (stopped || document.hidden || controller) return;
+-  const current = new AbortController(); controller = current;
+-  try { await refresh(current.signal); } catch { /* callers present errors; retain last good data */ }
+-  finally { if (controller === current) controller = null; if(visibleRefreshPending&&!stopped&&!document.hidden){visibleRefreshPending=false;void run()} }
+- };
+- const visibility = () => { if (document.hidden) controller?.abort(); else {if(controller)visibleRefreshPending=true;else void run();} };
+- const timer = window.setInterval(() => void run(), interval);
+- document.addEventListener('visibilitychange', visibility);
+- void run();
+- return () => { stopped = true; window.clearInterval(timer); document.removeEventListener('visibilitychange', visibility); controller?.abort(); };
++export function startQuotaPolling(
++  refresh: (signal: AbortSignal) => Promise<unknown>,
++  interval = 10_000,
++) {
++  let stopped = false;
++  let visibleRefreshPending = false;
++  let controller: AbortController | null = null;
++  const run = async () => {
++    if (stopped || document.hidden || controller) return;
++    const current = new AbortController();
++    controller = current;
++    try {
++      await refresh(current.signal);
++    } catch {
++      /* callers present errors; retain last good data */
++    } finally {
++      if (controller === current) controller = null;
++      if (visibleRefreshPending && !stopped && !document.hidden) {
++        visibleRefreshPending = false;
++        void run();
++      }
++    }
++  };
++  const visibility = () => {
++    if (document.hidden) controller?.abort();
++    else {
++      if (controller) visibleRefreshPending = true;
++      else void run();
++    }
++  };
++  const timer = window.setInterval(() => void run(), interval);
++  document.addEventListener('visibilitychange', visibility);
++  void run();
++  return () => {
++    stopped = true;
++    window.clearInterval(timer);
++    document.removeEventListener('visibilitychange', visibility);
++    controller?.abort();
++  };
+ }
+diff --git a/web/src/lib/test/quotaPolling.test.ts b/web/src/lib/test/quotaPolling.test.ts
+index 16dd65b..d0041de 100644
+--- a/web/src/lib/test/quotaPolling.test.ts
++++ b/web/src/lib/test/quotaPolling.test.ts
+@@ -1,24 +1,67 @@
+ // @vitest-environment happy-dom
+-import {afterEach,describe,expect,it,vi} from 'vitest';
+-import {startQuotaPolling} from '../quotaPolling';
+-describe('cached quota polling',()=>{
+- it('queues visibility refresh until an aborted request settles',async()=>{
+-  vi.useFakeTimers();let hidden=false;vi.spyOn(document,'hidden','get').mockImplementation(()=>hidden);
+-  let finish:()=>void=()=>{};const refresh=vi.fn(()=>new Promise<void>(resolve=>{finish=resolve}));
+-  const stop=startQuotaPolling(refresh);hidden=true;document.dispatchEvent(new Event('visibilitychange'));
+-  hidden=false;document.dispatchEvent(new Event('visibilitychange'));expect(refresh).toHaveBeenCalledTimes(1);
+-  finish();await Promise.resolve();expect(refresh).toHaveBeenCalledTimes(2);stop();finish();
+- });
+- afterEach(()=>{vi.useRealTimers();vi.restoreAllMocks()});
+- it('polls every ten seconds, pauses hidden tabs, refreshes on visibility, and never overlaps',async()=>{
+-  vi.useFakeTimers();let hidden=false;vi.spyOn(document,'hidden','get').mockImplementation(()=>hidden);
+-  let finish:()=>void=()=>{};const refresh=vi.fn((_signal:AbortSignal)=>new Promise<void>(resolve=>{finish=resolve}));
+-  const stop=startQuotaPolling(refresh);expect(refresh).toHaveBeenCalledTimes(1);
+-  await vi.advanceTimersByTimeAsync(30000);expect(refresh).toHaveBeenCalledTimes(1);
+-  finish();await Promise.resolve();await vi.advanceTimersByTimeAsync(10000);expect(refresh).toHaveBeenCalledTimes(2);
+-  hidden=true;document.dispatchEvent(new Event('visibilitychange'));expect(refresh.mock.calls[1][0].aborted).toBe(true);
+-  finish();await Promise.resolve();await vi.advanceTimersByTimeAsync(30000);expect(refresh).toHaveBeenCalledTimes(2);
+-  hidden=false;document.dispatchEvent(new Event('visibilitychange'));expect(refresh).toHaveBeenCalledTimes(3);
+-  stop();finish();await Promise.resolve();await vi.advanceTimersByTimeAsync(10000);expect(refresh).toHaveBeenCalledTimes(3);
+- });
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { startQuotaPolling } from '../quotaPolling';
++describe('cached quota polling', () => {
++  it('queues visibility refresh until an aborted request settles', async () => {
++    vi.useFakeTimers();
++    let hidden = false;
++    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
++    let finish: () => void = () => {};
++    const refresh = vi.fn(
++      () =>
++        new Promise<void>((resolve) => {
++          finish = resolve;
++        }),
++    );
++    const stop = startQuotaPolling(refresh);
++    hidden = true;
++    document.dispatchEvent(new Event('visibilitychange'));
++    hidden = false;
++    document.dispatchEvent(new Event('visibilitychange'));
++    expect(refresh).toHaveBeenCalledTimes(1);
++    finish();
++    await Promise.resolve();
++    expect(refresh).toHaveBeenCalledTimes(2);
++    stop();
++    finish();
++  });
++  afterEach(() => {
++    vi.useRealTimers();
++    vi.restoreAllMocks();
++  });
++  it('polls every ten seconds, pauses hidden tabs, refreshes on visibility, and never overlaps', async () => {
++    vi.useFakeTimers();
++    let hidden = false;
++    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
++    let finish: () => void = () => {};
++    const refresh = vi.fn(
++      (_signal: AbortSignal) =>
++        new Promise<void>((resolve) => {
++          finish = resolve;
++        }),
++    );
++    const stop = startQuotaPolling(refresh);
++    expect(refresh).toHaveBeenCalledTimes(1);
++    await vi.advanceTimersByTimeAsync(30000);
++    expect(refresh).toHaveBeenCalledTimes(1);
++    finish();
++    await Promise.resolve();
++    await vi.advanceTimersByTimeAsync(10000);
++    expect(refresh).toHaveBeenCalledTimes(2);
++    hidden = true;
++    document.dispatchEvent(new Event('visibilitychange'));
++    expect(refresh.mock.calls[1][0].aborted).toBe(true);
++    finish();
++    await Promise.resolve();
++    await vi.advanceTimersByTimeAsync(30000);
++    expect(refresh).toHaveBeenCalledTimes(2);
++    hidden = false;
++    document.dispatchEvent(new Event('visibilitychange'));
++    expect(refresh).toHaveBeenCalledTimes(3);
++    stop();
++    finish();
++    await Promise.resolve();
++    await vi.advanceTimersByTimeAsync(10000);
++    expect(refresh).toHaveBeenCalledTimes(3);
++  });
+ });

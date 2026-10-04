@@ -1,12 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Preserve browser-local client-key name editing on older servers; distinguish shared metadata failures and add localized retry.
+- Anchor native Codex relative quota resets to response capture time.
+- Guard repeated manual quota reset callbacks synchronously.
+
 ## 0.1.9
 
 - Add distinct Refresh account data and Refresh credentials actions; keep the original separate Reset quota confirmation and eligibility.
 - Keep successful account data visible during refresh and preserve its observation time on failures.
 - Add a tiny refresh icon and compact observation age beside native Auth Files quota percentages, preserving plan, renewal, credit balance and manual-reset controls.
 - Show the actual provider observation timestamp and source on hover, focus or tap without triggering provider queries or resets.
-- Use the viewer browser’s time zone and regional date/time preferences for observation details and Auth Files reset clocks.
+- Use the viewer browserâ€™s time zone and regional date/time preferences for observation details and Auth Files reset clocks.
 
 ## 0.1.8
 

@@ -1,0 +1,668 @@
+diff --git a/src/features/authFiles/components/AuthFileQuotaSection.tsx b/src/features/authFiles/components/AuthFileQuotaSection.tsx
+index 81acf8c..108250e 100644
+--- a/src/features/authFiles/components/AuthFileQuotaSection.tsx
++++ b/src/features/authFiles/components/AuthFileQuotaSection.tsx
+@@ -148,6 +148,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+       variant: 'primary',
+       onConfirm: async () => {
+         if (pendingRefresh.current) return;
++        pendingRefresh.current = true;
+         const cacheGeneration = captureQuotaCacheGeneration(file.name);
+         setResettingQuota(true);
+         onRefreshingChange?.(true);
+@@ -169,6 +170,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+             showNotification(t('codex_quota.reset_failed', { name: file.name, message }), 'error');
+           });
+         } finally {
++          pendingRefresh.current = false;
+           setResettingQuota(false);
+           onRefreshingChange?.(false);
+         }
+diff --git a/src/features/config/apiKeyNames.ts b/src/features/config/apiKeyNames.ts
+index 7ff2bb8..e976684 100644
+--- a/src/features/config/apiKeyNames.ts
++++ b/src/features/config/apiKeyNames.ts
+@@ -1,6 +1,7 @@
+ import { sha256 } from '@noble/hashes/sha2.js';
+ import { bytesToHex } from '@noble/hashes/utils.js';
+ import { apiClient } from '@/services/api/client';
++import { sharedApiKeyNamesApi } from '@/services/api/apiKeyNames';
+ import { obfuscatedStorage } from '@/services/storage/secureStorage';
+ 
+ const STORAGE_PREFIX = 'api-key-names:v1:';
+@@ -45,33 +46,72 @@ export function saveApiKeyName(apiBase: string, apiKey: string, name: string): b
+   }
+ }
+ 
+-
+ export function sharedApiKeyFingerprint(apiKey: string): string {
+   return bytesToHex(sha256(new TextEncoder().encode(apiKey)));
+ }
+ 
+-export async function loadSharedApiKeyNames(apiBase: string, apiKeys: string[]): Promise<Record<string, string>> {
+-  const revision = apiClient.getConnectionRevision();
+-  const response = await apiClient.get<{ names: Record<string, string> }>('/access/api-key-names');
++export interface ApiKeyNameState {
++  names: Record<string, string>;
++  shared: boolean;
++}
++
++const assertRevision = (revision: number) => {
+   if (revision !== apiClient.getConnectionRevision()) throw new Error('Connection changed');
++};
++
++export async function loadApiKeyNameState(
++  apiBase: string,
++  apiKeys: string[]
++): Promise<ApiKeyNameState> {
++  const revision = apiClient.getConnectionRevision();
++  let names: Record<string, string>;
++  try {
++    names = await sharedApiKeyNamesApi.list();
++  } catch (error) {
++    assertRevision(revision);
++    if (!(error instanceof Error) || (error as { status?: number }).status !== 404) throw error;
++    const local = readApiKeyNames(apiBase);
++    return {
++      shared: false,
++      names: Object.fromEntries(
++        apiKeys.map((key) => [
++          sharedApiKeyFingerprint(key),
++          local[apiKeyNameFingerprint(apiBase, key)] ?? '',
++        ])
++      ),
++    };
++  }
++  assertRevision(revision);
+   const local = readApiKeyNames(apiBase);
+   const imports: Record<string, string> = {};
+   for (const key of apiKeys) {
+     const fingerprint = sharedApiKeyFingerprint(key);
+     const name = local[apiKeyNameFingerprint(apiBase, key)];
+-    if (name && !Object.prototype.hasOwnProperty.call(response.names, fingerprint)) imports[fingerprint] = name;
++    if (name && !Object.prototype.hasOwnProperty.call(names, fingerprint))
++      imports[fingerprint] = name;
+   }
+   if (Object.keys(imports).length) {
+-    const imported = await apiClient.patch<{ names: Record<string, string> }>('/access/api-key-names', { names: imports, only_if_absent: true });
+-    if (revision !== apiClient.getConnectionRevision()) throw new Error('Connection changed');
+-    return imported.names;
++    names = await sharedApiKeyNamesApi.update(imports, true);
++    assertRevision(revision);
+   }
+-  return response.names;
++  return { names, shared: true };
+ }
+ 
+-export async function saveSharedApiKeyName(apiKey: string, name: string): Promise<Record<string, string>> {
++export async function loadSharedApiKeyNames(
++  apiBase: string,
++  apiKeys: string[]
++): Promise<Record<string, string>> {
++  return (await loadApiKeyNameState(apiBase, apiKeys)).names;
++}
++
++export async function saveSharedApiKeyName(
++  apiKey: string,
++  name: string
++): Promise<Record<string, string>> {
+   const revision = apiClient.getConnectionRevision();
+-  const response = await apiClient.patch<{ names: Record<string, string> }>('/access/api-key-names', { names: { [sharedApiKeyFingerprint(apiKey)]: name.trim() } });
+-  if (revision !== apiClient.getConnectionRevision()) throw new Error('Connection changed');
+-  return response.names;
++  const names = await sharedApiKeyNamesApi.update({
++    [sharedApiKeyFingerprint(apiKey)]: name.trim(),
++  });
++  assertRevision(revision);
++  return names;
+ }
+diff --git a/src/features/config/components/blocks/ApiKeysCardEditor.tsx b/src/features/config/components/blocks/ApiKeysCardEditor.tsx
+index ef7bed4..413cee8 100644
+--- a/src/features/config/components/blocks/ApiKeysCardEditor.tsx
++++ b/src/features/config/components/blocks/ApiKeysCardEditor.tsx
+@@ -3,7 +3,12 @@ import { useTranslation } from 'react-i18next';
+ import { Button } from '@/components/ui/Button';
+ import { Modal } from '@/components/ui/Modal';
+ import { useAuthStore, useNotificationStore } from '@/stores';
+-import { sharedApiKeyFingerprint, loadSharedApiKeyNames, saveSharedApiKeyName } from '../../apiKeyNames';
++import {
++  sharedApiKeyFingerprint,
++  loadApiKeyNameState,
++  saveApiKeyName,
++  saveSharedApiKeyName,
++} from '../../apiKeyNames';
+ import { copyToClipboard } from '@/utils/clipboard';
+ import { makeClientId } from '@/types/visualConfig';
+ import { generateSecureApiKey } from '@/utils/apiKey';
+@@ -30,6 +35,8 @@ function ScopedApiKeysCardEditor({
+   apiBase,
+ }: ApiKeysCardEditorProps & { apiBase: string }) {
+   const [names, setNames] = useState<Record<string, string>>({});
++  const [sharedNames, setSharedNames] = useState(true);
++  const [reloadNames, setReloadNames] = useState(0);
+   const [namesReady, setNamesReady] = useState(false);
+   const [savingName, setSavingName] = useState(false);
+   const [namesError, setNamesError] = useState('');
+@@ -51,11 +58,22 @@ function ScopedApiKeysCardEditor({
+   useEffect(() => {
+     let active = true;
+     setNamesReady(false);
+-    loadSharedApiKeyNames(apiBase, apiKeys).then((shared) => {
+-      if (active) { setNames(shared); setNamesReady(true); setNamesError(''); }
+-    }).catch(() => { if (active) setNamesError(t('config_management.visual.api_keys.name_save_error')); });
+-    return () => { active = false; };
+-  }, [apiBase, apiKeys, t]);
++    loadApiKeyNameState(apiBase, apiKeys)
++      .then((shared) => {
++        if (active) {
++          setNames(shared.names);
++          setSharedNames(shared.shared);
++          setNamesReady(true);
++          setNamesError('');
++        }
++      })
++      .catch(() => {
++        if (active) setNamesError(t('config_management.visual.api_keys.name_save_error'));
++      });
++    return () => {
++      active = false;
++    };
++  }, [apiBase, apiKeys, t, reloadNames]);
+   const [apiKeyIds, setApiKeyIds] = useState(() => apiKeys.map(() => makeClientId()));
+   const renderApiKeyIds = useMemo(() => {
+     if (apiKeyIds.length === apiKeys.length) return apiKeyIds;
+@@ -130,8 +148,18 @@ function ScopedApiKeysCardEditor({
+         ? [...apiKeys, trimmed]
+         : apiKeys.map((key, idx) => (idx === editingIndex ? trimmed : key));
+     setSavingName(true);
+-    try { setNames(await saveSharedApiKeyName(trimmed, nameValue)); }
+-    catch { setFormError(t('config_management.visual.api_keys.name_save_error')); setSavingName(false); return; }
++    try {
++      if (sharedNames) setNames(await saveSharedApiKeyName(trimmed, nameValue));
++      else {
++        if (!saveApiKeyName(apiBase, trimmed, nameValue))
++          throw new Error('Browser storage unavailable');
++        setNames((prev) => ({ ...prev, [sharedApiKeyFingerprint(trimmed)]: nameValue.trim() }));
++      }
++    } catch {
++      setFormError(t('config_management.visual.api_keys.name_save_error'));
++      setSavingName(false);
++      return;
++    }
+     setSavingName(false);
+     // Retain old fingerprints: configuration edits can still be discarded or fail to save.
+     if (editingApiKeyId === null) {
+@@ -184,7 +212,7 @@ function ScopedApiKeysCardEditor({
+                   variant="secondary"
+                   size="sm"
+                   onClick={() => handleCopy(key)}
+-                  disabled={disabled || savingName || !namesReady}
++                  disabled={disabled || savingName}
+                 >
+                   {t('common.copy')}
+                 </Button>
+@@ -200,7 +228,7 @@ function ScopedApiKeysCardEditor({
+                   variant="danger"
+                   size="sm"
+                   onClick={() => handleDelete(renderApiKeyIds[index] ?? '')}
+-                  disabled={disabled || savingName || !namesReady}
++                  disabled={disabled || savingName}
+                 >
+                   {t('config_management.visual.common.delete')}
+                 </Button>
+@@ -211,11 +239,20 @@ function ScopedApiKeysCardEditor({
+       )}
+ 
+       <div className="hint">{t('config_management.visual.api_keys.hint')}</div>
+-      {namesError && <div className="error-box">{namesError}</div>}
++      {namesError && (
++        <div className="error-box" role="alert">
++          {namesError}{' '}
++          <Button size="sm" onClick={() => setReloadNames((count) => count + 1)}>
++            {t('config_management.visual.api_keys.name_retry')}
++          </Button>
++        </div>
++      )}
+ 
+       <Modal
+         open={modalOpen}
+-        onClose={() => { if (!savingName) closeModal(); }}
++        onClose={() => {
++          if (!savingName) closeModal();
++        }}
+         title={
+           editingApiKeyId !== null
+             ? t('config_management.visual.api_keys.edit_title')
+@@ -223,7 +260,11 @@ function ScopedApiKeysCardEditor({
+         }
+         footer={
+           <>
+-            <Button variant="secondary" onClick={closeModal} disabled={disabled || savingName || !namesReady}>
++            <Button
++              variant="secondary"
++              onClick={closeModal}
++              disabled={disabled || savingName || !namesReady}
++            >
+               {t('config_management.visual.common.cancel')}
+             </Button>
+             <Button onClick={handleSave} disabled={disabled || savingName || !namesReady}>
+@@ -247,7 +288,11 @@ function ScopedApiKeysCardEditor({
+             disabled={disabled || savingName || !namesReady}
+           />
+           <div id={nameHintId} className="hint">
+-            {t('config_management.visual.api_keys.name_hint')}
++            {t(
++              sharedNames
++                ? 'config_management.visual.api_keys.name_hint'
++                : 'config_management.visual.api_keys.name_local_hint'
++            )}
+           </div>
+         </div>
+         <div className="form-group">
+diff --git a/src/features/quota/providers/codex/data.ts b/src/features/quota/providers/codex/data.ts
+index 65a895a..28b704f 100644
+--- a/src/features/quota/providers/codex/data.ts
++++ b/src/features/quota/providers/codex/data.ts
+@@ -64,7 +64,8 @@ export type CodexQuotaData = {
+ 
+ export const buildCodexQuotaWindows = (
+   payload: CodexUsagePayload,
+-  t: TFunction
++  t: TFunction,
++  observedAtMs = Date.now()
+ ): CodexQuotaWindow[] => {
+   const FIVE_HOUR_SECONDS = 18000;
+   const WEEK_SECONDS = 604800;
+@@ -104,14 +105,14 @@ export const buildCodexQuotaWindows = (
+     allowed?: boolean
+   ) => {
+     if (!window) return;
+-    const resetLabel = formatCodexResetLabel(window);
++    const resetLabel = formatCodexResetLabel(window, observedAtMs);
+     const usedPercentRaw = normalizeNumberValue(window.used_percent ?? window.usedPercent);
+     const isLimitReached = Boolean(limitReached) || allowed === false;
+     const usedPercent = usedPercentRaw ?? (isLimitReached && resetLabel !== '-' ? 100 : null);
+     // Keep the raw instant beside the label — see utils/quota/resetInstants.
+     const resetAtMs =
+       resolveResetMs([window.reset_at, window.resetAt]) ??
+-      parseOffsetSecondsToMs(window.reset_after_seconds ?? window.resetAfterSeconds, Date.now());
++      parseOffsetSecondsToMs(window.reset_after_seconds ?? window.resetAfterSeconds, observedAtMs);
+     const periodHours = periodHoursFromSeconds(
+       window.limit_window_seconds ?? window.limitWindowSeconds
+     );
+@@ -468,7 +469,7 @@ const fetchCodexQuota = async (file: AuthFileItem, t: TFunction): Promise<CodexQ
+     rateLimitResetCreditsAvailableCount;
+   const planType = planTypeFromUsage ?? planTypeFromFile;
+   const subscriptionActiveUntil = liveSubscriptionActiveUntil ?? subscriptionActiveUntilFromFile;
+-  const windows = buildCodexQuotaWindows(payload, t);
++  const windows = buildCodexQuotaWindows(payload, t, Date.parse(capturedAt!));
+   return {
+     capturedAt,
+     planType,
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index 7cb5fa0..337ca6b 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -1466,7 +1466,9 @@
+           "fair": "Fair",
+           "good": "Good",
+           "strong": "Strong"
+-        }
++        },
++        "name_retry": "Retry",
++        "name_local_hint": "Saved immediately in this browser only, separately for each server. Not included in server configuration. Clear this field to remove the name."
+       },
+       "payload_rules": {
+         "rule": "Rule",
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index 2c2e0bc..f15808f 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -1469,7 +1469,9 @@
+           "fair": "Средний",
+           "good": "Хороший",
+           "strong": "Надёжный"
+-        }
++        },
++        "name_retry": "Повторить",
++        "name_local_hint": "Имя сразу сохраняется только в этом браузере, отдельно для каждого сервера, и не включается в конфигурацию сервера. Очистите поле, чтобы удалить имя."
+       },
+       "payload_rules": {
+         "rule": "Правило",
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index 1c1f599..589c931 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -1464,7 +1464,9 @@
+           "fair": "一般",
+           "good": "良好",
+           "strong": "很强"
+-        }
++        },
++        "name_retry": "重试",
++        "name_local_hint": "名称立即保存在当前浏览器中，并按服务器分别保存，不会写入服务器配置。清空此字段可移除名称。"
+       },
+       "payload_rules": {
+         "rule": "规则",
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index 636af4e..33dccf0 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -1490,7 +1490,9 @@
+           "fair": "一般",
+           "good": "良好",
+           "strong": "很強"
+-        }
++        },
++        "name_retry": "重試",
++        "name_local_hint": "名稱立即儲存在目前瀏覽器中，並依伺服器分別儲存，不會寫入伺服器設定。清空此欄位可移除名稱。"
+       },
+       "payload_rules": {
+         "rule": "規則",
+diff --git a/src/services/api/apiKeyNames.ts b/src/services/api/apiKeyNames.ts
+new file mode 100644
+index 0000000..6a90913
+--- /dev/null
++++ b/src/services/api/apiKeyNames.ts
+@@ -0,0 +1,41 @@
++import { apiClient } from './client';
++
++export function normalizeSharedApiKeyNames(payload: unknown): Record<string, string> {
++  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
++    throw new Error('Invalid key name metadata');
++  }
++  const names = (payload as { names?: unknown }).names;
++  if (!names || typeof names !== 'object' || Array.isArray(names)) {
++    throw new Error('Invalid key name metadata');
++  }
++  const entries = Object.entries(names);
++  if (
++    entries.length > 10_000 ||
++    entries.some(
++      ([fingerprint, name]) =>
++        !/^[a-f0-9]{64}$/.test(fingerprint) ||
++        typeof name !== 'string' ||
++        Array.from(name).length > 128 ||
++        /[\p{Cc}\p{Cf}]/u.test(name)
++    )
++  )
++    throw new Error('Invalid key name metadata');
++  return Object.fromEntries(entries);
++}
++
++export const sharedApiKeyNamesApi = {
++  async list(): Promise<Record<string, string>> {
++    return normalizeSharedApiKeyNames(await apiClient.get('/access/api-key-names'));
++  },
++  async update(
++    names: Record<string, string>,
++    onlyIfAbsent = false
++  ): Promise<Record<string, string>> {
++    return normalizeSharedApiKeyNames(
++      await apiClient.patch('/access/api-key-names', {
++        names,
++        ...(onlyIfAbsent ? { only_if_absent: true } : {}),
++      })
++    );
++  },
++};
+diff --git a/src/utils/quota/formatters.ts b/src/utils/quota/formatters.ts
+index a3d05cb..134f0bb 100644
+--- a/src/utils/quota/formatters.ts
++++ b/src/utils/quota/formatters.ts
+@@ -21,7 +21,10 @@ export function formatUnixSeconds(value: number | null): string {
+   return formatInstantShort(ms);
+ }
+ 
+-export function formatCodexResetLabel(window?: CodexUsageWindow | null): string {
++export function formatCodexResetLabel(
++  window?: CodexUsageWindow | null,
++  observedAtMs = Date.now()
++): string {
+   if (!window) return '-';
+   const resetAt = normalizeNumberValue(window.reset_at ?? window.resetAt);
+   if (resetAt !== null && resetAt > 0) {
+@@ -29,7 +32,7 @@ export function formatCodexResetLabel(window?: CodexUsageWindow | null): string
+   }
+   const resetAfter = normalizeNumberValue(window.reset_after_seconds ?? window.resetAfterSeconds);
+   if (resetAfter !== null && resetAfter > 0) {
+-    const targetSeconds = Math.floor(Date.now() / 1000 + resetAfter);
++    const targetSeconds = Math.floor(observedAtMs / 1000 + resetAfter);
+     return formatUnixSeconds(targetSeconds);
+   }
+   return '-';
+diff --git a/tests/nativeQuotaObservation.test.tsx b/tests/nativeQuotaObservation.test.tsx
+index 801b2ee..1221669 100644
+--- a/tests/nativeQuotaObservation.test.tsx
++++ b/tests/nativeQuotaObservation.test.tsx
+@@ -92,7 +92,7 @@ test('quota usage capture precedes slower metadata reads and survives later cach
+             primary_window: {
+               used_percent: 14,
+               limit_window_seconds: 604800,
+-              reset_at: 1767830400,
++              reset_after_seconds: 3600,
+             },
+           },
+         },
+@@ -109,6 +109,7 @@ test('quota usage capture precedes slower metadata reads and survives later cach
+   );
+   const state = CODEX_CONFIG.buildSuccessState(data);
+   expect(state.capturedAt).toBe(captured);
++  expect(state.windows[0].resetAtMs).toBe(Date.parse(captured) + 3600_000);
+   expect(withQuotaObservation(state, new Date().toISOString()).capturedAt).toBe(captured);
+   expect(state.creditBalance).toBe('12.5');
+   expect(CODEX_CONFIG.canResetQuota?.(state)).toBe(true);
+@@ -154,7 +155,7 @@ test('inline age keeps native plan, credits, manual-reset expiry and provider wi
+     )
+   );
+   for (const content of [
+-    'Pro 20x',
++    i18n.t('codex_quota.plan_pro'),
+     '12.5',
+     'Manual resets',
+     'Manual reset expiry',
+diff --git a/tests/sharedApiKeyNames.test.ts b/tests/sharedApiKeyNames.test.ts
+index 5c8c445..b443321 100644
+--- a/tests/sharedApiKeyNames.test.ts
++++ b/tests/sharedApiKeyNames.test.ts
+@@ -1,55 +1,130 @@
+ import { afterEach, beforeEach, expect, test } from 'bun:test';
+ import { createHash } from 'node:crypto';
+ import { apiClient } from '../src/services/api/client';
+-import { loadSharedApiKeyNames, saveSharedApiKeyName, saveApiKeyName, sharedApiKeyFingerprint } from '../src/features/config/apiKeyNames';
++import {
++  loadApiKeyNameState,
++  loadSharedApiKeyNames,
++  saveSharedApiKeyName,
++  saveApiKeyName,
++  sharedApiKeyFingerprint,
++} from '../src/features/config/apiKeyNames';
+ 
+ const originalGet = apiClient.get;
+ const originalPatch = apiClient.patch;
+ const originalRevision = apiClient.getConnectionRevision;
+ const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+-let names: Record<string,string>;
+-type NameUpdate = { names: Record<string,string>; only_if_absent?: boolean };
++let names: Record<string, string>;
++type NameUpdate = { names: Record<string, string>; only_if_absent?: boolean };
+ let writes: NameUpdate[];
+ let revision: number;
+ beforeEach(() => {
+- names={}; writes=[]; revision=1;
+- const values=new Map<string,string>();
+- Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:(key:string)=>values.get(key)??null,setItem:(key:string,value:string)=>values.set(key,value),removeItem:(key:string)=>values.delete(key)}});
+- apiClient.getConnectionRevision=()=>revision;
+- apiClient.get=(async()=>({names:{...names}})) as typeof apiClient.get;
+- apiClient.patch=(async(path:string,body:NameUpdate)=>{
+-  expect(path).toBe('/access/api-key-names');writes.push(body);
+-  for(const [key,value] of Object.entries(body.names)) if(!body.only_if_absent || !Object.hasOwn(names,key)) names[key]=value as string;
+-  return {names:{...names}};
+- }) as typeof apiClient.patch;
+-});
+-afterEach(()=>{
+- apiClient.get=originalGet;apiClient.patch=originalPatch;apiClient.getConnectionRevision=originalRevision;
+- if(originalStorage)Object.defineProperty(globalThis,'localStorage',originalStorage);else Reflect.deleteProperty(globalThis,'localStorage');
+-});
+-test('fingerprints match CPA and Keeper independently of browser address',()=>{
+- expect(sharedApiKeyFingerprint('fixture-key')).toBe(createHash('sha256').update('fixture-key').digest('hex'));
+-});
+-test('imports missing local names once and preserves shared names and clear tombstones',async()=>{
+- for(const key of ['one','two','three'])saveApiKeyName('server',key,'Local '+key);
+- names[sharedApiKeyFingerprint('two')]='Shared Team';names[sharedApiKeyFingerprint('three')]='';
+- const result=await loadSharedApiKeyNames('server',['one','two','three']);
+- expect(result[sharedApiKeyFingerprint('one')]).toBe('Local one');expect(result[sharedApiKeyFingerprint('two')]).toBe('Shared Team');expect(result[sharedApiKeyFingerprint('three')]).toBe('');
+- expect(writes).toHaveLength(1);expect(writes[0].only_if_absent).toBe(true);
+- await loadSharedApiKeyNames('server',['one','two','three']);expect(writes).toHaveLength(1);
+- expect(JSON.stringify(writes)).not.toContain('"one"');
+-});
+-test('renames and clears shared names without replacing other keys',async()=>{
+- names[sharedApiKeyFingerprint('other')]='Other';
+- await saveSharedApiKeyName('one',' Team ✓ ');expect(names[sharedApiKeyFingerprint('one')]).toBe('Team ✓');
+- await saveSharedApiKeyName('one','');expect(names[sharedApiKeyFingerprint('one')]).toBe('');expect(names[sharedApiKeyFingerprint('other')]).toBe('Other');
+-});
+-test('connection changes prevent importing names into another server',async()=>{
+- saveApiKeyName('server','one','Local');
+- apiClient.get=(async()=>{revision++;return {names:{}};}) as typeof apiClient.get;
+- await expect(loadSharedApiKeyNames('server',['one'])).rejects.toThrow('Connection changed');expect(writes).toHaveLength(0);
+-});
+-test('management failure is surfaced without claiming local save success',async()=>{
+- apiClient.patch=(async()=>{throw new Error('offline');}) as typeof apiClient.patch;
+- await expect(saveSharedApiKeyName('one','Team')).rejects.toThrow('offline');
++  names = {};
++  writes = [];
++  revision = 1;
++  const values = new Map<string, string>();
++  Object.defineProperty(globalThis, 'localStorage', {
++    configurable: true,
++    value: {
++      getItem: (key: string) => values.get(key) ?? null,
++      setItem: (key: string, value: string) => values.set(key, value),
++      removeItem: (key: string) => values.delete(key),
++    },
++  });
++  apiClient.getConnectionRevision = () => revision;
++  apiClient.get = (async () => ({ names: { ...names } })) as typeof apiClient.get;
++  apiClient.patch = (async (path: string, body: NameUpdate) => {
++    expect(path).toBe('/access/api-key-names');
++    writes.push(body);
++    for (const [key, value] of Object.entries(body.names))
++      if (!body.only_if_absent || !Object.hasOwn(names, key)) names[key] = value as string;
++    return { names: { ...names } };
++  }) as typeof apiClient.patch;
++});
++afterEach(() => {
++  apiClient.get = originalGet;
++  apiClient.patch = originalPatch;
++  apiClient.getConnectionRevision = originalRevision;
++  if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage);
++  else Reflect.deleteProperty(globalThis, 'localStorage');
++});
++test('fingerprints match CPA and Keeper independently of browser address', () => {
++  expect(sharedApiKeyFingerprint('fixture-key')).toBe(
++    createHash('sha256').update('fixture-key').digest('hex')
++  );
++});
++test('imports missing local names once and preserves shared names and clear tombstones', async () => {
++  for (const key of ['one', 'two', 'three']) saveApiKeyName('server', key, 'Local ' + key);
++  names[sharedApiKeyFingerprint('two')] = 'Shared Team';
++  names[sharedApiKeyFingerprint('three')] = '';
++  const result = await loadSharedApiKeyNames('server', ['one', 'two', 'three']);
++  expect(result[sharedApiKeyFingerprint('one')]).toBe('Local one');
++  expect(result[sharedApiKeyFingerprint('two')]).toBe('Shared Team');
++  expect(result[sharedApiKeyFingerprint('three')]).toBe('');
++  expect(writes).toHaveLength(1);
++  expect(writes[0].only_if_absent).toBe(true);
++  await loadSharedApiKeyNames('server', ['one', 'two', 'three']);
++  expect(writes).toHaveLength(1);
++  expect(JSON.stringify(writes)).not.toContain('"one"');
++});
++test('renames and clears shared names without replacing other keys', async () => {
++  names[sharedApiKeyFingerprint('other')] = 'Other';
++  await saveSharedApiKeyName('one', ' Team ✓ ');
++  expect(names[sharedApiKeyFingerprint('one')]).toBe('Team ✓');
++  await saveSharedApiKeyName('one', '');
++  expect(names[sharedApiKeyFingerprint('one')]).toBe('');
++  expect(names[sharedApiKeyFingerprint('other')]).toBe('Other');
++});
++test('connection changes prevent importing names into another server', async () => {
++  saveApiKeyName('server', 'one', 'Local');
++  apiClient.get = (async () => {
++    revision++;
++    return { names: {} };
++  }) as typeof apiClient.get;
++  await expect(loadSharedApiKeyNames('server', ['one'])).rejects.toThrow('Connection changed');
++  expect(writes).toHaveLength(0);
++});
++test('management failure is surfaced without claiming local save success', async () => {
++  apiClient.patch = (async () => {
++    throw new Error('offline');
++  }) as typeof apiClient.patch;
++  await expect(saveSharedApiKeyName('one', 'Team')).rejects.toThrow('offline');
++});
++
++test('older servers keep browser-local names editable without importing them', async () => {
++  saveApiKeyName('server', 'one', 'Local');
++  apiClient.get = (async () => {
++    throw Object.assign(new Error('not found'), { status: 404 });
++  }) as typeof apiClient.get;
++  const result = await loadApiKeyNameState('server', ['one']);
++  expect(result.shared).toBe(false);
++  expect(result.names[sharedApiKeyFingerprint('one')]).toBe('Local');
++  expect(writes).toHaveLength(0);
++  saveApiKeyName('server', 'one', 'Edited');
++  expect((await loadApiKeyNameState('server', ['one'])).names[sharedApiKeyFingerprint('one')]).toBe(
++    'Edited'
++  );
++});
++
++test('server failures do not downgrade shared metadata to browser-local writes', async () => {
++  apiClient.get = (async () => {
++    throw Object.assign(new Error('unavailable'), { status: 503 });
++  }) as typeof apiClient.get;
++  await expect(loadApiKeyNameState('server', ['one'])).rejects.toThrow('unavailable');
++  expect(writes).toHaveLength(0);
++});
++
++test('late old-server errors after a connection change cannot select local fallback', async () => {
++  apiClient.get = (async () => {
++    revision++;
++    throw Object.assign(new Error('not found'), { status: 404 });
++  }) as typeof apiClient.get;
++  await expect(loadApiKeyNameState('server', ['one'])).rejects.toThrow('Connection changed');
++});
++
++test('late successful writes cannot update a new connection', async () => {
++  apiClient.patch = (async () => {
++    revision++;
++    return { names: {} };
++  }) as typeof apiClient.patch;
++  await expect(saveSharedApiKeyName('one', 'Team')).rejects.toThrow('Connection changed');
+ });
+diff --git a/tests/sharedApiKeyNamesPayload.test.ts b/tests/sharedApiKeyNamesPayload.test.ts
+new file mode 100644
+index 0000000..269cb00
+--- /dev/null
++++ b/tests/sharedApiKeyNamesPayload.test.ts
+@@ -0,0 +1,21 @@
++import { expect, test } from 'bun:test';
++import { normalizeSharedApiKeyNames } from '../src/services/api/apiKeyNames';
++
++test('accepts server tombstones and valid names but rejects malformed metadata', () => {
++  const fingerprint = 'a'.repeat(64);
++  expect(normalizeSharedApiKeyNames({ names: { [fingerprint]: '' } })).toEqual({
++    [fingerprint]: '',
++  });
++  for (const payload of [
++    null,
++    {},
++    { names: [] },
++    { names: { token: 'Name' } },
++    { names: { [fingerprint]: 1 } },
++    { names: { [fingerprint]: 'a'.repeat(129) } },
++    { names: { [fingerprint]: 'hidden\u200bname' } },
++    { names: { [fingerprint]: 'line\nname' } },
++  ]) {
++    expect(() => normalizeSharedApiKeyNames(payload)).toThrow('Invalid key name metadata');
++  }
++});

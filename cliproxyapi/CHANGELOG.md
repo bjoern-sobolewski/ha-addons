@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.12
+
+- Merge newer request-derived quota into native account windows without losing plan, credits, renewal or reset controls.
+- Show available quota with a refresh-account-data prompt when account details have not been loaded.
+- Add a default-enabled Display options switch for the usage refresh icon and age.
+- Read the management quota cache every ten seconds while visible without extra provider queries.
+
 ## 0.1.11
 
 - Preserve primary token usage and cost for non-streaming Codex responses that include image-tool usage metadata.
@@ -14,7 +21,7 @@
 - Keep successful account data visible during refresh and preserve its observation time on failures.
 - Add a tiny refresh icon and compact observation age beside native Auth Files quota percentages, preserving plan, renewal, credit balance and manual-reset controls.
 - Show the actual provider observation timestamp and source on hover, focus or tap without triggering provider queries or resets.
-- Use the viewer browserâ€™s time zone and regional date/time preferences for observation details and Auth Files reset clocks.
+- Use the viewer browserÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢s time zone and regional date/time preferences for observation details and Auth Files reset clocks.
 
 ## 0.1.8
 

@@ -1,0 +1,91 @@
+diff --git a/web/src/components/usage/QuotaFreshness.tsx b/web/src/components/usage/QuotaFreshness.tsx
+index 5dcbd60..70b83a8 100644
+--- a/web/src/components/usage/QuotaFreshness.tsx
++++ b/web/src/components/usage/QuotaFreshness.tsx
+@@ -1,5 +1,6 @@
++import { useQuotaAgeClock, quotaAgeLabel } from '@/lib/quotaAgeClock';
+ import { quotaSourceLabel } from './quotaSourceLabel';
+-import { useEffect, useId, useState } from "react";
++import { useId, useState } from "react";
+ import { IconRefreshCw } from "@/components/ui/icons";
+ 
+ 
+@@ -17,21 +18,11 @@ export function QuotaFreshness({
+   stale?: boolean;
+ }) {
+   const [open, setOpen] = useState(false);
+-  const [now, setNow] = useState(Date.now);
++  const now = useQuotaAgeClock();
+   const tooltipId = useId();
+-  useEffect(() => {
+-    const timer = setInterval(() => setNow(Date.now()), 10_000);
+-    return () => clearInterval(timer);
+-  }, []);
+   const at = capturedAt ? Date.parse(capturedAt) : NaN;
+   const seconds = Math.max(0, Math.floor((now - at) / 1000));
+-  const age = Number.isFinite(at)
+-    ? seconds < 60
+-      ? `${seconds}s ago`
+-      : seconds < 3600
+-        ? `${Math.floor(seconds / 60)}m ago`
+-        : `${Math.floor(seconds / 3600)}h ago`
+-    : "Unknown age";
++  const age = quotaAgeLabel(capturedAt, now);
+   const old = Boolean(
+     stale ||
+     !Number.isFinite(at) ||
+diff --git a/web/src/components/usage/test/QuotaFreshnessClock.test.tsx b/web/src/components/usage/test/QuotaFreshnessClock.test.tsx
+new file mode 100644
+index 0000000..5c67986
+--- /dev/null
++++ b/web/src/components/usage/test/QuotaFreshnessClock.test.tsx
+@@ -0,0 +1,25 @@
++// @vitest-environment happy-dom
++import { act } from 'react';
++import { createRoot } from 'react-dom/client';
++import { afterEach, expect, test, vi } from 'vitest';
++import { QuotaFreshness } from '../QuotaFreshness';
++import { quotaAgeLabel } from '@/lib/quotaAgeClock';
++
++afterEach(()=>{vi.useRealTimers();vi.restoreAllMocks();});
++test('age counts up locally across multiple quota windows and releases its shared timer on unmount',async()=>{
++ globalThis.IS_REACT_ACT_ENVIRONMENT=true;
++ vi.useFakeTimers();vi.setSystemTime(new Date('2026-10-05T10:00:00Z'));
++ const hidden=vi.spyOn(document,'hidden','get').mockReturnValue(false);
++ const container=document.createElement('div');document.body.appendChild(container);const root=createRoot(container);
++ await act(async()=>root.render(<><QuotaFreshness account="fixture" capturedAt="2026-10-05T09:59:50Z" source="websocket_event"/><QuotaFreshness account="fixture2" capturedAt="2026-10-05T09:59:00Z"/></>));
++ expect(container.textContent).toContain('10s ago');expect(container.textContent).toContain('1m 0s ago');expect(vi.getTimerCount()).toBe(1);
++ await act(async()=>vi.advanceTimersByTime(3000));expect(container.textContent).toContain('13s ago');expect(container.textContent).toContain('1m 3s ago');
++ hidden.mockReturnValue(true);await act(async()=>vi.advanceTimersByTime(5000));expect(container.textContent).toContain('13s ago');
++ hidden.mockReturnValue(false);await act(async()=>document.dispatchEvent(new Event('visibilitychange')));expect(container.textContent).toContain('18s ago');
++ await act(async()=>root.unmount());container.remove();expect(vi.getTimerCount()).toBe(0);
++});
++test('age handles unknown and future timestamps without creating a fresh capture',()=>{
++ const now=Date.parse('2026-10-05T10:00:00Z');
++ expect(quotaAgeLabel(undefined,now)).toBe('Unknown age');expect(quotaAgeLabel('invalid',now)).toBe('Unknown age');
++ expect(quotaAgeLabel('2026-10-05T10:01:00Z',now)).toBe('0s ago');
++});
+diff --git a/web/src/lib/quotaAgeClock.ts b/web/src/lib/quotaAgeClock.ts
+new file mode 100644
+index 0000000..df0cf62
+--- /dev/null
++++ b/web/src/lib/quotaAgeClock.ts
+@@ -0,0 +1,18 @@
++import { useSyncExternalStore } from 'react';
++const listeners = new Set<() => void>();
++let now = Date.now();
++let timer: ReturnType<typeof setInterval> | undefined;
++function tick() { if (!document.hidden) { now = Date.now(); listeners.forEach(fn => fn()); } }
++function subscribe(listener: () => void) {
++  listeners.add(listener);
++  if (!timer) { now = Date.now(); timer = setInterval(tick, 1000); document.addEventListener('visibilitychange', tick); }
++  return () => { listeners.delete(listener); if (!listeners.size) { clearInterval(timer); timer = undefined; document.removeEventListener('visibilitychange', tick); } };
++}
++const snapshot = () => now;
++export function useQuotaAgeClock() { return useSyncExternalStore(subscribe, snapshot, snapshot); }
++export function quotaAgeLabel(capturedAt: string | undefined, at: number) {
++  const captured = Date.parse(capturedAt ?? '');
++  if (!Number.isFinite(captured)) return 'Unknown age';
++  const seconds = Math.max(0, Math.floor((at - captured) / 1000));
++  return seconds < 60 ? `${seconds}s ago` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s ago` : seconds < 86400 ? `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m ago` : `${Math.floor(seconds / 86400)}d ${Math.floor(seconds % 86400 / 3600)}h ago`;
++}

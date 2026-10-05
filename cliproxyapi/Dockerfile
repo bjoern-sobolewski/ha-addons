@@ -39,6 +39,8 @@ COPY patches/cpamc-auth-errors.patch /tmp/cpamc-auth-errors.patch
 RUN git apply --check /tmp/cpamc-auth-errors.patch && git apply /tmp/cpamc-auth-errors.patch
 COPY patches/cpamc-native-age.patch /tmp/cpamc-native-age.patch
 RUN git apply --check /tmp/cpamc-native-age.patch && git apply /tmp/cpamc-native-age.patch
+COPY patches/cpamc-traffic-native.patch /tmp/cpamc-traffic-native.patch
+RUN git apply --check /tmp/cpamc-traffic-native.patch && git apply /tmp/cpamc-traffic-native.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/ ./
@@ -55,7 +57,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.11
+ARG BUILD_VERSION=0.1.12
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

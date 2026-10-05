@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.21
+
+- Count quota observation ages up every second on Auth Files using one shared local clock, preserving captured timestamps and API polling frequency.
+
 ## 0.1.20
 
 - Show Fast requested from the captured outgoing tier, preserve raw response metadata in tooltips, and support outgoing-tier pricing across events, exports, archives, caches and overview totals. Historical rows remain uncaptured.

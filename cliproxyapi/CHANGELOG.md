@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.11
+
+- Preserve primary token usage and cost for non-streaming Codex responses that include image-tool usage metadata.
+
 ## 0.1.10
 
 - Capture the final outgoing Codex service tier after payload overrides for HTTP and WebSocket usage events; preserve client and response tier metadata.

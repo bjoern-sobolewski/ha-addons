@@ -8,7 +8,7 @@ async def responses(request):
     calls+=1
     account='b' if request.headers.get('Authorization','').endswith('fake-account-b') else 'a'
     used=71 if account=='b' else 17
-    result={'id':'resp-test','object':'response','status':'completed','model':'gpt-5.5','service_tier':'default','output':[],'usage':{'input_tokens':10,'output_tokens':1,'total_tokens':11}}
+    result={'id':'resp-test','object':'response','status':'completed','model':'gpt-5.5','service_tier':'default','output':[],'usage':{'input_tokens':10,'output_tokens':1,'total_tokens':11},'tool_usage':{'image_gen':{'input_tokens':0,'output_tokens':0,'total_tokens':0}}}
     socket=web.WebSocketResponse(compress=False)
     if socket.can_prepare(request).ok:
         await socket.prepare(request)

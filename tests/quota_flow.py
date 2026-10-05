@@ -67,6 +67,7 @@ def main():
    eventually(lambda:len(events())>=3)
    assert all(e.get('upstream_service_tier')=='priority' and e.get('response_service_tier')=='default' for e in events())
    assert all(e.get('service_tier')=='auto' for e in events())
+   assert all(e.get('input_tokens')==10 and e.get('output_tokens')==1 for e in events()), 'primary usage lost with empty image-tool metadata'
    exported=json.loads(request(gateway+'/test-quota/api/v1/read-only/events/export?range=today&format=json',opener=ro)[1])
    assert '"upstream_service_tier": "priority"' in json.dumps(exported)
    eventually(lambda:any(i['source']=='websocket_event' and i['headers'].get('X-Codex-Primary-Used-Percent')==['23'] for i in cached()))

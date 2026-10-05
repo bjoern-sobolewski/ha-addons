@@ -19,7 +19,7 @@ index 10ecf27..9ca810d 100644
  	ResponseModel       string                   `json:"response_model,omitempty"`
  }
 diff --git a/internal/runtime/executor/codex_executor_execute.go b/internal/runtime/executor/codex_executor_execute.go
-index 7fdda8b..749dbce 100644
+index 7fdda8b..44fda03 100644
 --- a/internal/runtime/executor/codex_executor_execute.go
 +++ b/internal/runtime/executor/codex_executor_execute.go
 @@ -103,6 +103,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
@@ -30,6 +30,18 @@ index 7fdda8b..749dbce 100644
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
  		helps.RecordAPIResponseError(ctx, e.cfg, err)
+@@ -186,10 +187,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
+ 		if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+ 			return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+ 		}
+-		publishCodexImageToolUsage(ctx, reporter, body, eventData)
+ 		if detail, ok := helps.ParseCodexUsage(eventData); ok {
+ 			reporter.Publish(ctx, detail)
+ 		}
++		publishCodexImageToolUsage(ctx, reporter, body, eventData)
+ 		if responseFormat == sdktranslator.FormatOpenAIResponse {
+ 			out = helps.EnsureResponsesUsageDetails(out)
+ 		}
 @@ -274,6 +275,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
  	})
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
@@ -50,6 +62,65 @@ index bae496f..a9be8a9 100644
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
  		helps.RecordAPIResponseError(ctx, e.cfg, err)
+diff --git a/internal/runtime/executor/codex_nonstream_usage_test.go b/internal/runtime/executor/codex_nonstream_usage_test.go
+new file mode 100644
+index 0000000..04f093e
+--- /dev/null
++++ b/internal/runtime/executor/codex_nonstream_usage_test.go
+@@ -0,0 +1,53 @@
++package executor
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++)
++
++func TestCodexNonStreamRetainsPrimaryUsageWithImageToolMetadata(t *testing.T) {
++	for _, imageTokens := range []int{0, 5} {
++		t.Run(fmt.Sprint(imageTokens), func(t *testing.T) {
++			alias := t.Name()
++			capture := &codexResponseModelUsageCapture{alias: alias, records: make(chan coreusage.Record, 4)}
++			coreusage.RegisterNamedPlugin(alias, capture)
++			t.Cleanup(func() { coreusage.RegisterNamedPlugin(alias, codexResponseModelNoopUsagePlugin{}) })
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++				w.Header().Set("Content-Type", "text/event-stream")
++				fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_usage\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5.5\",\"service_tier\":\"default\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"total_tokens\":13},\"tool_usage\":{\"image_gen\":{\"input_tokens\":0,\"output_tokens\":%d,\"total_tokens\":%d}}}}\n\n", imageTokens, imageTokens)
++			}))
++			defer server.Close()
++			ctx := coreusage.WithRequestedModelAlias(context.Background(), alias)
++			auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
++			_, err := NewCodexExecutor(&config.Config{}).Execute(ctx, auth, cliproxyexecutor.Request{
++				Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","service_tier":"priority","input":"Check usage."}`),
++			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
++			if err != nil {
++				t.Fatal(err)
++			}
++			record := capture.await(t)
++			if record.Model != "gpt-5.5" || record.Detail.InputTokens != 10 || record.Detail.OutputTokens != 3 || record.Detail.TotalTokens != 13 {
++				t.Fatalf("primary usage was lost: model=%s detail=%+v", record.Model, record.Detail)
++			}
++			if record.UpstreamServiceTier != "priority" || record.ResponseServiceTier != "default" {
++				t.Fatalf("tier provenance lost: outgoing=%s response=%s", record.UpstreamServiceTier, record.ResponseServiceTier)
++			}
++			if imageTokens > 0 {
++				image := capture.await(t)
++				if image.Model == record.Model || image.Detail.TotalTokens != int64(imageTokens) {
++					t.Fatalf("image usage lost: %+v", image)
++				}
++			}
++		})
++	}
++}
 diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
 index 132e416..8d3cd8d 100644
 --- a/internal/runtime/executor/codex_websockets_duplex.go

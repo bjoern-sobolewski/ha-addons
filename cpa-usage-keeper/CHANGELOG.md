@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.24
+
+- Add daily subscription API-value and response-speed graphs by model and outgoing Normal/Fast requested mode in account Weekly value.
+- Track full-week allowance estimates using qualifying samples from the trailing seven UTC days; preserve gaps when data is insufficient.
+- Compare output tokens per second and time to first token, including archived traffic and valid-sample counts.
+
 ## 0.1.23
 
 - Combine consecutive reset-time updates at 100% quota into one weekly allowance row, preserving recorded costs and request counts.

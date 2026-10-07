@@ -1,0 +1,695 @@
+diff --git a/internal/quota/weekly_trends.go b/internal/quota/weekly_trends.go
+new file mode 100644
+index 0000000..8a55ca5
+--- /dev/null
++++ b/internal/quota/weekly_trends.go
+@@ -0,0 +1,130 @@
++package quota
++
++import (
++	dto "cpa-usage-keeper/internal/repository/dto"
++	"sort"
++	"time"
++)
++
++type WeeklyTrendPoint struct {
++	Day              time.Time `json:"day"`
++	Model            string    `json:"model"`
++	Mode             string    `json:"mode"`
++	Requests         int64     `json:"requests"`
++	TotalCostUSD     float64   `json:"total_cost_usd"`
++	CostAvailable    bool      `json:"cost_available"`
++	SpeedRequests    int64     `json:"speed_requests"`
++	SpeedTPS         *float64  `json:"speed_tps"`
++	TTFTRequests     int64     `json:"ttft_requests"`
++	MeanTTFTMS       *float64  `json:"mean_ttft_ms"`
++	SampleIntervals  int       `json:"sample_intervals"`
++	SampleRequests   int64     `json:"sample_requests"`
++	PercentagePoints int       `json:"percentage_points"`
++	FullAllowanceUSD *float64  `json:"full_allowance_usd"`
++}
++
++func weeklyIntervalEligible(interval dto.CodexQuotaEfficiencyTransition) bool {
++	usage := interval.Usage
++	return interval.PercentagePoints > 0 && interval.IntervalEndedAt.After(interval.IntervalStartedAt) &&
++		interval.IntervalEndedAt.Sub(interval.IntervalStartedAt) <= weeklyMaxInterval &&
++		len(usage.ModelModes) == 1 && usage.CostAvailable && usage.ModelModes[0].CostAvailable && usage.Requests > 0 && usage.FailedRequests == 0 &&
++		usage.ModelModes[0].Model != "" && (usage.ModelModes[0].Mode == "normal" || usage.ModelModes[0].Mode == "fast")
++}
++
++// Aggregates the same event stream as the cycle table, including archived events.
++// Estimates at each day use only samples already observed in the trailing seven UTC days.
++func buildWeeklyTimeline(history dto.CodexQuotaEfficiencyHistory) []WeeklyTrendPoint {
++	type key struct {
++		day         time.Time
++		model, mode string
++	}
++	daily := make(map[key]dto.QuotaModelModeUsage)
++	samples := make(map[[2]string][]dto.CodexQuotaEfficiencyTransition)
++	groups := make(map[[2]string]bool)
++	var first time.Time
++	addDay := func(day time.Time) {
++		if first.IsZero() || day.Before(first) {
++			first = day
++		}
++	}
++	for _, cycle := range history.Cycles {
++		if cycle.WindowSeconds != 604800 {
++			continue
++		}
++		for _, day := range cycle.DailyUsage {
++			addDay(day.Day)
++			for _, usage := range day.Usage.ModelModes {
++				k := key{day.Day, usage.Model, usage.Mode}
++				total, exists := daily[k]
++				if !exists {
++					total.CostAvailable = true
++				}
++				total.Requests += usage.Requests
++				total.TotalCostUSD += usage.TotalCostUSD
++				total.CostAvailable = total.CostAvailable && usage.CostAvailable
++				total.SpeedRequests += usage.SpeedRequests
++				total.SpeedOutputTokens += usage.SpeedOutputTokens
++				total.SpeedDurationMS += usage.SpeedDurationMS
++				total.TTFTRequests += usage.TTFTRequests
++				total.TotalTTFTMS += usage.TotalTTFTMS
++				daily[k] = total
++				groups[[2]string{usage.Model, usage.Mode}] = true
++			}
++		}
++		for _, interval := range cycle.Transitions {
++			if !weeklyIntervalEligible(interval) || interval.IntervalEndedAt.After(history.GeneratedAt) {
++				continue
++			}
++			usage := interval.Usage.ModelModes[0]
++			k := [2]string{usage.Model, usage.Mode}
++			samples[k] = append(samples[k], interval)
++			groups[k] = true
++			addDay(interval.IntervalEndedAt.UTC().Truncate(24 * time.Hour))
++		}
++	}
++	result := []WeeklyTrendPoint{}
++	if first.IsZero() || history.GeneratedAt.IsZero() {
++		return result
++	}
++	last := history.GeneratedAt.UTC().Truncate(24 * time.Hour)
++	for day := first; !day.After(last); day = day.Add(24 * time.Hour) {
++		for group := range groups {
++			usage, exists := daily[key{day, group[0], group[1]}]
++			point := WeeklyTrendPoint{Day: day, Model: group[0], Mode: group[1], Requests: usage.Requests, TotalCostUSD: usage.TotalCostUSD, CostAvailable: !exists || usage.CostAvailable, SpeedRequests: usage.SpeedRequests, TTFTRequests: usage.TTFTRequests}
++			if usage.SpeedRequests > 0 && usage.SpeedDurationMS > 0 {
++				v := float64(usage.SpeedOutputTokens) * 1000 / float64(usage.SpeedDurationMS)
++				point.SpeedTPS = &v
++			}
++			if usage.TTFTRequests > 0 {
++				v := float64(usage.TotalTTFTMS) / float64(usage.TTFTRequests)
++				point.MeanTTFTMS = &v
++			}
++			var cost float64
++			for _, interval := range samples[group] {
++				if interval.IntervalEndedAt.Before(day.Add(-6*24*time.Hour)) || !interval.IntervalEndedAt.Before(day.Add(24*time.Hour)) {
++					continue
++				}
++				point.SampleIntervals++
++				point.SampleRequests += interval.Usage.Requests
++				point.PercentagePoints += interval.PercentagePoints
++				cost += interval.Usage.TotalCostUSD
++			}
++			if point.PercentagePoints >= weeklyMinPoints && point.SampleIntervals >= weeklyMinIntervals && point.SampleRequests >= weeklyMinRequests {
++				v := cost / float64(point.PercentagePoints) * 100
++				point.FullAllowanceUSD = &v
++			}
++			result = append(result, point)
++		}
++	}
++	sort.Slice(result, func(i, j int) bool {
++		a, b := result[i], result[j]
++		if !a.Day.Equal(b.Day) {
++			return a.Day.Before(b.Day)
++		}
++		if a.Model != b.Model {
++			return a.Model < b.Model
++		}
++		return a.Mode < b.Mode
++	})
++	return result
++}
+diff --git a/internal/quota/weekly_trends_test.go b/internal/quota/weekly_trends_test.go
+new file mode 100644
+index 0000000..f934d27
+--- /dev/null
++++ b/internal/quota/weekly_trends_test.go
+@@ -0,0 +1,58 @@
++package quota
++
++import (
++	dto "cpa-usage-keeper/internal/repository/dto"
++	"math"
++	"testing"
++	"time"
++)
++
++func TestWeeklyTimelineRollingEstimatesDoNotUseFutureOrExpiredSamples(t *testing.T) {
++	day := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
++	transitions := []dto.CodexQuotaEfficiencyTransition{}
++	for i, points := range []int{1, 2, 3} {
++		transitions = append(transitions, weeklySample(day.Add(time.Duration(i)*24*time.Hour+time.Hour), points, float64(points)*2, "fast"))
++	}
++	future := weeklySample(day.Add(11*24*time.Hour), 10, 10000, "fast")
++	transitions = append(transitions, future)
++	mixed := weeklySample(day.Add(2*24*time.Hour+2*time.Hour), 10, 9999, "fast")
++	mixed.Usage.ModelModes = append(mixed.Usage.ModelModes, dto.QuotaModelModeUsage{Model: "other", Mode: "normal"})
++	transitions = append(transitions, mixed)
++	history := dto.CodexQuotaEfficiencyHistory{GeneratedAt: day.Add(10 * 24 * time.Hour), Cycles: []dto.CodexQuotaEfficiencyCycle{{WindowSeconds: 604800, Transitions: transitions}}}
++	rows := buildWeeklyTimeline(history)
++	if len(rows) != 11 {
++		t.Fatalf("unexpected days: %d", len(rows))
++	}
++	if rows[0].FullAllowanceUSD != nil || rows[1].FullAllowanceUSD != nil {
++		t.Fatal("future evidence created a past estimate")
++	}
++	if rows[2].FullAllowanceUSD == nil || math.Abs(*rows[2].FullAllowanceUSD-200) > 1e-9 || rows[2].PercentagePoints != 6 {
++		t.Fatalf("wrong weighted estimate: %+v", rows[2])
++	}
++	if rows[7].FullAllowanceUSD != nil || rows[10].FullAllowanceUSD != nil {
++		t.Fatal("stale or future samples were reused")
++	}
++}
++
++func TestWeeklyTimelineCombinesDailyFragmentsAndKeepsModesAndMissingData(t *testing.T) {
++	day := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
++	usage := func(cost float64, valid bool, mode string, tokens, duration int64) dto.QuotaDailyUsage {
++		return dto.QuotaDailyUsage{Day: day, Usage: dto.CodexQuotaEfficiencyUsage{ModelModes: []dto.QuotaModelModeUsage{{Model: "a", Mode: mode, Requests: 3, TotalCostUSD: cost, CostAvailable: valid, SpeedRequests: 3, SpeedOutputTokens: tokens, SpeedDurationMS: duration, TTFTRequests: 3, TotalTTFTMS: 3000}}}}
++	}
++	history := dto.CodexQuotaEfficiencyHistory{GeneratedAt: day.Add(time.Hour), Cycles: []dto.CodexQuotaEfficiencyCycle{
++		{WindowSeconds: 604800, DailyUsage: []dto.QuotaDailyUsage{usage(2, true, "fast", 100, 1000)}},
++		{WindowSeconds: 604800, DailyUsage: []dto.QuotaDailyUsage{usage(5, true, "fast", 300, 9000), usage(20, false, "unknown", 40, 2000)}},
++		{WindowSeconds: 18000, DailyUsage: []dto.QuotaDailyUsage{usage(999, true, "normal", 5000, 1)}},
++	}}
++	rows := buildWeeklyTimeline(history)
++	if len(rows) != 2 {
++		t.Fatalf("wrong groups: %+v", rows)
++	}
++	fast, unknown := rows[0], rows[1]
++	if fast.Requests != 6 || fast.TotalCostUSD != 7 || fast.SpeedRequests != 6 || fast.SpeedTPS == nil || *fast.SpeedTPS != 40 || *fast.MeanTTFTMS != 1000 {
++		t.Fatalf("lost totals or unweighted speed: %+v", fast)
++	}
++	if unknown.Mode != "unknown" || unknown.CostAvailable || unknown.FullAllowanceUSD != nil {
++		t.Fatalf("missing data invented: %+v", unknown)
++	}
++}
+diff --git a/internal/quota/weekly_value.go b/internal/quota/weekly_value.go
+index 64a5769..c5e6a0d 100644
+--- a/internal/quota/weekly_value.go
++++ b/internal/quota/weekly_value.go
+@@ -22,6 +22,7 @@ type WeeklyQuotaValue struct {
+ 	EligiblePoints     int                `json:"eligible_points"`
+ 	ObservedPoints     int                `json:"observed_points"`
+ 	Modes              []WeeklyModelValue `json:"modes"`
++	Timeline           []WeeklyTrendPoint `json:"timeline"`
+ 	Resets             []WeeklyReset      `json:"resets"`
+ }
+ 
+@@ -100,12 +101,7 @@ func buildWeeklyQuotaValue(history repositorydto.CodexQuotaEfficiencyHistory) *W
+ 			usage := interval.Usage
+ 			// Mixed/unknown modes, missing prices, failures and long observation gaps
+ 			// cannot establish a usable model-specific quota conversion sample.
+-			valid := interval.PercentagePoints > 0 && interval.IntervalEndedAt.After(interval.IntervalStartedAt) &&
+-				interval.IntervalEndedAt.Sub(interval.IntervalStartedAt) <= weeklyMaxInterval &&
+-				len(usage.ModelModes) == 1 && usage.CostAvailable && usage.Requests > 0 && usage.FailedRequests == 0
+-			if valid {
+-				valid = usage.ModelModes[0].Model != "" && usage.ModelModes[0].Mode != "unknown"
+-			}
++			valid := weeklyIntervalEligible(interval)
+ 			if !valid {
+ 				result.ExcludedIntervals++
+ 				continue
+@@ -148,5 +144,6 @@ func buildWeeklyQuotaValue(history repositorydto.CodexQuotaEfficiencyHistory) *W
+ 		}
+ 		return a.Mode < b.Mode
+ 	})
++	result.Timeline = buildWeeklyTimeline(history)
+ 	return result
+ }
+diff --git a/internal/repository/codex_quota_efficiency.go b/internal/repository/codex_quota_efficiency.go
+index 117551d..21e201d 100644
+--- a/internal/repository/codex_quota_efficiency.go
++++ b/internal/repository/codex_quota_efficiency.go
+@@ -46,6 +46,9 @@ type codexQuotaEfficiencyUsageEventRow struct {
+ 	Endpoint            string
+ 	ExecutorType        string
+ 	Timestamp           time.Time
++	LatencyMS           int64
++	TTFTMS              *int64
++	Generate            bool
+ 	Failed              bool
+ 	InputTokens         int64
+ 	OutputTokens        int64
+@@ -229,7 +232,7 @@ func BuildCodexQuotaEfficiencyHistory(ctx context.Context, db *gorm.DB, query re
+ 	}
+ 
+ 	// 单次有序流只从 SQLite 逐行读取必需字段；Go 线性归类后仅保留少量 pricing 分组。
+-	if err := streamCodexQuotaEfficiencyUsage(ctx, db, query.Provider, query.AuthIndex, works, costResolver, false); err != nil {
++	if err := streamCodexQuotaEfficiencyUsage(ctx, db, query.Provider, query.AuthIndex, works, costResolver, false, query.WeeklyOnly); err != nil {
+ 		return result, err
+ 	}
+ 	// 流式聚合结束后再计算每百分点值，保证 CostAvailable 已吸收所有 pricing 分组。
+@@ -424,7 +427,7 @@ func buildCodexQuotaEfficiencyTransitions(segments []entities.QuotaPercentSegmen
+ 	return transitions
+ }
+ 
+-func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider string, authIndex string, works []codexQuotaEfficiencyCycleWork, costResolver pricing.Resolver, keepAllPricingFields bool) error {
++func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider string, authIndex string, works []codexQuotaEfficiencyCycleWork, costResolver pricing.Resolver, keepAllPricingFields bool, collectDaily bool) error {
+ 	if len(works) == 0 {
+ 		return nil
+ 	}
+@@ -464,7 +467,7 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 	rows, err := db.WithContext(ctx).Clauses(dbresolver.Read).Raw(`SELECT
+ 		`+codexQuotaEfficiencyPricingProjection(costResolver.ActiveFields(), keepAllPricingFields)+`,
+ 		timestamp, COALESCE(failed, 0), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0),
+-		cache_read_tokens, cache_creation_tokens, COALESCE(total_tokens, 0)
++		cache_read_tokens, cache_creation_tokens, COALESCE(total_tokens, 0), COALESCE(latency_ms, 0), ttft_ms, COALESCE(generate, 1)
+ 	FROM `+eventSource+`
+ 	WHERE auth_type = ? AND auth_index = ? AND provider = ? AND timestamp >= ? AND timestamp < ?
+ 	ORDER BY timestamp ASC, id ASC`,
+@@ -484,6 +487,7 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 		}
+ 	}
+ 
++	daily := make([]map[time.Time]*codexQuotaEfficiencyUsageAccumulator, len(works))
+ 	workIndex := 0
+ 	transitionIndex := 0
+ 	// 投影列固定，直接读取并复用行对象，避免为每条请求重复执行 GORM 结构体映射。
+@@ -493,7 +497,7 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 			&event.APIGroupKey, &event.Model, &event.ModelAlias,
+ 			&event.ServiceTier, &event.UpstreamServiceTier, &event.ResponseServiceTier, &event.ReasoningEffort, &event.Endpoint, &event.ExecutorType,
+ 			&event.Timestamp, &event.Failed, &event.InputTokens, &event.OutputTokens, &event.ReasoningTokens,
+-			&event.CacheReadTokens, &event.CacheCreationTokens, &event.TotalTokens,
++			&event.CacheReadTokens, &event.CacheCreationTokens, &event.TotalTokens, &event.LatencyMS, &event.TTFTMS, &event.Generate,
+ 		); err != nil {
+ 			return fmt.Errorf("scan codex quota efficiency usage: %w", err)
+ 		}
+@@ -511,6 +515,18 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 			continue
+ 		}
+ 		cycleAccumulators[workIndex].add(event)
++		if collectDaily {
++			day := event.Timestamp.UTC().Truncate(24 * time.Hour)
++			if daily[workIndex] == nil {
++				daily[workIndex] = make(map[time.Time]*codexQuotaEfficiencyUsageAccumulator)
++			}
++			if daily[workIndex][day] == nil {
++				usage := &repositorydto.CodexQuotaEfficiencyUsage{CostAvailable: true}
++				accumulator := newCodexQuotaEfficiencyUsageAccumulator(usage)
++				daily[workIndex][day] = &accumulator
++			}
++			daily[workIndex][day].add(event)
++		}
+ 		if !keepAllPricingFields && (!codexQuotaEfficiencyTokensAreAdditive(event.InputTokens, event.OutputTokens, event.CacheReadTokens, event.CacheCreationTokens, event.TotalTokens) ||
+ 			!codexQuotaEfficiencyTokensAreAdditive(work.record.Usage.InputTokens, work.record.Usage.OutputTokens, work.record.Usage.CacheReadTokens, work.record.Usage.CacheCreationTokens, work.record.Usage.TotalTokens)) {
+ 			// 负 Token、缓存超出输入或累计溢出时，原分组的归零处理不再满足可加性。
+@@ -519,12 +535,13 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 				return fmt.Errorf("close codex quota efficiency usage before full pricing scan: %w", err)
+ 			}
+ 			for _, work := range works {
++				work.record.DailyUsage = nil
+ 				work.record.Usage = repositorydto.CodexQuotaEfficiencyUsage{CostAvailable: true}
+ 				for index := range work.record.Transitions {
+ 					work.record.Transitions[index].Usage = repositorydto.CodexQuotaEfficiencyUsage{CostAvailable: true}
+ 				}
+ 			}
+-			return streamCodexQuotaEfficiencyUsage(ctx, db, provider, authIndex, works, costResolver, true)
++			return streamCodexQuotaEfficiencyUsage(ctx, db, provider, authIndex, works, costResolver, true, collectDaily)
+ 		}
+ 
+ 		transitions := work.record.Transitions
+@@ -547,6 +564,13 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 	// 事件流结束后再按 pricing 分组计价，避免对每条请求重复匹配价格规则。
+ 	for workIndex := range works {
+ 		cycleAccumulators[workIndex].finalize(authIndex, costResolver)
++		for day, accumulator := range daily[workIndex] {
++			accumulator.finalize(authIndex, costResolver)
++			works[workIndex].record.DailyUsage = append(works[workIndex].record.DailyUsage, repositorydto.QuotaDailyUsage{Day: day, Usage: *accumulator.target})
++		}
++		sort.Slice(works[workIndex].record.DailyUsage, func(i, j int) bool {
++			return works[workIndex].record.DailyUsage[i].Day.Before(works[workIndex].record.DailyUsage[j].Day)
++		})
+ 		for transitionIndex := range transitionAccumulators[workIndex] {
+ 			transitionAccumulators[workIndex][transitionIndex].finalize(authIndex, costResolver)
+ 		}
+@@ -592,6 +616,19 @@ func (a *codexQuotaEfficiencyUsageAccumulator) add(event codexQuotaEfficiencyUsa
+ 		a.modelModes[groupKey] = group
+ 	}
+ 	group.Requests++
++	// Match Request Events: full output tokens / end-to-end request duration.
++	// Failed requests, non-generation events and invalid timing cannot measure speed.
++	if !event.Failed && event.Generate {
++		if event.OutputTokens > 0 && event.LatencyMS > 0 {
++			group.SpeedRequests++
++			group.SpeedOutputTokens += event.OutputTokens
++			group.SpeedDurationMS += event.LatencyMS
++		}
++		if event.TTFTMS != nil && *event.TTFTMS >= 0 && event.LatencyMS > *event.TTFTMS {
++			group.TTFTRequests++
++			group.TotalTTFTMS += *event.TTFTMS
++		}
++	}
+ 	if event.Failed {
+ 		group.FailedRequests++
+ 	}
+diff --git a/internal/repository/dto/codex_quota_efficiency.go b/internal/repository/dto/codex_quota_efficiency.go
+index 1d0e735..b2c37a0 100644
+--- a/internal/repository/dto/codex_quota_efficiency.go
++++ b/internal/repository/dto/codex_quota_efficiency.go
+@@ -47,6 +47,7 @@ type CodexQuotaEfficiencyWindow struct {
+ 
+ // CodexQuotaEfficiencyCycle 保存一个周期边界、观察边界、总用量及其真实百分比变化区间。
+ type CodexQuotaEfficiencyCycle struct {
++	DailyUsage []QuotaDailyUsage
+ 	// ID 是历史父行 ID，只用于稳定标识周期，不是 UsageEvent 外键。
+ 	ID int64
+ 	// Status 只允许 current/completed，前端不得自行用浏览器时间重算。
+@@ -129,10 +130,21 @@ type CodexQuotaEfficiencyUsage struct {
+ 
+ // QuotaModelModeUsage contains reporting dimensions only, never client keys.
+ type QuotaModelModeUsage struct {
+-	Model          string  `json:"model"`
+-	Mode           string  `json:"mode"`
+-	Requests       int64   `json:"requests"`
+-	FailedRequests int64   `json:"failed_requests"`
+-	TotalCostUSD   float64 `json:"total_cost_usd"`
+-	CostAvailable  bool    `json:"cost_available"`
++	SpeedRequests     int64   `json:"speed_requests"`
++	SpeedOutputTokens int64   `json:"speed_output_tokens"`
++	SpeedDurationMS   int64   `json:"speed_duration_ms"`
++	TTFTRequests      int64   `json:"ttft_requests"`
++	TotalTTFTMS       int64   `json:"total_ttft_ms"`
++	Model             string  `json:"model"`
++	Mode              string  `json:"mode"`
++	Requests          int64   `json:"requests"`
++	FailedRequests    int64   `json:"failed_requests"`
++	TotalCostUSD      float64 `json:"total_cost_usd"`
++	CostAvailable     bool    `json:"cost_available"`
++}
++
++// UTC calendar-day usage; request timestamps retain the existing period attribution.
++type QuotaDailyUsage struct {
++	Day   time.Time
++	Usage CodexQuotaEfficiencyUsage
+ }
+diff --git a/internal/repository/test/weekly_quota_value_test.go b/internal/repository/test/weekly_quota_value_test.go
+index acd09d6..cc30e28 100644
+--- a/internal/repository/test/weekly_quota_value_test.go
++++ b/internal/repository/test/weekly_quota_value_test.go
+@@ -23,6 +23,10 @@ func TestWeeklyQuotaValueArchiveModeAndWindowIsolation(t *testing.T) {
+ 	fast.UpstreamServiceTier = "priority"
+ 	normal := usageEventForQuotaEfficiency("normal", "oauth", "weekly-account", now.Add(-15*time.Minute), 1_000_000)
+ 	normal.UpstreamServiceTier = "default"
++	normal.OutputTokens = 100
++	normal.LatencyMS = 2000
++	ttft := int64(1000)
++	normal.TTFTMS = &ttft
+ 	unknown := usageEventForQuotaEfficiency("unknown", "oauth", "weekly-account", now.Add(-5*time.Minute), 1_000_000)
+ 	alias := "model-fast"
+ 	unknown.ModelAlias = &alias
+@@ -37,6 +41,13 @@ func TestWeeklyQuotaValueArchiveModeAndWindowIsolation(t *testing.T) {
+ 	if len(before.Cycles) != 1 || before.SelectedWindow.WindowRole != "secondary" || before.Cycles[0].Usage.TotalCostUSD != 4 {
+ 		t.Fatalf("wrong weekly results: %+v", before)
+ 	}
++	if len(before.Cycles[0].DailyUsage) != 1 {
++		t.Fatalf("missing daily bucket: %+v", before.Cycles[0])
++	}
++	daily := before.Cycles[0].DailyUsage[0].Usage.ModelModes
++	if len(daily) != 3 || daily[1].SpeedRequests != 1 || daily[1].SpeedOutputTokens != 100 || daily[1].SpeedDurationMS != 2000 || daily[1].TTFTRequests != 1 || daily[1].TotalTTFTMS != 1000 {
++		t.Fatalf("wrong daily speed attribution: %+v", daily)
++	}
+ 	modes := before.Cycles[0].Usage.ModelModes
+ 	if len(modes) != 3 || modes[0].Mode != "fast" || modes[0].TotalCostUSD != 2 || modes[1].Mode != "normal" || modes[2].Mode != "unknown" {
+ 		t.Fatalf("mode guessed or price lost: %+v", modes)
+@@ -59,3 +70,51 @@ func TestWeeklyQuotaValueArchiveModeAndWindowIsolation(t *testing.T) {
+ 		t.Fatalf("history changed after archival: before=%+v after=%+v", before.Cycles, after.Cycles)
+ 	}
+ }
++
++func TestWeeklyDailySpeedUTCAndInvalidSampleExclusion(t *testing.T) {
++	db := openTestDatabase(t)
++	midnight := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC)
++	now := midnight.Add(time.Hour)
++	seedCodexQuotaEfficiencyRoleCycle(t, db, "speed-account", entities.CodexQuotaWindowRolePrimary, midnight.Add(-6*24*time.Hour), midnight.Add(24*time.Hour), []codexQuotaEfficiencySegmentSeed{{remaining: 90, first: midnight.Add(-time.Hour), last: now}})
++	valid := usageEventForQuotaEfficiency("valid", "oauth", "speed-account", midnight.Add(-time.Second), 1000)
++	valid.UpstreamServiceTier = "default"
++	valid.OutputTokens = 100
++	valid.LatencyMS = 2000
++	ttft := int64(500)
++	valid.TTFTMS = &ttft
++	boundary := valid
++	boundary.EventKey = "boundary"
++	boundary.Timestamp = midnight
++	boundary.UpstreamServiceTier = "priority"
++	boundary.TTFTMS = nil
++	failed := boundary
++	failed.EventKey = "failed"
++	failed.Failed = true
++	invalid := boundary
++	invalid.EventKey = "invalid"
++	invalid.LatencyMS = 0
++	nonGeneration := boundary
++	nonGeneration.EventKey = "non-generation"
++	generate := false
++	nonGeneration.Generate = &generate
++	invalidTTFT := boundary
++	invalidTTFT.EventKey = "invalid-ttft"
++	negative := int64(-1)
++	invalidTTFT.TTFTMS = &negative
++	seedCodexQuotaEfficiencyUsage(t, db, valid, boundary, failed, invalid, nonGeneration, invalidTTFT)
++	result, err := repository.BuildCodexQuotaEfficiencyHistory(context.Background(), db, dto.CodexQuotaEfficiencyQuery{AuthIndex: "speed-account", Now: now, RangeStart: midnight.Add(-7 * 24 * time.Hour), WeeklyOnly: true}, codexQuotaEfficiencyPricingResolver(t))
++	if err != nil {
++		t.Fatal(err)
++	}
++	days := result.Cycles[0].DailyUsage
++	if len(days) != 2 || !days[0].Day.Equal(midnight.Add(-24*time.Hour)) || !days[1].Day.Equal(midnight) {
++		t.Fatalf("wrong UTC buckets: %+v", days)
++	}
++	normal, fast := days[0].Usage.ModelModes[0], days[1].Usage.ModelModes[0]
++	if normal.Mode != "normal" || normal.SpeedRequests != 1 || normal.TTFTRequests != 1 || normal.TotalTTFTMS != 500 {
++		t.Fatalf("normal timing lost: %+v", normal)
++	}
++	if fast.Mode != "fast" || fast.Requests != 5 || fast.SpeedRequests != 2 || fast.SpeedDurationMS != 4000 || fast.SpeedOutputTokens != 200 || fast.TTFTRequests != 0 {
++		t.Fatalf("invalid timings counted: %+v", fast)
++	}
++}
+diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
+index 3b9d968..98f01f3 100644
+--- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
++++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
+@@ -18,3 +18,10 @@
+   small { display: block; margin-top: 5px; font-size: 11px; opacity: .75; }
+   tr:last-child td { border-bottom: 0; }
+ }
++
++.trends { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
++.filters { display: flex; flex-wrap: wrap; gap: 12px; }
++.filters label, .metric { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
++.trends select { max-width: 100%; padding: 6px 8px; border: 1px solid var(--border-color, #80808040); border-radius: 6px; background: var(--bg-secondary); color: inherit; }
++.chart { height: 300px; min-width: 0; width: 100%; position: relative; }
++@media (max-width: 600px) { .chart { height: 320px; } }
+diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
+index 081d219..5c25943 100644
+--- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
++++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
+@@ -4,6 +4,7 @@ import { ApiError, fetchCodexQuotaHistory } from '@/lib/api'
+ import type { CodexQuotaHistoryResponse } from '@/lib/types'
+ import { Button } from '@/components/ui/Button'
+ import { CodexQuotaHistoryPanel } from './CodexQuotaHistoryPanel'
++import { WeeklyTrendCharts } from './WeeklyTrendCharts'
+ import { weeklyCycleRows } from './weeklyCycleRows'
+ import styles from './WeeklyQuotaValuePanel.module.scss'
+ 
+@@ -80,6 +81,7 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+         })}</tbody>
+       </table></div>
+       {cycleRows.length > 5 && <Button size="sm" onClick={() => setExpandedCyclesFor(showAllCycles ? undefined : cycleViewKey)}>{showAllCycles ? t('weekly_quota.show_recent', 'Show recent cycles') : t('weekly_quota.show_older', 'Show older cycles ({{count}})', { count: cycleRows.length - 5 })}</Button>}
++      {report?.timeline && <WeeklyTrendCharts key={cycleViewKey} points={report.timeline} />}
+       <h4>{t('weekly_quota.models', 'Value by model and requested mode')}</h4>
+       <p className={styles.note}>{t('weekly_quota.sample_note', 'Estimates need at least {{points}} percentage points, {{intervals}} qualifying intervals and {{requests}} requests. Only intervals of at most {{minutes}} minutes with one model/mode, complete pricing and no failed requests qualify. These are eligibility floors, not a confidence guarantee.', { points: report?.min_points, intervals: report?.min_intervals, requests: report?.min_requests, minutes: (report?.max_interval_seconds ?? 0) / 60 })}</p>
+       {report && <p className={styles.note}>{t('weekly_quota.sample_coverage', '{{eligible}} of {{observed}} observed percentage points qualify; {{excluded}} intervals excluded.', { eligible: report.eligible_points, observed: report.observed_points, excluded: report.excluded_intervals })}</p>}
+diff --git a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+new file mode 100644
+index 0000000..206a8c4
+--- /dev/null
++++ b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+@@ -0,0 +1,97 @@
++import { useState } from 'react'
++import { useTranslation } from 'react-i18next'
++import { Chart } from 'react-chartjs-2'
++import type { ChartData, ChartOptions } from 'chart.js'
++import '@/lib/chartjs'
++import type { WeeklyTrendPoint } from '@/lib/types'
++import { useThemeStore } from '@/stores'
++import { buildUsageChartTooltipStyle, getUsageChartTheme, USAGE_CHART_COMPOSITION_COLORS } from '@/utils/usage/chartConfig'
++import styles from './WeeklyQuotaValuePanel.module.scss'
++
++export type TrendMetric = 'delivered' | 'allowance' | 'speed' | 'ttft'
++const MIN_SPEED_REQUESTS = 3
++const groupKey = (point: Pick<WeeklyTrendPoint, 'model' | 'mode'>) => JSON.stringify([point.model, point.mode])
++
++export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: TrendMetric, model: string, mode: string, label: (mode: string) => string, locale: string): ChartData<'line', Array<number | null>, string> {
++  const days = [...new Set(points.map(point => point.day))].sort()
++  const models = [...new Set(points.map(point => point.model))].sort()
++  const selected = points.filter(point => (!model || point.model === model) && (!mode || point.mode === mode))
++  const groups = [...new Map(selected.map(point => [groupKey(point), point])).values()]
++  const lookup = new Map(selected.map(point => [JSON.stringify([point.day, point.model, point.mode]), point]))
++  return { labels: days.map(day => new Date(day).toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' })), datasets: groups.map(group => ({
++    label: `${group.model || '—'} · ${label(group.mode)}`,
++    borderColor: USAGE_CHART_COMPOSITION_COLORS[models.indexOf(group.model) % USAGE_CHART_COMPOSITION_COLORS.length].base,
++    backgroundColor: USAGE_CHART_COMPOSITION_COLORS[models.indexOf(group.model) % USAGE_CHART_COMPOSITION_COLORS.length].base,
++    borderDash: group.mode === 'fast' ? [7, 3] : group.mode === 'unknown' ? [2, 4] : [],
++    borderWidth: 2, pointRadius: 3, pointHoverRadius: 5, spanGaps: false, tension: 0,
++    data: days.map(day => {
++      const point = lookup.get(JSON.stringify([day, group.model, group.mode]))
++      if (!point) return null
++      if (metric === 'delivered') return point.cost_available ? point.total_cost_usd : null
++      if (metric === 'allowance') return point.full_allowance_usd
++      if (metric === 'speed') return point.speed_requests >= MIN_SPEED_REQUESTS ? point.speed_tps : null
++      return point.ttft_requests >= MIN_SPEED_REQUESTS && point.mean_ttft_ms != null ? point.mean_ttft_ms / 1000 : null
++    }),
++  })) }
++}
++
++export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
++  const { t, i18n } = useTranslation()
++  const isDark = useThemeStore(state => state.resolvedTheme) === 'dark'
++  const [model, setModel] = useState('')
++  const [mode, setMode] = useState('')
++  const [valueMetric, setValueMetric] = useState<TrendMetric>('delivered')
++  const [speedMetric, setSpeedMetric] = useState<TrendMetric>('speed')
++  const modeLabel = (value: string) => value === 'fast' ? t('weekly_quota.fast', 'Fast requested') : value === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
++  const models = [...new Set(points.map(point => point.model))].sort()
++  const chartTheme = getUsageChartTheme(isDark)
++  const selected = points.filter(point => (!model || model === point.model) && (!mode || mode === point.mode))
++  const renderChart = (metric: TrendMetric, title: string, unit: string) => {
++    const data = buildWeeklyTrendChartData(points, metric, model, mode, modeLabel, i18n.language)
++    const hasData = data.datasets.some(dataset => dataset.data.some(value => value != null))
++    const options: ChartOptions<'line'> = {
++      responsive: true, maintainAspectRatio: false, animation: false,
++      interaction: { mode: 'index', intersect: false },
++      plugins: {
++        legend: { position: 'bottom', labels: { color: chartTheme.textSecondary, boxWidth: 20, boxHeight: 2 } },
++        tooltip: { ...buildUsageChartTooltipStyle(chartTheme), callbacks: {
++          label: context => `${context.dataset.label}: ${new Intl.NumberFormat(i18n.language, { maximumFractionDigits: 2 }).format(context.parsed.y ?? 0)} ${unit}`,
++          afterLabel: context => {
++            const group = [...new Map(selected.map(point => [groupKey(point), point])).values()][context.datasetIndex]
++            const days = [...new Set(points.map(point => point.day))].sort()
++            const point = selected.find(point => point.day === days[context.dataIndex] && groupKey(point) === groupKey(group))
++            if (!point) return ''
++            return metric === 'allowance'
++              ? t('weekly_trends.quota_samples', '{{points}} points · {{intervals}} intervals · {{requests}} requests in trailing 7 days', { points: point.percentage_points, intervals: point.sample_intervals, requests: point.sample_requests })
++              : t('weekly_trends.requests', '{{count}} requests', { count: metric === 'speed' ? point.speed_requests : metric === 'ttft' ? point.ttft_requests : point.requests })
++          },
++        } },
++      },
++      scales: {
++        x: { ticks: { color: chartTheme.textSecondary, maxTicksLimit: 8 }, grid: { display: false } },
++        y: { beginAtZero: true, title: { display: true, text: unit, color: chartTheme.textSecondary }, ticks: { color: chartTheme.textSecondary }, grid: { color: chartTheme.grid } },
++      },
++    }
++    return hasData ? <div className={styles.chart} data-weekly-trend={metric}><Chart type="line" data={data} options={options} role="img" aria-label={title} /></div>
++      : <p role="status" className={styles.note}>{metric === 'allowance' ? t('weekly_trends.no_estimates', 'Not enough qualifying quota samples for this selection yet.') : metric === 'delivered' ? t('weekly_trends.no_value', 'No fully priced recorded values for this selection yet.') : t('weekly_trends.no_speed', 'Not enough valid timing samples for this selection yet.')}</p>
++  }
++  return <section className={styles.trends} aria-label={t('weekly_trends.title', 'Value and speed over time')}>
++    <h4>{t('weekly_trends.title', 'Value and speed over time')}</h4>
++    <div className={styles.filters}>
++      <label>{t('weekly_trends.model', 'Model')} <select aria-label={t('weekly_trends.model', 'Model')} value={model} onChange={event => setModel(event.target.value)}><option value="">{t('weekly_trends.all_models', 'All models')}</option>{models.map(value => <option key={value} value={value}>{value || '—'}</option>)}</select></label>
++      <label>{t('weekly_trends.mode', 'Mode')} <select aria-label={t('weekly_trends.mode', 'Mode')} value={mode} onChange={event => setMode(event.target.value)}><option value="">{t('weekly_trends.all_modes', 'All modes')}</option>{['normal', 'fast', 'unknown'].map(value => <option key={value} value={value}>{modeLabel(value)}</option>)}</select></label>
++    </div>
++    <p className={styles.note}>{t('weekly_trends.days', 'Daily UTC buckets across the reporting period; today is partial. Each line is one model and requested mode. Solid: Normal · Dashed: Fast requested · Dotted: Mode not captured.')}</p>
++    <label className={styles.metric}>{t('weekly_trends.value', 'Subscription value over time')} <select aria-label={t('weekly_trends.value_metric', 'Value metric')} value={valueMetric} onChange={event => setValueMetric(event.target.value as TrendMetric)}>
++      <option value="delivered">{t('weekly_trends.delivered', 'Daily API value delivered')}</option><option value="allowance">{t('weekly_trends.allowance', 'Estimated full weekly allowance')}</option>
++    </select></label>
++    {renderChart(valueMetric, t('weekly_trends.value', 'Subscription value over time'), 'USD')}
++    {valueMetric === 'allowance' && <p className={styles.note}>{t('weekly_trends.estimate_note', 'Each estimate uses qualifying samples from the trailing seven UTC days, with the same 5-point, 3-interval and 20-request minimums as the table. Missing estimates are gaps; changes can reflect workload and caching.')}</p>}
++    {valueMetric === 'delivered' && selected.some(point => !point.cost_available) && <p className={styles.note}>{t('weekly_trends.missing_prices', 'Days with incomplete pricing are gaps, rather than zero-dollar values.')}</p>}
++    <label className={styles.metric}>{t('weekly_trends.speed', 'Response speed over time')} <select aria-label={t('weekly_trends.speed_metric', 'Speed metric')} value={speedMetric} onChange={event => setSpeedMetric(event.target.value as TrendMetric)}>
++      <option value="speed">{t('weekly_trends.tps', 'Output tokens / second')}</option><option value="ttft">{t('weekly_trends.ttft', 'Time to first token')}</option>
++    </select></label>
++    {renderChart(speedMetric, t('weekly_trends.speed', 'Response speed over time'), speedMetric === 'ttft' ? 's' : 'tokens/s')}
++    <p className={styles.note}>{t('weekly_trends.speed_note', 'Speed is total output tokens divided by total request time for successful generation requests with valid timing. This includes waiting and reasoning time. Time to first token is the mean of captured timings. At least 3 timed requests per day and group are required; missing timings are gaps.')}</p>
++  </section>
++}
+diff --git a/web/src/components/usage/test/WeeklyTrendCharts.test.tsx b/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
+new file mode 100644
+index 0000000..2fe84ea
+--- /dev/null
++++ b/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
+@@ -0,0 +1,49 @@
++// @vitest-environment happy-dom
++import { act } from 'react'
++import { createRoot, type Root } from 'react-dom/client'
++import { afterEach, beforeEach, expect, it, vi } from 'vitest'
++import type { ChartData } from 'chart.js'
++import i18n from '@/i18n'
++import type { WeeklyTrendPoint } from '@/lib/types'
++import { WeeklyTrendCharts, buildWeeklyTrendChartData } from '../credentials/WeeklyTrendCharts'
++
++const charts = vi.hoisted(() => new Map<string, ChartData<'line', Array<number | null>, string>>())
++vi.mock('react-chartjs-2', () => ({ Chart: (props: { data: ChartData<'line', Array<number | null>, string>; 'aria-label': string }) => { charts.set(props['aria-label'],props.data); return <div role="img" aria-label={props['aria-label']} /> } }))
++const point = (day: string, mode = 'normal', model = 'a'): WeeklyTrendPoint => ({day,mode,model,requests:10,total_cost_usd:4,cost_available:true,speed_requests:4,speed_tps:30,ttft_requests:4,mean_ttft_ms:2000,sample_intervals:0,sample_requests:0,percentage_points:0,full_allowance_usd:null})
++const dates = ['2026-10-05T00:00:00Z','2026-10-06T00:00:00Z','2026-10-07T00:00:00Z']
++let element: HTMLDivElement; let root: Root
++beforeEach(async()=>{globalThis.IS_REACT_ACT_ENVIRONMENT=true;await i18n.changeLanguage('en');charts.clear();element=document.createElement('div');document.body.append(element);root=createRoot(element)})
++afterEach(async()=>{await act(async()=>root.unmount());element.remove()})
++
++it('separates model/mode lines, preserves missing prices and timing gaps, and converts TTFT units',()=>{
++ const points=[point(dates[0]),{...point(dates[1]),cost_available:false,speed_requests:2},{...point(dates[2]),speed_tps:null},point(dates[0],'fast'),point(dates[0],'normal','b'),point(dates[0],'unknown')]
++ const data=buildWeeklyTrendChartData(points,'delivered','a','',mode=>mode,'en')
++ expect(data.datasets).toHaveLength(3)
++ expect(data.datasets[0].data).toEqual([4,null,4])
++ expect(data.datasets[1].borderDash).toEqual([7,3]);expect(data.datasets[2].borderDash).toEqual([2,4])
++ expect(buildWeeklyTrendChartData(points,'speed','a','normal',mode=>mode,'en').datasets[0].data).toEqual([30,null,null])
++ expect(buildWeeklyTrendChartData(points,'ttft','a','normal',mode=>mode,'en').datasets[0].data).toEqual([2,2,2])
++ expect(buildWeeklyTrendChartData(points,'allowance','a','normal',mode=>mode,'en').datasets[0].data).toEqual([null,null,null])
++})
++
++it('filters both charts together and switches value and speed metrics without fetching',async()=>{
++ const points=[{...point(dates[0]),full_allowance_usd:200},point(dates[0],'fast'),point(dates[0],'normal','b')]
++ await act(async()=>root.render(<WeeklyTrendCharts points={points}/>))
++ expect(charts.get('Subscription value over time')!.datasets).toHaveLength(3)
++ const change=async(label:string,value:string)=>{const select=element.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!;await act(async()=>{select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}))})}
++ await change('Model','a');await change('Mode','normal')
++ expect(charts.get('Subscription value over time')!.datasets).toHaveLength(1)
++ expect(charts.get('Response speed over time')!.datasets).toHaveLength(1)
++ await change('Value metric','allowance');expect(charts.get('Subscription value over time')!.datasets[0].data).toEqual([200])
++ await change('Speed metric','ttft');expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([2])
++ expect(element.textContent).toContain('trailing seven UTC days')
++})
++
++it('shows insufficient-data states without inventing zero speeds or estimates',async()=>{
++ await act(async()=>root.render(<WeeklyTrendCharts points={[{...point(dates[0]),speed_requests:1,ttft_requests:0}]}/>))
++ expect(element.querySelector('[data-weekly-trend="speed"]')).toBeNull()
++ const select=element.querySelector<HTMLSelectElement>('select[aria-label="Value metric"]')!
++ await act(async()=>{select.value='allowance';select.dispatchEvent(new Event('change',{bubbles:true}))})
++ expect(element.textContent).toContain('Not enough qualifying quota samples')
++ expect(element.textContent).toContain('Not enough valid timing samples')
++})
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 7175306..36cc6df 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -961,6 +961,7 @@ export interface UsageFilterWindow {
+ }
+ 
+ export interface WeeklyQuotaValue {
++ timeline?: WeeklyTrendPoint[];
+  min_points: number; min_intervals: number; min_requests: number; max_interval_seconds: number;
+  excluded_intervals: number; eligible_points: number; observed_points: number;
+  modes: WeeklyModelValue[];
+@@ -972,3 +973,9 @@ export interface WeeklyModelValue {
+  ready: boolean; cost_per_point: number | null; full_allowance_usd: number | null;
+  min_cost_per_point: number | null; max_cost_per_point: number | null;
+ }
++
++export interface WeeklyTrendPoint {
++ day: string; model: string; mode: string; requests: number; total_cost_usd: number; cost_available: boolean;
++ speed_requests: number; speed_tps: number | null; ttft_requests: number; mean_ttft_ms: number | null;
++ sample_intervals: number; sample_requests: number; percentage_points: number; full_allowance_usd: number | null;
++}

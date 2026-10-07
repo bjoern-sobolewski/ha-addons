@@ -120,3 +120,22 @@ Consecutive reset-time updates while an unused weekly allowance stays at 100%
 are combined in the weekly summary, including their recorded request counts
 and API value. Five recent cycles are shown initially; Show older cycles expands
 the remaining history. Detailed observation charts retain the original records.
+
+
+The **Value and speed over time** section offers shared model and mode filters.
+Daily API value plots recorded dollars in UTC calendar-day buckets; the current
+day is partial. The allowance view uses qualifying quota samples from the
+trailing seven UTC days at each date, with the same eligibility minimums as the
+table. Estimates never use future samples and disappear when supporting samples
+age out. Incomplete daily pricing appears as a gap. Current configured prices
+also apply to historical graph values, including archived requests.
+
+Response speed is total output tokens divided by total end-to-end request time
+for successful generation requests with positive output and valid durations,
+matching Request Events. Waiting and reasoning time are included; this is not
+streaming-only decode throughput. Time to first token is the mean of valid
+captured timings. Each daily model/mode point requires at least three timing
+samples; hover for sample counts. Missing timing remains unavailable. Historical
+uncaptured modes stay separate. Solid lines indicate Normal, dashed lines Fast
+requested, and dotted lines unknown modes. Graphs do not establish confirmed
+provider execution tiers or change billing or pricing rules.

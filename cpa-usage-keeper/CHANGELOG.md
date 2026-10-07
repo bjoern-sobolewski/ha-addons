@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.23
+
+- Combine consecutive reset-time updates at 100% quota into one weekly allowance row, preserving recorded costs and request counts.
+- Show five recent weekly cycles with an option to expand older history.
+- Show the actual window-change boundary for cycles that ended early.
+
 ## 0.1.22
 
 - Add weekly account reset history and API-equivalent delivered value to admin and read-only account details.

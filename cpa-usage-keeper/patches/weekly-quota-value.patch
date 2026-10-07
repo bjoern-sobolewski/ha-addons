@@ -819,16 +819,17 @@ index 0000000..3b9d968
 +}
 diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
 new file mode 100644
-index 0000000..5a164fa
+index 0000000..081d219
 --- /dev/null
 +++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,103 @@
 +import { useEffect, useState } from 'react'
 +import { useTranslation } from 'react-i18next'
 +import { ApiError, fetchCodexQuotaHistory } from '@/lib/api'
 +import type { CodexQuotaHistoryResponse } from '@/lib/types'
 +import { Button } from '@/components/ui/Button'
 +import { CodexQuotaHistoryPanel } from './CodexQuotaHistoryPanel'
++import { weeklyCycleRows } from './weeklyCycleRows'
 +import styles from './WeeklyQuotaValuePanel.module.scss'
 +
 +export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequired }: {
@@ -837,6 +838,7 @@ index 0000000..5a164fa
 +  const { t, i18n } = useTranslation()
 +  const [role, setRole] = useState<'primary' | 'secondary' | undefined>()
 +  const [showDetails, setShowDetails] = useState(false)
++  const [expandedCyclesFor, setExpandedCyclesFor] = useState<string>()
 +  const [revision, setRevision] = useState(0)
 +  const requestKey = JSON.stringify([authIndex, readOnlyAccountId, role, revision])
 +  const [result, setResult] = useState<{ key: string; history: CodexQuotaHistoryResponse | null; error: boolean }>()
@@ -857,6 +859,10 @@ index 0000000..5a164fa
 +  const money = (value: number | null | undefined) => value == null ? '—' : new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value)
 +  const date = (value: string | null | undefined) => value ? new Date(value).toLocaleString(i18n.language) : '—'
 +  const report = history?.weekly_value
++  const cycleRows = history ? weeklyCycleRows(history) : []
++  const cycleViewKey = JSON.stringify([authIndex, readOnlyAccountId, role])
++  const showAllCycles = expandedCyclesFor === cycleViewKey
++  const visibleCycles = showAllCycles ? cycleRows : cycleRows.slice(0, 5)
 +  const modeName = (mode: string) => mode === 'fast' ? t('weekly_quota.fast', 'Fast requested') : mode === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
 +  return <div className={styles.panel} data-weekly-quota-value="true">
 +    <div className={styles.toolbar}>
@@ -883,21 +889,22 @@ index 0000000..5a164fa
 +          <th>{t('weekly_quota.delivered', 'API value delivered')}</th>
 +          <th>{t('weekly_quota.coverage', 'Observation coverage')}</th>
 +        </tr></thead>
-+        <tbody>{history.cycles.map(cycle => {
-+          const reset = report?.resets.find(item => item.cycle_id === cycle.id)
++        <tbody>{visibleCycles.map(({ cycle, reset, combinedUpdates }) => {
 +          const current = cycle.status === 'current'
 +          const shortened = cycle.effective_ended_at !== cycle.reset_at
 +          return <tr key={cycle.id}>
-+            <td><strong>{date(cycle.reset_at)}</strong><small>{current ? t('weekly_quota.scheduled', 'Scheduled') : reset?.rollover_observed_at ? t('weekly_quota.observed', 'Rollover observed') : shortened ? t('weekly_quota.changed', 'Window changed') : t('weekly_quota.unconfirmed', 'Awaiting rollover observation')}</small>
++            <td><strong>{date(shortened && !current ? cycle.effective_ended_at : cycle.reset_at)}</strong><small>{current ? t('weekly_quota.scheduled', 'Scheduled') : reset?.rollover_observed_at ? t('weekly_quota.observed', 'Rollover observed') : shortened ? t('weekly_quota.changed', 'Window changed') : t('weekly_quota.unconfirmed', 'Awaiting rollover observation')}</small>
 +              {reset?.rollover_observed_at && <small>{date(reset.rollover_observed_at)}</small>}</td>
 +            <td><strong>{cycle.last_remaining_percent == null ? '—' : `${cycle.last_remaining_percent}%`}</strong><small>{date(cycle.last_observed_at)}</small>
 +              {reset && <small>{t('weekly_quota.age', '{{minutes}} min before {{boundary}}', { minutes: Math.round(reset.last_observation_age_seconds / 60), boundary: current ? t('weekly_quota.report_time', 'report time') : t('weekly_quota.cycle_end', 'cycle end') })}</small>}</td>
 +            <td><strong>{cycle.usage.cost_available ? money(cycle.usage.total_cost_usd) : t('weekly_quota.unpriced', 'Pricing incomplete')}</strong><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small></td>
 +            <td><small>{t('weekly_quota.first', 'First observed')}: {date(cycle.first_observed_at)}</small>
++              {combinedUpdates > 0 && <small>{t('weekly_quota.combined', '{{count}} reset-time updates combined while quota stayed at 100%', { count: combinedUpdates })}</small>}
 +              {reset?.partial_observation && <small>{t('weekly_quota.partial', 'Observation began after the cycle started')}</small>}</td>
 +          </tr>
 +        })}</tbody>
 +      </table></div>
++      {cycleRows.length > 5 && <Button size="sm" onClick={() => setExpandedCyclesFor(showAllCycles ? undefined : cycleViewKey)}>{showAllCycles ? t('weekly_quota.show_recent', 'Show recent cycles') : t('weekly_quota.show_older', 'Show older cycles ({{count}})', { count: cycleRows.length - 5 })}</Button>}
 +      <h4>{t('weekly_quota.models', 'Value by model and requested mode')}</h4>
 +      <p className={styles.note}>{t('weekly_quota.sample_note', 'Estimates need at least {{points}} percentage points, {{intervals}} qualifying intervals and {{requests}} requests. Only intervals of at most {{minutes}} minutes with one model/mode, complete pricing and no failed requests qualify. These are eligibility floors, not a confidence guarantee.', { points: report?.min_points, intervals: report?.min_intervals, requests: report?.min_requests, minutes: (report?.max_interval_seconds ?? 0) / 60 })}</p>
 +      {report && <p className={styles.note}>{t('weekly_quota.sample_coverage', '{{eligible}} of {{observed}} observed percentage points qualify; {{excluded}} intervals excluded.', { eligible: report.eligible_points, observed: report.observed_points, excluded: report.excluded_intervals })}</p>}
@@ -945,12 +952,76 @@ index 7cb9247..7ec63ed 100644
      expect(document.body.textContent).not.toContain('usage_stats.credentials_quota_history_window_selector')
  
      await renderDrawer({ selection: claudeAuthFileSelection })
+diff --git a/web/src/components/usage/credentials/weeklyCycleRows.ts b/web/src/components/usage/credentials/weeklyCycleRows.ts
+new file mode 100644
+index 0000000..d5f208e
+--- /dev/null
++++ b/web/src/components/usage/credentials/weeklyCycleRows.ts
+@@ -0,0 +1,58 @@
++import type { CodexQuotaHistoryCycle, CodexQuotaHistoryResponse, CodexQuotaHistoryUsage } from '@/lib/types'
++
++export interface WeeklyCycleRow {
++  cycle: CodexQuotaHistoryCycle
++  reset?: NonNullable<CodexQuotaHistoryResponse['weekly_value']>['resets'][number]
++  combinedUpdates: number
++}
++
++function addUsage(a: CodexQuotaHistoryUsage, b: CodexQuotaHistoryUsage): CodexQuotaHistoryUsage {
++  return {
++    requests: a.requests + b.requests,
++    successful_requests: a.successful_requests + b.successful_requests,
++    failed_requests: a.failed_requests + b.failed_requests,
++    input_tokens: a.input_tokens + b.input_tokens,
++    output_tokens: a.output_tokens + b.output_tokens,
++    reasoning_tokens: a.reasoning_tokens + b.reasoning_tokens,
++    cache_read_tokens: a.cache_read_tokens + b.cache_read_tokens,
++    cache_creation_tokens: a.cache_creation_tokens + b.cache_creation_tokens,
++    total_tokens: a.total_tokens + b.total_tokens,
++    total_cost_usd: a.total_cost_usd + b.total_cost_usd,
++    cost_available: a.cost_available && b.cost_available,
++  }
++}
++
++// An unused allowance can keep reporting "now + seven days" until use fixes
++// its reset time. Those contiguous 100% records describe one allowance.
++// Group only the presentation; retain the source records and sample intervals.
++export function weeklyCycleRows(history: CodexQuotaHistoryResponse): WeeklyCycleRow[] {
++  const ordered = [...history.cycles].sort((a, b) => Date.parse(a.effective_started_at) - Date.parse(b.effective_started_at) || a.id - b.id)
++  const rows: WeeklyCycleRow[] = []
++  for (const source of ordered) {
++    const cycle = { ...source, usage: { ...source.usage } }
++    const reset = history.weekly_value?.resets.find(item => item.cycle_id === cycle.id)
++    const previous = rows.at(-1)
++    const before = previous?.cycle
++    const combine = before && before.status !== 'current' &&
++      before.window_seconds === cycle.window_seconds && before.window_seconds === 604800 &&
++      Date.parse(before.effective_ended_at) === Date.parse(cycle.effective_started_at) &&
++      Date.parse(before.effective_ended_at) < Date.parse(before.reset_at) &&
++      before.first_remaining_percent === 100 && before.last_remaining_percent === 100 &&
++      !before.transitions.length && cycle.first_remaining_percent === 100 &&
++      Date.parse(cycle.reset_at) >= Date.parse(before.reset_at)
++    if (combine && previous) {
++      cycle.effective_started_at = before.effective_started_at
++      cycle.first_observed_at = before.first_observed_at
++      cycle.observation_count += before.observation_count
++      cycle.usage = addUsage(before.usage, cycle.usage)
++      rows[rows.length - 1] = {
++        cycle,
++        reset: reset ? { ...reset, partial_observation: previous.reset?.partial_observation ?? reset.partial_observation } : undefined,
++        combinedUpdates: previous.combinedUpdates + 1,
++      }
++    } else {
++      rows.push({ cycle, reset, combinedUpdates: 0 })
++    }
++  }
++  return rows.reverse()
++}
 diff --git a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
 new file mode 100644
-index 0000000..1d2e73e
+index 0000000..120ff7e
 --- /dev/null
 +++ b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,137 @@
 +// @vitest-environment happy-dom
 +import React, { act } from 'react'
 +import { createRoot, type Root } from 'react-dom/client'
@@ -960,6 +1031,7 @@ index 0000000..1d2e73e
 +const api = vi.hoisted(() => ({ fetchCodexQuotaHistory: vi.fn() }))
 +vi.mock('@/lib/api', async original => ({ ...await original<typeof import('@/lib/api')>(), ...api }))
 +import { WeeklyQuotaValuePanel } from '../credentials/WeeklyQuotaValuePanel'
++import { weeklyCycleRows } from '../credentials/weeklyCycleRows'
 +
 +let element: HTMLDivElement
 +let root: Root
@@ -1016,6 +1088,76 @@ index 0000000..1d2e73e
 +  await act(async () => root.unmount())
 +  expect(signal.aborted).toBe(true)
 +  root = createRoot(element)
++})
++
++function movingResetFixture(): CodexQuotaHistoryResponse {
++  const response = fixture()
++  const previous = response.cycles[0]
++  const start = Date.parse(date)
++  const stamp = (minutes: number) => new Date(start + minutes * 60000).toISOString()
++  response.cycles = Array.from({ length: 28 }, (_, index) => ({
++    ...previous, id: index + 2, status: index === 27 ? 'current' : 'completed',
++    window_started_at: stamp(index * 10), reset_at: stamp(index * 10 + 10080),
++    effective_started_at: stamp(index * 10), effective_ended_at: stamp((index + 1) * 10),
++    first_observed_at: stamp(index * 10), last_observed_at: stamp(index * 10 + 5),
++    first_remaining_percent: 100, last_remaining_percent: index === 27 ? 90 : 100,
++    usage: { ...previous.usage, requests: 1, total_cost_usd: 0.25 },
++  }))
++  response.cycles.unshift(previous)
++  response.weekly_value!.resets = response.cycles.map(cycle => ({ cycle_id: cycle.id, rollover_observed_at: null, last_observation_age_seconds: 300, partial_observation: false }))
++  return response
++}
++
++it('combines repeated unused reset-time updates while preserving usage, observations and source records', async () => {
++  const response = movingResetFixture()
++  const before = JSON.stringify(response)
++  const rows = weeklyCycleRows(response)
++  expect(rows).toHaveLength(2)
++  expect(rows[0].combinedUpdates).toBe(27)
++  expect(rows[0].cycle.usage.requests).toBe(28)
++  expect(rows[0].cycle.usage.total_cost_usd).toBe(7)
++  expect(rows[0].cycle.last_remaining_percent).toBe(90)
++  expect(Date.parse(rows[0].cycle.first_observed_at)).toBe(Date.parse(date))
++  expect(rows[1].cycle.last_remaining_percent).toBe(17)
++  expect(JSON.stringify(response)).toBe(before)
++  api.fetchCodexQuotaHistory.mockResolvedValue(response)
++  await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" readOnlyAccountId="3" />))
++  expect(element.querySelector('table tbody')!.children).toHaveLength(2)
++  expect(element.textContent).toContain('27 reset-time updates combined')
++  expect(element.textContent).toContain('$7.00')
++})
++
++it('retains real rollovers, consumption changes, gaps and missing percentages as separate rows', () => {
++  for (const change of ['rollover', 'consumption', 'gap', 'unknown', 'backward-reset'] as const) {
++    const response = movingResetFixture()
++    response.cycles = response.cycles.slice(1, 3)
++    const [a, b] = response.cycles
++    if (change === 'rollover') a.reset_at = a.effective_ended_at
++    if (change === 'consumption') a.last_remaining_percent = 99
++    if (change === 'gap') b.effective_started_at = b.last_observed_at
++    if (change === 'unknown') b.first_remaining_percent = null
++    if (change === 'backward-reset') b.reset_at = a.effective_ended_at
++    expect(weeklyCycleRows(response), change).toHaveLength(2)
++  }
++})
++
++it('keeps incomplete pricing visible after combining updates', () => {
++  const response = movingResetFixture()
++  response.cycles[2].usage.cost_available = false
++  expect(weeklyCycleRows(response)[0].cycle.usage.cost_available).toBe(false)
++})
++
++it('shows five recent cycles and lets the user expand and collapse older history', async () => {
++  const response = fixture()
++  response.cycles = Array.from({ length: 9 }, (_, index) => ({ ...response.cycles[0], id: index + 1 }))
++  api.fetchCodexQuotaHistory.mockResolvedValue(response)
++  await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" readOnlyAccountId="3" />))
++  expect(element.querySelector('table tbody')!.children).toHaveLength(5)
++  const older = Array.from(element.querySelectorAll('button')).find(button => button.textContent === 'Show older cycles (4)')!
++  await act(async () => older.click())
++  expect(element.querySelector('table tbody')!.children).toHaveLength(9)
++  await act(async () => older.click())
++  expect(element.querySelector('table tbody')!.children).toHaveLength(5)
 +})
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
 index 6c81256..c3fba5c 100644

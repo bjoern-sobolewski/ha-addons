@@ -115,3 +115,8 @@ read-only login can view it without administrative controls; individual-key
 sessions cannot access other users' usage. Report refresh reads the local
 database and does not query or reset upstream quota. Administrators can expand
 the existing detailed weekly observation charts beneath the summary.
+
+Consecutive reset-time updates while an unused weekly allowance stays at 100%
+are combined in the weekly summary, including their recorded request counts
+and API value. Five recent cycles are shown initially; Show older cycles expands
+the remaining history. Detailed observation charts retain the original records.

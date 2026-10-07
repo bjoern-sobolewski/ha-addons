@@ -84,3 +84,34 @@ stacking them on narrow screens. Its usage auto-refresh setting supports Off,
 usage refreshes or querying provider quota. Existing values and chart samples
 remain visible during background refreshes. A range with one observed bucket
 shows a point at its actual value; missing chart samples remain missing.
+
+## Weekly quota value
+
+Open **Auth Files → account → Weekly value** in the administrator or all-key
+read-only dashboard. The report covers the last 90 days of recorded weekly
+Codex windows. It shows the scheduled reset, when a later cycle was observed,
+the last observed remaining percentage and its age, and recorded API-equivalent
+value delivered during each cycle. A passed countdown alone does not confirm a
+reset. Shorter windows and reserve pools are outside this report.
+
+Model comparisons separate outgoing Normal (Auto/default) and Fast requested
+modes. Uncaptured historical modes remain unknown. Estimates use only intervals
+with one model/mode, complete pricing, no failed requests and at most one hour
+between percentage changes. At least five percentage points, three intervals
+and twenty requests are required. The report displays sample coverage and the
+observed range; these eligibility floors do not establish statistical confidence.
+Mixed intervals still contribute to delivered dollar totals.
+
+API dollars per percentage point are total qualifying dollars divided by total
+qualifying percentage points. Multiplying by 100 estimates a full allowance for
+a similar workload. Context, caching, reasoning, changing quota rules and usage
+outside the proxy can affect this estimate. Prices and pricing rules are the
+current Keeper configuration, not a subscription invoice or confirmed billing
+tier. Historical totals include permanently archived requests and are recalculated
+if pricing changes; unavailable historical data cannot be reconstructed.
+
+This is shared account reporting across all client keys. The separate all-key
+read-only login can view it without administrative controls; individual-key
+sessions cannot access other users' usage. Report refresh reads the local
+database and does not query or reset upstream quota. Administrators can expand
+the existing detailed weekly observation charts beneath the summary.

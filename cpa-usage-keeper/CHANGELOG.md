@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.22
+
+- Add weekly account reset history and API-equivalent delivered value to admin and read-only account details.
+- Compare value per quota percentage point by model and outgoing Normal/Fast requested mode, with sample eligibility and coverage.
+- Include permanently archived requests in quota history and index archive lookups; preserve unknown modes, incomplete pricing and unconfirmed resets.
+- Retain detailed weekly charts for administrators; shorter windows are outside the new report.
+
 ## 0.1.21
 
 - Count quota observation ages up every second on Auth Files using one shared local clock, preserving captured timestamps and API polling frequency.

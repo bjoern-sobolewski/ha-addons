@@ -22,6 +22,9 @@ jobs:
       - run: docker tag ha-cpa-test:local ha-cpa-quota:local
       - run: docker tag ha-keeper-test:local ha-keeper-quota:local
       - run: python tests/quota_flow.py
+      - run: python tests/weekly_quota_flow.py
+        env:
+          KEEPER_WEEKLY_IMAGE: ha-keeper-test:local
   publish:
     needs: validate
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

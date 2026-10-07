@@ -26,12 +26,14 @@ COPY patches/upstream-service-tier.patch /tmp/upstream-service-tier.patch
 RUN git apply --check /tmp/upstream-service-tier.patch && git apply /tmp/upstream-service-tier.patch
 COPY patches/quota-age-clock.patch /tmp/quota-age-clock.patch
 RUN git apply --check /tmp/quota-age-clock.patch && git apply /tmp/quota-age-clock.patch
+COPY patches/weekly-quota-value.patch /tmp/weekly-quota-value.patch
+RUN git apply --check /tmp/weekly-quota-value.patch && git apply /tmp/weekly-quota-value.patch
 FROM node:24-alpine AS web-builder
 WORKDIR /src/web
 COPY --from=source /src/web/package*.json ./
 RUN npm ci
 COPY --from=source /src/web/ ./
-RUN npm run typecheck && npm run lint && npm test -- --run src/lib/test/loginCookieChoice.test.ts src/lib/test/api.test.ts src/lib/test/apiCPAMCEmbed.test.ts src/lib/test/quotaPolling.test.ts src/pages/test/LoginPage.test.tsx src/pages/test/KeyQuotaPage.test.tsx src/pages/test/ReadOnlyPage.test.tsx src/pages/test/ReadOnlyReportingPage.test.tsx src/pages/test/KeyRankingPage.logic.test.tsx src/pages/test/ReadOnlyLogin.test.tsx src/features/key-viewer/test/quotaNavigation.test.tsx src/components/dashboard/test/AutoRefreshControl.test.tsx src/components/dashboard/test/DashboardToolbar.test.tsx src/components/usage/hooks/test/useSparklines.refresh.test.tsx src/components/usage/hooks/test/useSparklines.test.ts src/components/usage/test/OverviewRealtimePanel.logic.test.tsx src/components/usage/test/UsageComparisonCharts.test.tsx src/pages/test/UsagePage.logic.test.ts src/pages/test/KeyOverviewPage.logic.test.ts src/components/usage/credentials/test/useQuotaCache.test.tsx src/components/usage/credentials/test/useCredentialsTabData.test.ts src/components/usage/test/OverviewQuotaPanel.test.tsx src/components/usage/test/StatCards.test.ts src/pages/test/KeyOverviewPage.tabs.test.tsx && npm test -- --run src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx src/components/usage/test/RequestEventsDetailsCard.test.tsx && npm test -- --run src/components/usage/test/QuotaFreshnessClock.test.tsx && npm run build
+RUN npm run typecheck && npm run lint && npm test -- --run src/lib/test/loginCookieChoice.test.ts src/lib/test/api.test.ts src/lib/test/apiCPAMCEmbed.test.ts src/lib/test/quotaPolling.test.ts src/pages/test/LoginPage.test.tsx src/pages/test/KeyQuotaPage.test.tsx src/pages/test/ReadOnlyPage.test.tsx src/pages/test/ReadOnlyReportingPage.test.tsx src/pages/test/KeyRankingPage.logic.test.tsx src/pages/test/ReadOnlyLogin.test.tsx src/features/key-viewer/test/quotaNavigation.test.tsx src/components/dashboard/test/AutoRefreshControl.test.tsx src/components/dashboard/test/DashboardToolbar.test.tsx src/components/usage/hooks/test/useSparklines.refresh.test.tsx src/components/usage/hooks/test/useSparklines.test.ts src/components/usage/test/OverviewRealtimePanel.logic.test.tsx src/components/usage/test/UsageComparisonCharts.test.tsx src/pages/test/UsagePage.logic.test.ts src/pages/test/KeyOverviewPage.logic.test.ts src/components/usage/credentials/test/useQuotaCache.test.tsx src/components/usage/credentials/test/useCredentialsTabData.test.ts src/components/usage/test/OverviewQuotaPanel.test.tsx src/components/usage/test/StatCards.test.ts src/pages/test/KeyOverviewPage.tabs.test.tsx && npm test -- --run src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx src/components/usage/test/RequestEventsDetailsCard.test.tsx && npm test -- --run src/components/usage/test/QuotaFreshnessClock.test.tsx && npm test -- --run src/components/usage/test/WeeklyQuotaValuePanel.test.tsx src/components/usage/credentials/test/CodexQuotaHistoryPanel.test.tsx src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx && npm run build
 
 FROM golang:1.26-alpine AS go-builder
 RUN apk add --no-cache build-base
@@ -44,7 +46,7 @@ COPY --from=source /src/web/static.go ./web/static.go
 COPY --from=web-builder /src/web/dist ./web/dist
 RUN go test ./internal/cpa/test ./internal/repository/test ./internal/ranking/test -run "TestSharedKeyName|TestLocalRanking.*Profile" && go test ./internal/app/test ./internal/service/test ./internal/quota ./internal/api/test ./internal/config/test ./internal/auth/test ./internal/quota/test ./internal/cpa/dto/apicall/test
 RUN go test ./internal/pricing/test ./internal/entities/test ./internal/repository/test ./internal/repository/migration/test
-RUN CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=1.15.9-ha.19" -o /out/cpa-usage-keeper ./cmd/server/main.go
+RUN CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=1.15.9-ha.20" -o /out/cpa-usage-keeper ./cmd/server/main.go
 
 FROM ghcr.io/willxup/cpa-usage-keeper:1.15.9@sha256:5a3f3b51f6992fe81756d5d8a0aaaf6765084ff7f612add012ce96291be1eea3
 USER root
@@ -55,7 +57,7 @@ COPY run.sh bootstrap.py nginx.conf viewer-locations.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 ENV WORK_DIR=/data TZ=Europe/Berlin
 EXPOSE 8082
-ARG BUILD_VERSION=0.1.21
+ARG BUILD_VERSION=0.1.22
 LABEL io.hass.name="CPA Usage Keeper" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

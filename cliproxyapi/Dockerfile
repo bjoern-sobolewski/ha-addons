@@ -44,7 +44,10 @@ RUN git apply --check /tmp/cpamc-traffic-native.patch && git apply /tmp/cpamc-tr
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/ ./
-RUN npm install --ignore-scripts && npx --yes --package=bun@1.3.14 bun run verify
+# 6.13.0 imports an undeclared @codemirror/streamparser dependency. Keep the
+# previously verified language release until upstream fixes its package.
+RUN npm pkg set 'overrides.@codemirror/language=6.12.4' \
+    && npm install --ignore-scripts && npx --yes --package=bun@1.3.14 bun run verify
 FROM eceasy/cli-proxy-api:v8.0.10@sha256:0b007a6abd15aec1f5314908417ceab99f049f75353e3703f52f0968747f6110
 USER root
 RUN apt-get update \

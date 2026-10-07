@@ -1,0 +1,154 @@
+diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
+index 98f01f3..e153098 100644
+--- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
++++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
+@@ -25,3 +25,9 @@
+ .trends select { max-width: 100%; padding: 6px 8px; border: 1px solid var(--border-color, #80808040); border-radius: 6px; background: var(--bg-secondary); color: inherit; }
+ .chart { height: 300px; min-width: 0; width: 100%; position: relative; }
+ @media (max-width: 600px) { .chart { height: 320px; } }
++
++.scroll .cyclesTable {
++  th, td { min-width: 105px; }
++  th:last-child, td:last-child { min-width: 170px; }
++}
++.cycleRate { font-size: 15px; }
+diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
+index 5c25943..551262b 100644
+--- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
++++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
+@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button'
+ import { CodexQuotaHistoryPanel } from './CodexQuotaHistoryPanel'
+ import { WeeklyTrendCharts } from './WeeklyTrendCharts'
+ import { weeklyCycleRows } from './weeklyCycleRows'
++import { weeklyCycleValue } from './weeklyCycleValue'
+ import styles from './WeeklyQuotaValuePanel.module.scss'
+ 
+ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequired }: {
+@@ -56,25 +57,30 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+     </label>}
+     {history && !history.cycles.length && <p>{t('weekly_quota.empty', 'No weekly quota observations yet. History will appear after weekly quota is captured.')}</p>}
+     {!!history?.cycles.length && <>
+-      <h4>{t('weekly_quota.resets', 'Weekly cycles and resets')}</h4>
+-      <p className={styles.note}>{t('weekly_quota.remaining_note', 'Remaining is the last observed value, not an exact measurement at reset. A passed reset time remains unconfirmed until a later cycle is observed. Dollar totals cover recorded requests, including archived requests.')}</p>
+-      <div className={styles.scroll}><table>
++      <h4>{t('weekly_quota.cycle_value_title', 'Weekly cycle value per percentage point')}</h4>
++      <p className={styles.note}>{t('weekly_quota.cycle_rate_note', 'API value / 1% is the recorded value between observed quota drops divided by the percentage points consumed in those same intervals, averaged across all models and modes. Total API value includes all cycle requests, including archived requests and usage outside observed drops. Remaining is the last observed value; a passed reset time alone does not confirm a rollover.')}</p>
++      <div className={styles.scroll}><table className={styles.cyclesTable}>
+         <thead><tr>
++          <th>{t('weekly_quota.cycle_rate', 'API value / 1%')}</th>
++          <th>{t('weekly_quota.observed_used', 'Observed quota used')}</th>
++          <th>{t('weekly_quota.total_value', 'Total API value')}</th>
+           <th>{t('weekly_quota.reset', 'Reset / rollover')}</th>
+-          <th>{t('weekly_quota.remaining', 'Last remaining')}</th>
+-          <th>{t('weekly_quota.delivered', 'API value delivered')}</th>
+           <th>{t('weekly_quota.coverage', 'Observation coverage')}</th>
+         </tr></thead>
+         <tbody>{visibleCycles.map(({ cycle, reset, combinedUpdates }) => {
+           const current = cycle.status === 'current'
+           const shortened = cycle.effective_ended_at !== cycle.reset_at
++          const value = weeklyCycleValue(cycle)
+           return <tr key={cycle.id}>
++            <td><strong className={styles.cycleRate}>{value.costPerPoint != null ? money(value.costPerPoint) : value.points > 0 ? t('weekly_quota.unpriced', 'Pricing incomplete') : t('weekly_quota.no_drop', 'No observed drop')}</strong>
++              {value.costPerPoint != null && <small>{t('weekly_quota.sampled_value', '{{value}} in observed drops', { value: money(value.cost) })}</small>}</td>
++            <td><strong>{value.points} {t('weekly_quota.points', 'percentage points')}</strong><small>{value.intervals} {t('weekly_quota.intervals', 'intervals')}</small></td>
++            <td><strong>{cycle.usage.cost_available ? money(cycle.usage.total_cost_usd) : t('weekly_quota.unpriced', 'Pricing incomplete')}</strong><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small></td>
+             <td><strong>{date(shortened && !current ? cycle.effective_ended_at : cycle.reset_at)}</strong><small>{current ? t('weekly_quota.scheduled', 'Scheduled') : reset?.rollover_observed_at ? t('weekly_quota.observed', 'Rollover observed') : shortened ? t('weekly_quota.changed', 'Window changed') : t('weekly_quota.unconfirmed', 'Awaiting rollover observation')}</small>
+               {reset?.rollover_observed_at && <small>{date(reset.rollover_observed_at)}</small>}</td>
+-            <td><strong>{cycle.last_remaining_percent == null ? '—' : `${cycle.last_remaining_percent}%`}</strong><small>{date(cycle.last_observed_at)}</small>
+-              {reset && <small>{t('weekly_quota.age', '{{minutes}} min before {{boundary}}', { minutes: Math.round(reset.last_observation_age_seconds / 60), boundary: current ? t('weekly_quota.report_time', 'report time') : t('weekly_quota.cycle_end', 'cycle end') })}</small>}</td>
+-            <td><strong>{cycle.usage.cost_available ? money(cycle.usage.total_cost_usd) : t('weekly_quota.unpriced', 'Pricing incomplete')}</strong><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small></td>
+-            <td><small>{t('weekly_quota.first', 'First observed')}: {date(cycle.first_observed_at)}</small>
++            <td><small><strong>{t('weekly_quota.remaining', 'Last remaining')}: {cycle.last_remaining_percent == null ? '—' : `${cycle.last_remaining_percent}%`}</strong></small><small>{date(cycle.last_observed_at)}</small>
++              {reset && <small>{t('weekly_quota.age', '{{minutes}} min before {{boundary}}', { minutes: Math.round(reset.last_observation_age_seconds / 60), boundary: current ? t('weekly_quota.report_time', 'report time') : t('weekly_quota.cycle_end', 'cycle end') })}</small>}
++              <small>{t('weekly_quota.first', 'First observed')}: {date(cycle.first_observed_at)}</small>
+               {combinedUpdates > 0 && <small>{t('weekly_quota.combined', '{{count}} reset-time updates combined while quota stayed at 100%', { count: combinedUpdates })}</small>}
+               {reset?.partial_observation && <small>{t('weekly_quota.partial', 'Observation began after the cycle started')}</small>}</td>
+           </tr>
+diff --git a/web/src/components/usage/credentials/weeklyCycleValue.ts b/web/src/components/usage/credentials/weeklyCycleValue.ts
+new file mode 100644
+index 0000000..418b610
+--- /dev/null
++++ b/web/src/components/usage/credentials/weeklyCycleValue.ts
+@@ -0,0 +1,11 @@
++import type { CodexQuotaHistoryCycle } from '@/lib/types'
++
++// Keep numerator and denominator on the same observed quota-drop intervals.
++// This descriptive cycle average can contain mixed models and modes.
++export function weeklyCycleValue(cycle: CodexQuotaHistoryCycle) {
++  const intervals = cycle.transitions.filter(interval => interval.percentage_points > 0)
++  const points = intervals.reduce((sum, interval) => sum + interval.percentage_points, 0)
++  const cost = intervals.reduce((sum, interval) => sum + interval.usage.total_cost_usd, 0)
++  const priced = intervals.every(interval => interval.usage.cost_available && Number.isFinite(interval.usage.total_cost_usd))
++  return { points, intervals: intervals.length, cost, costPerPoint: points > 0 && priced ? cost / points : null }
++}
+diff --git a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
+index 120ff7e..5a32ffc 100644
+--- a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
++++ b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
+@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({ fetchCodexQuotaHistory: vi.fn() }))
+ vi.mock('@/lib/api', async original => ({ ...await original<typeof import('@/lib/api')>(), ...api }))
+ import { WeeklyQuotaValuePanel } from '../credentials/WeeklyQuotaValuePanel'
+ import { weeklyCycleRows } from '../credentials/weeklyCycleRows'
++import { weeklyCycleValue } from '../credentials/weeklyCycleValue'
+ 
+ let element: HTMLDivElement
+ let root: Root
+@@ -135,3 +136,58 @@ it('shows five recent cycles and lets the user expand and collapse older history
+   await act(async () => older.click())
+   expect(element.querySelector('table tbody')!.children).toHaveLength(5)
+ })
++
++function observedCycleFixture(): CodexQuotaHistoryResponse {
++  const response = fixture()
++  const cycle = response.cycles[0]
++  cycle.first_remaining_percent = 81
++  cycle.last_remaining_percent = 77
++  cycle.transitions = [
++    { from_remaining_percent: 81, to_remaining_percent: 80, percentage_points: 1, is_direct: true, interval_started_at: '2026-10-01T12:00:00Z', interval_ended_at: '2026-10-01T12:10:00Z', usage: { ...cycle.usage, requests: 10, successful_requests: 10, total_cost_usd: 3 }, tokens_per_point: 110, cost_per_point: 3, cost_per_point_available: true },
++    { from_remaining_percent: 80, to_remaining_percent: 77, percentage_points: 3, is_direct: false, interval_started_at: '2026-10-01T12:10:00Z', interval_ended_at: '2026-10-01T12:20:00Z', usage: { ...cycle.usage, requests: 20, successful_requests: 20, total_cost_usd: 6 }, tokens_per_point: 110 / 3, cost_per_point: 2, cost_per_point_available: true },
++  ]
++  return response
++}
++
++it('leads with weighted value per observed point and keeps total delivered value separate for partial cycles', async () => {
++  const response = observedCycleFixture()
++  expect(weeklyCycleValue(response.cycles[0])).toEqual({ points: 4, intervals: 2, cost: 9, costPerPoint: 2.25 })
++  api.fetchCodexQuotaHistory.mockResolvedValue(response)
++  await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" readOnlyAccountId="3" />))
++  expect([...element.querySelectorAll('table:first-of-type th')].slice(0, 5).map(cell => cell.textContent)).toEqual(['API value / 1%', 'Observed quota used', 'Total API value', 'Reset / rollover', 'Observation coverage'])
++  const cells = element.querySelector('table tbody tr')!.querySelectorAll('td')
++  expect(cells[0].textContent).toContain('$2.25')
++  expect(cells[0].textContent).toContain('$9.00 in observed drops')
++  expect(cells[1].textContent).toContain('4 percentage points')
++  expect(cells[2].textContent).toContain('$12.00')
++  expect(cells[4].textContent).toContain('Last remaining: 77%')
++  expect(cells[4].textContent).toContain('Observation began after the cycle started')
++})
++
++it('keeps complete observed rates when total pricing is incomplete, but hides rates with missing interval prices', () => {
++  const cycle = observedCycleFixture().cycles[0]
++  cycle.usage.cost_available = false
++  expect(weeklyCycleValue(cycle).costPerPoint).toBe(2.25)
++  cycle.transitions[1].usage.cost_available = false
++  expect(weeklyCycleValue(cycle).costPerPoint).toBeNull()
++  expect(weeklyCycleValue(cycle).points).toBe(4)
++})
++
++it('does not infer used quota from last remaining, or treat no observed drops as a zero-dollar rate', async () => {
++  const response = fixture()
++  expect(weeklyCycleValue(response.cycles[0]).costPerPoint).toBeNull()
++  api.fetchCodexQuotaHistory.mockResolvedValue(response)
++  await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" />))
++  expect(element.querySelector('table tbody tr td')!.textContent).toBe('No observed drop')
++  expect(element.querySelector('table tbody tr td:nth-child(3)')!.textContent).toContain('$12.00')
++})
++
++it('preserves the quota-drop rate through unused reset-time grouping', () => {
++  const response = movingResetFixture()
++  response.cycles.at(-1)!.transitions = observedCycleFixture().cycles[0].transitions
++  response.cycles.at(-1)!.usage = { ...response.cycles.at(-1)!.usage, requests: 42, total_cost_usd: 12 }
++  const row = weeklyCycleRows(response)[0]
++  expect(row.combinedUpdates).toBe(27)
++  expect(row.cycle.usage.total_cost_usd).toBe(18.75)
++  expect(weeklyCycleValue(row.cycle).costPerPoint).toBe(2.25)
++})

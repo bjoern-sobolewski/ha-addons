@@ -116,6 +116,15 @@ sessions cannot access other users' usage. Report refresh reads the local
 database and does not query or reset upstream quota. Administrators can expand
 the existing detailed weekly observation charts beneath the summary.
 
+The weekly cycle table leads with **API value / 1%**: total recorded API cost
+inside observed quota-drop intervals divided by the percentage points consumed
+in those same intervals. This is a blended observed average across models and
+modes, including partial cycles; it does not use remaining quota to guess
+unobserved consumption. The separate **Total API value** column includes all
+recorded cycle requests, so its value can exceed the observed-drop numerator.
+No observed drop or incomplete interval pricing leaves the rate unavailable.
+Observation coverage retains last remaining quota, timestamps and partial coverage.
+
 Consecutive reset-time updates while an unused weekly allowance stays at 100%
 are combined in the weekly summary, including their recorded request counts
 and API value. Five recent cycles are shown initially; Show older cycles expands

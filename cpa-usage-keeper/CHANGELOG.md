@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.25
+
+- Lead weekly cycles with API value per quota percentage point, observed consumption and a separate total API value column.
+- Match the rate to costs from observed quota-drop intervals; preserve partial coverage, missing pricing and reset details.
+
 ## 0.1.24
 
 - Add daily subscription API-value and response-speed graphs by model and outgoing Normal/Fast requested mode in account Weekly value.

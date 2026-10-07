@@ -30,6 +30,8 @@ COPY patches/weekly-quota-value.patch /tmp/weekly-quota-value.patch
 RUN git apply --check /tmp/weekly-quota-value.patch && git apply /tmp/weekly-quota-value.patch
 COPY patches/weekly-trends.patch /tmp/weekly-trends.patch
 RUN git apply --check /tmp/weekly-trends.patch && git apply /tmp/weekly-trends.patch
+COPY patches/weekly-cycle-rate.patch /tmp/weekly-cycle-rate.patch
+RUN git apply --check /tmp/weekly-cycle-rate.patch && git apply /tmp/weekly-cycle-rate.patch
 FROM node:24-alpine AS web-builder
 WORKDIR /src/web
 COPY --from=source /src/web/package*.json ./
@@ -48,7 +50,7 @@ COPY --from=source /src/web/static.go ./web/static.go
 COPY --from=web-builder /src/web/dist ./web/dist
 RUN go test ./internal/cpa/test ./internal/repository/test ./internal/ranking/test -run "TestSharedKeyName|TestLocalRanking.*Profile" && go test ./internal/app/test ./internal/service/test ./internal/quota ./internal/api/test ./internal/config/test ./internal/auth/test ./internal/quota/test ./internal/cpa/dto/apicall/test
 RUN go test ./internal/pricing/test ./internal/entities/test ./internal/repository/test ./internal/repository/migration/test
-RUN CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=1.15.9-ha.22" -o /out/cpa-usage-keeper ./cmd/server/main.go
+RUN CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=1.15.9-ha.23" -o /out/cpa-usage-keeper ./cmd/server/main.go
 
 FROM ghcr.io/willxup/cpa-usage-keeper:1.15.9@sha256:5a3f3b51f6992fe81756d5d8a0aaaf6765084ff7f612add012ce96291be1eea3
 USER root
@@ -59,7 +61,7 @@ COPY run.sh bootstrap.py nginx.conf viewer-locations.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 ENV WORK_DIR=/data TZ=Europe/Berlin
 EXPOSE 8082
-ARG BUILD_VERSION=0.1.24
+ARG BUILD_VERSION=0.1.25
 LABEL io.hass.name="CPA Usage Keeper" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

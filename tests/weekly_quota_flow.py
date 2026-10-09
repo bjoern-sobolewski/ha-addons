@@ -32,6 +32,16 @@ for cycle_id,start,end,percentages in [(9001,reset-timedelta(days=7),reset,[80,2
         table = 'usage_events_archive' if cycle_id==9001 else 'usage_events'
         c.execute('INSERT INTO '+table+' (id,event_key,api_group_key,provider,auth_type,auth_index,model,upstream_service_tier,timestamp,input_tokens,total_tokens,failed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                   (cycle_id*100+i,'synthetic-event-'+str(cycle_id*100+i),'synthetic-private-client-key','codex','oauth','synthetic-weekly-auth','weekly-test-model','priority',stamp(at),1000000,1000000,0))
+# Independent account with no quota cycles: performance is stored request metadata.
+c.execute("INSERT INTO usage_identities (id,name,auth_type,identity,type,provider,is_deleted) VALUES (9101,'Synthetic performance',1,'synthetic-performance-auth','codex','codex',0)")
+event_id = 2000000
+for model, mode, small_count, large_count, small_ms, large_ms in [('performance-a','default',50,5,5000,100000),('performance-b','default',5,50,2000,80000),('performance-a','priority',10,10,1000,8000)]:
+    for input_tokens, count, latency in [(1000, small_count, small_ms),(40000, large_count, large_ms)]:
+        for i in range(count):
+            event_id += 1
+            table = 'usage_events_archive' if i % 2 else 'usage_events'
+            c.execute('INSERT INTO '+table+' (id,event_key,api_group_key,provider,auth_type,auth_index,model,upstream_service_tier,timestamp,input_tokens,output_tokens,total_tokens,failed,generate,stream,latency_ms,ttft_ms,reasoning_effort,executor_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                      (event_id,'synthetic-performance-'+str(event_id),'synthetic-private-client-key','codex','oauth','synthetic-performance-auth',model,mode,stamp(now-timedelta(hours=1)),input_tokens,100,input_tokens+100,0,1,1,latency,300,'low','codex-websocket'))
 c.commit()
 '''
 
@@ -83,7 +93,27 @@ def main():
             assert request(prefix + '/quota/history/synthetic-weekly-auth', opener=opener)[0] == 404
             assert request(prefix + '/read-only/accounts/0/weekly-quota', opener=opener)[0] == 404
             assert request(url + '?window_role=bad', opener=opener)[0] == 400
-            print('PASS: packaged weekly report, archived costs, reset evidence, weighted mode estimates, gateway and read-only isolation')
+            performance_url = prefix + '/read-only/accounts/9101/performance?days=30&metric=latency'
+            assert request(performance_url)[0] == 401
+            status, performance_body = request(performance_url, opener=opener)
+            assert status == 200, (status, performance_body)
+            performance = json.loads(performance_body)
+            assert performance['comparison_groups'] == 3 and performance['common_cells'] == 2
+            groups = {(g['model'], g['mode']): g for g in performance['groups']}
+            assert groups[('performance-a', 'normal')]['raw']['median'] == 5
+            assert groups[('performance-b', 'normal')]['raw']['median'] == 80
+            assert groups[('performance-b', 'normal')]['matched']['median'] == 2
+            assert groups[('performance-a', 'fast')]['matched']['samples'] == 20
+            assert sum(g['requests'] for g in performance['groups']) == 130
+            for hidden in (password, readonly, management, 'synthetic-performance-auth', 'synthetic-private-client-key'):
+                assert hidden.encode() not in performance_body
+            for metric in ('ttft', 'tps', 'phase'):
+                status, metric_body = request(performance_url.replace('metric=latency', 'metric=' + metric), opener=opener)
+                assert status == 200 and any(g['raw']['median'] is not None for g in json.loads(metric_body)['groups'])
+            assert request(performance_url + '&mode=bad', opener=opener)[0] == 400
+            assert request(prefix + '/quota/performance/synthetic-performance-auth', opener=opener)[0] == 404
+            assert request(performance_url, opener=opener, method='DELETE')[0] in (403, 404, 405)
+            print('PASS: packaged weekly value and raw/matched performance, archived timings, metric filters, gateway and read-only isolation')
         finally:
             docker('rm', '-f', name, check=False)
             docker('volume', 'rm', volume, check=False)

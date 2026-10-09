@@ -1,0 +1,1297 @@
+diff --git a/internal/api/account_performance.go b/internal/api/account_performance.go
+new file mode 100644
+index 0000000..1ab3e2f
+--- /dev/null
++++ b/internal/api/account_performance.go
+@@ -0,0 +1,82 @@
++package api
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++	"cpa-usage-keeper/internal/repository"
++	"cpa-usage-keeper/internal/service"
++	"errors"
++	"github.com/gin-gonic/gin"
++	"strconv"
++	"strings"
++)
++
++type accountPerformanceProvider interface {
++	GetAccountPerformance(context.Context, repository.PerformanceQuery) (repository.PerformanceReport, error)
++}
++
++func accountPerformanceRequest(c *gin.Context, authIndex string) (repository.PerformanceQuery, error) {
++	days := 30
++	if value, ok := c.GetQuery("days"); ok {
++		n, err := strconv.Atoi(value)
++		if err != nil {
++			return repository.PerformanceQuery{}, err
++		}
++		days = n
++	}
++	metric := c.DefaultQuery("metric", "latency")
++	q := repository.PerformanceQuery{AuthIndex: authIndex, Days: days, Metric: metric, Models: c.QueryArray("model"), Mode: c.Query("mode"), Context: c.Query("context"), Output: c.Query("output"), Effort: c.Query("effort")}
++	return q, repository.ValidatePerformanceQuery(q)
++}
++func serveAccountPerformance(c *gin.Context, provider QuotaProvider, authIndex string) {
++	setNoStoreHeaders(c)
++	reader, ok := provider.(accountPerformanceProvider)
++	if !ok {
++		c.JSON(503, gin.H{"error": "Performance unavailable"})
++		return
++	}
++	request, err := accountPerformanceRequest(c, authIndex)
++	if err != nil {
++		c.JSON(400, gin.H{"error": "Invalid performance filter"})
++		return
++	}
++	report, err := reader.GetAccountPerformance(c.Request.Context(), request)
++	if err != nil {
++		switch {
++		case errors.Is(err, quota.ErrNotFound):
++			c.JSON(404, gin.H{"error": "Account not found"})
++		case errors.Is(err, quota.ErrValidation), errors.Is(err, quota.ErrUnsupportedType):
++			c.JSON(400, gin.H{"error": "Invalid performance request"})
++		default:
++			writeInternalError(c, "Performance unavailable", err)
++		}
++		return
++	}
++	c.JSON(200, report)
++}
++func registerAccountPerformanceRoutes(router gin.IRoutes, provider QuotaProvider) {
++	router.GET("/quota/performance/:auth_index", func(c *gin.Context) { serveAccountPerformance(c, provider, strings.TrimSpace(c.Param("auth_index"))) })
++}
++func registerReadOnlyPerformanceRoutes(group *gin.RouterGroup, identities service.UsageIdentityProvider, provider QuotaProvider) {
++	group.GET("/accounts/:id/performance", func(c *gin.Context) {
++		setNoStoreHeaders(c)
++		reader, ok := identities.(service.UsageIdentityReader)
++		if !ok {
++			c.JSON(503, gin.H{"error": "Performance unavailable"})
++			return
++		}
++		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
++		if err != nil || id <= 0 {
++			c.JSON(400, gin.H{"error": "Invalid account"})
++			return
++		}
++		detail, err := reader.GetUsageIdentity(c.Request.Context(), id)
++		if err != nil || detail.Identity.IsDeleted || detail.Identity.AuthType != entities.UsageIdentityAuthTypeAuthFile || detail.Identity.Type != "codex" {
++			c.JSON(404, gin.H{"error": "Account not found"})
++			return
++		}
++		// Identity is resolved server-side. DTO exposes only aggregate model/mode timing.
++		serveAccountPerformance(c, provider, detail.Identity.Identity)
++	})
++}
+diff --git a/internal/api/quota.go b/internal/api/quota.go
+index 004c6d0..3074f99 100644
+--- a/internal/api/quota.go
++++ b/internal/api/quota.go
+@@ -19,6 +19,7 @@ const quotaResetErrorFailed = "quota_reset_failed"
+ const quotaResetCreditsErrorFailed = "quota_reset_credits_failed"
+ 
+ func registerQuotaRoutes(router gin.IRoutes, provider QuotaProvider) {
++	registerAccountPerformanceRoutes(router, provider)
+ 	router.DELETE("/quota/history/:auth_index/cycles/:cycle_id", func(c *gin.Context) {
+ 		if provider == nil {
+ 			writeInternalError(c, "quota provider is not configured", nil)
+diff --git a/internal/api/read_only_reporting.go b/internal/api/read_only_reporting.go
+index 4d8ce01..8d63070 100644
+--- a/internal/api/read_only_reporting.go
++++ b/internal/api/read_only_reporting.go
+@@ -170,6 +170,7 @@ func readOnlyEventsFilter(c *gin.Context, labels readOnlyDashboardLabels, identi
+ 
+ func registerReadOnlyReportingRoutes(router *gin.RouterGroup, usage service.UsageProvider, keys service.CPAAPIKeyProvider, identities service.UsageIdentityProvider, quotas QuotaProvider, local rankingapi.LocalProvider) {
+ 	group := router.Group("/read-only")
++	registerReadOnlyPerformanceRoutes(group, identities, quotas)
+ 	labelsFor := func(c *gin.Context) (readOnlyDashboardLabels, bool) {
+ 		setNoStoreHeaders(c)
+ 		labels, err := loadReadOnlyDashboardLabels(c, keys, identities)
+diff --git a/internal/api/test/account_performance_test.go b/internal/api/test/account_performance_test.go
+new file mode 100644
+index 0000000..7fb9f29
+--- /dev/null
++++ b/internal/api/test/account_performance_test.go
+@@ -0,0 +1,75 @@
++package test
++
++import (
++	"context"
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++	"cpa-usage-keeper/internal/repository"
++	"net/http"
++	"strings"
++	"testing"
++	"time"
++)
++
++type performanceProviderStub struct {
++	quotaProviderStub
++	request repository.PerformanceQuery
++	err     error
++	calls   int
++}
++
++func (p *performanceProviderStub) GetAccountPerformance(_ context.Context, q repository.PerformanceQuery) (repository.PerformanceReport, error) {
++	p.request = q
++	p.calls++
++	return repository.PerformanceReport{Metric: q.Metric, Groups: []repository.PerformanceGroup{{Model: "model-a", Mode: "normal"}}}, p.err
++}
++func TestPerformanceAdminValidationAndErrors(t *testing.T) {
++	provider := &performanceProviderStub{}
++	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
++	response := serveAPIGet(router, "/api/v1/quota/performance/account?days=7&metric=ttft&model=a&model=b&mode=fast&context=small&output=short&effort=low")
++	if response.Code != 200 || provider.request.AuthIndex != "account" || provider.request.Days != 7 || len(provider.request.Models) != 2 || provider.request.Metric != "ttft" || provider.request.Context != "small" {
++		t.Fatalf("bad forwarding: %d %+v", response.Code, provider.request)
++	}
++	for _, query := range []string{"days=1", "days=bad", "metric=bad", "mode=bad", "context=bad"} {
++		if serveAPIGet(router, "/api/v1/quota/performance/account?"+query).Code != 400 {
++			t.Fatal("invalid query accepted")
++		}
++	}
++	for _, item := range []struct {
++		err    error
++		status int
++	}{{quota.ErrNotFound, 404}, {quota.ErrUnsupportedType, 400}, {quota.ErrValidation, 400}} {
++		provider.err = item.err
++		if serveAPIGet(router, "/api/v1/quota/performance/account").Code != item.status {
++			t.Fatal("wrong error mapping")
++		}
++	}
++}
++func TestPerformanceReadOnlyResolutionSanitizationAndRoleIsolation(t *testing.T) {
++	sessions := auth.NewSessionManager(time.Hour)
++	cfg := AuthConfig{Enabled: true, LoginPassword: "admin-password-long", ReadOnlyPassword: "read-password-long"}
++	row := entities.UsageIdentity{ID: 3, Identity: "secret-auth-index", Name: "secret-name", Type: "codex", AuthType: 1}
++	identities := reportingIdentityStub{identityMetadataStub{items: []entities.UsageIdentity{row}}}
++	provider := &performanceProviderStub{}
++	router := NewRouter(nil, nil, nil, nil, cfg, NewAuthHandler(cfg, sessions), "", OptionalProviders{CPAAPIKeys: &reportingKeysStub{}, UsageIdentity: identities, Quota: provider})
++	login := serveCredentialMutation(router, "POST", "/api/v1/auth/read-only-login", `{"password":"read-password-long"}`)
++	cookie := login.Result().Cookies()[0]
++	viewer, _, _ := sessions.CreateAPIKeyViewer(1)
++	viewerCookie := &http.Cookie{Name: cookie.Name, Value: viewer}
++	path := "/api/v1/read-only/accounts/3/performance?auth_index=attacker"
++	response := serveAPIGet(router, path, cookie)
++	if response.Code != 200 || provider.request.AuthIndex != "secret-auth-index" || strings.Contains(response.Body.String(), "secret-") {
++		t.Fatalf("read-only leak or account override: %d %s", response.Code, response.Body.String())
++	}
++	if serveAPIGet(router, path).Code != 401 || serveAPIGet(router, path, viewerCookie).Code != 403 || serveAPIGet(router, "/api/v1/quota/performance/secret-auth-index", cookie).Code != 403 {
++		t.Fatal("role isolation failed")
++	}
++	for _, item := range []entities.UsageIdentity{{ID: 3, Identity: "secret-auth-index", Type: "codex", AuthType: 1, IsDeleted: true}, {ID: 3, Identity: "secret-auth-index", Type: "codex", AuthType: 2}, {ID: 3, Identity: "secret-auth-index", Type: "claude", AuthType: 1}} {
++		identities.items[0] = item
++		if serveAPIGet(router, path, cookie).Code != 404 {
++			t.Fatal("inactive or wrong account kind accepted")
++		}
++	}
++}
+diff --git a/internal/quota/account_performance.go b/internal/quota/account_performance.go
+new file mode 100644
+index 0000000..282a8a7
+--- /dev/null
++++ b/internal/quota/account_performance.go
+@@ -0,0 +1,34 @@
++package quota
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/repository"
++	"errors"
++	"fmt"
++	"gorm.io/gorm"
++	"strings"
++)
++
++func (s *Service) GetAccountPerformance(ctx context.Context, request repository.PerformanceQuery) (repository.PerformanceReport, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	request.AuthIndex = strings.TrimSpace(request.AuthIndex)
++	if err := repository.ValidatePerformanceQuery(request); err != nil {
++		return repository.PerformanceReport{}, fmt.Errorf("%w: %v", ErrValidation, err)
++	}
++	if s == nil || s.db == nil {
++		return repository.PerformanceReport{}, fmt.Errorf("performance database unavailable")
++	}
++	identity, err := repository.GetActiveAuthFileUsageIdentityByAuthIndex(ctx, s.db, request.AuthIndex)
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return repository.PerformanceReport{}, ErrNotFound
++	}
++	if err != nil {
++		return repository.PerformanceReport{}, err
++	}
++	if normalizeIdentityType(identity.Type) != "codex" {
++		return repository.PerformanceReport{}, ErrUnsupportedType
++	}
++	return repository.BuildAccountPerformance(ctx, s.db, request)
++}
+diff --git a/internal/quota/test/account_performance_test.go b/internal/quota/test/account_performance_test.go
+new file mode 100644
+index 0000000..b3a5185
+--- /dev/null
++++ b/internal/quota/test/account_performance_test.go
+@@ -0,0 +1,31 @@
++package test
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++	"cpa-usage-keeper/internal/repository"
++	"errors"
++	"testing"
++)
++
++func TestAccountPerformanceRejectsInactiveWrongIdentityAndInvalidQuery(t *testing.T) {
++	db := openQuotaTestDB(t)
++	for _, row := range []entities.UsageIdentity{{AuthType: entities.UsageIdentityAuthTypeAuthFile, Identity: "codex", Provider: "codex", Type: "codex"}, {AuthType: entities.UsageIdentityAuthTypeAuthFile, Identity: "claude", Provider: "claude", Type: "claude"}, {AuthType: entities.UsageIdentityAuthTypeAuthFile, Identity: "deleted", Provider: "codex", Type: "codex", IsDeleted: true}, {AuthType: entities.UsageIdentityAuthTypeAIProvider, Identity: "api", Provider: "codex", Type: "codex"}} {
++		seedUsageIdentity(t, db, row)
++	}
++	service := newQuotaServiceWithRegistry(t, db, quota.NewProviderRegistry(nil))
++	for _, item := range []struct {
++		id  string
++		err error
++	}{{"", quota.ErrValidation}, {"missing", quota.ErrNotFound}, {"deleted", quota.ErrNotFound}, {"api", quota.ErrNotFound}, {"claude", quota.ErrUnsupportedType}} {
++		_, err := service.GetAccountPerformance(context.Background(), repository.PerformanceQuery{AuthIndex: item.id, Days: 30, Metric: "latency"})
++		if !errors.Is(err, item.err) {
++			t.Fatalf("%s: %v", item.id, err)
++		}
++	}
++	_, err := service.GetAccountPerformance(context.Background(), repository.PerformanceQuery{AuthIndex: "codex", Days: 1, Metric: "latency"})
++	if !errors.Is(err, quota.ErrValidation) {
++		t.Fatal("query not validated before scan")
++	}
++}
+diff --git a/internal/repository/account_performance.go b/internal/repository/account_performance.go
+new file mode 100644
+index 0000000..2f46711
+--- /dev/null
++++ b/internal/repository/account_performance.go
+@@ -0,0 +1,396 @@
++package repository
++
++import (
++	"context"
++	"fmt"
++	"math"
++	"sort"
++	"strings"
++	"time"
++
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/timeutil"
++	"gorm.io/gorm"
++	"gorm.io/plugin/dbresolver"
++)
++
++// Performance contains aggregate timings only, never keys, identities or raw requests.
++type PerformanceQuery struct {
++	AuthIndex                     string
++	Days                          int
++	Metric                        string
++	Models                        []string
++	Mode, Context, Output, Effort string
++	Now                           time.Time
++}
++type PerformanceStats struct {
++	Samples int      `json:"samples"`
++	Median  *float64 `json:"median"`
++	P90     *float64 `json:"p90"`
++	P10     *float64 `json:"p10"`
++}
++type PerformanceDay struct {
++	Day     string           `json:"day"`
++	Raw     PerformanceStats `json:"raw"`
++	Matched PerformanceStats `json:"matched"`
++}
++type PerformanceGroup struct {
++	Model    string           `json:"model"`
++	Mode     string           `json:"mode"`
++	Requests int              `json:"requests"`
++	Failed   int              `json:"failed"`
++	Raw      PerformanceStats `json:"raw"`
++	Matched  PerformanceStats `json:"matched"`
++	Coverage float64          `json:"coverage"`
++	Days     []PerformanceDay `json:"days"`
++}
++type PerformanceReport struct {
++	GeneratedAt         time.Time          `json:"generated_at"`
++	RangeStart          time.Time          `json:"range_start"`
++	Metric              string             `json:"metric"`
++	Models              []string           `json:"models"`
++	Efforts             []string           `json:"efforts"`
++	Groups              []PerformanceGroup `json:"groups"`
++	CommonCells         int                `json:"common_cells"`
++	ComparisonGroups    int                `json:"comparison_groups"`
++	MinSamples          int                `json:"min_samples"`
++	MinCellSamples      int                `json:"min_cell_samples"`
++	MinDailySamples     int                `json:"min_daily_samples"`
++	MinDailyCellSamples int                `json:"min_daily_cell_samples"`
++}
++type performanceCell struct{ context, output, cache, effort, stream, executor string }
++type performanceObservation struct {
++	value float64
++	day   string
++}
++type performanceWork struct {
++	group  PerformanceGroup
++	values []float64
++	cells  map[performanceCell][]performanceObservation
++	daily  map[string][]float64
++}
++type weightedPerformanceValue struct{ value, weight float64 }
++
++func ValidatePerformanceQuery(q PerformanceQuery) error {
++	if strings.TrimSpace(q.AuthIndex) == "" {
++		return fmt.Errorf("account is required")
++	}
++	if q.Days != 7 && q.Days != 30 && q.Days != 90 {
++		return fmt.Errorf("days must be 7, 30 or 90")
++	}
++	if !oneOf(q.Metric, "latency", "ttft", "tps", "phase") {
++		return fmt.Errorf("invalid metric")
++	}
++	if !oneOf(q.Mode, "", "normal", "fast", "unknown") || !oneOf(q.Context, "", "small", "medium", "large", "huge") || !oneOf(q.Output, "", "short", "medium", "long", "huge") {
++		return fmt.Errorf("invalid workload filter")
++	}
++	if len(q.Models) > 20 || len(q.Effort) > 100 {
++		return fmt.Errorf("too many filters")
++	}
++	for _, model := range q.Models {
++		if len(model) > 200 || strings.TrimSpace(model) == "" {
++			return fmt.Errorf("invalid model")
++		}
++	}
++	return nil
++}
++func oneOf(value string, options ...string) bool {
++	for _, x := range options {
++		if value == x {
++			return true
++		}
++	}
++	return false
++}
++func performanceSize(value int64, limits []int64, names []string) string {
++	for i, limit := range limits {
++		if value < limit {
++			return names[i]
++		}
++	}
++	return names[len(names)-1]
++}
++func performanceMetric(e entities.UsageEvent, metric string) (float64, bool) {
++	if e.Failed || (e.Generate != nil && !*e.Generate) || e.LatencyMS <= 0 {
++		return 0, false
++	}
++	switch metric {
++	case "latency":
++		return float64(e.LatencyMS) / 1000, true
++	case "ttft":
++		if e.TTFTMS != nil && *e.TTFTMS >= 0 && *e.TTFTMS < e.LatencyMS {
++			return float64(*e.TTFTMS) / 1000, true
++		}
++	case "tps":
++		if e.OutputTokens > 0 {
++			return float64(e.OutputTokens) * 1000 / float64(e.LatencyMS), true
++		}
++	case "phase":
++		// Approximate active-phase rate, not visible decode speed. Avoid tiny denominators.
++		if e.Stream != nil && *e.Stream && e.OutputTokens >= 32 && e.TTFTMS != nil && *e.TTFTMS >= 0 && e.LatencyMS-*e.TTFTMS >= 250 {
++			return float64(e.OutputTokens) * 1000 / float64(e.LatencyMS-*e.TTFTMS), true
++		}
++	}
++	return 0, false
++}
++func performanceWorkload(e entities.UsageEvent) performanceCell {
++	cache := "unknown"
++	if e.InputTokens > 0 && e.CacheReadTokens >= 0 && e.CacheReadTokens <= e.InputTokens {
++		share := float64(e.CacheReadTokens) / float64(e.InputTokens)
++		cache = "low"
++		if share >= .9 {
++			cache = "high"
++		} else if share >= .5 {
++			cache = "medium"
++		}
++	}
++	stream := "unknown"
++	if e.Stream != nil {
++		stream = "batch"
++		if *e.Stream {
++			stream = "stream"
++		}
++	}
++	effort := strings.ToLower(strings.TrimSpace(e.ReasoningEffort))
++	if effort == "" {
++		effort = "unknown"
++	}
++	executor := strings.TrimSpace(e.ExecutorType)
++	if executor == "" {
++		executor = "unknown"
++	}
++	// Canonical output includes reasoning: keep matching and throughput on that same basis.
++	return performanceCell{
++		performanceSize(e.InputTokens, []int64{8000, 32000, 128000}, []string{"small", "medium", "large", "huge"}),
++		performanceSize(e.OutputTokens, []int64{256, 1024, 4096}, []string{"short", "medium", "long", "huge"}),
++		cache, effort, stream, executor,
++	}
++}
++
++func BuildAccountPerformance(ctx context.Context, db *gorm.DB, q PerformanceQuery) (PerformanceReport, error) {
++	report := PerformanceReport{Metric: q.Metric, Models: []string{}, Efforts: []string{}, Groups: []PerformanceGroup{}, MinSamples: 20, MinCellSamples: 5, MinDailySamples: 20, MinDailyCellSamples: 3}
++	if err := ValidatePerformanceQuery(q); err != nil {
++		return report, err
++	}
++	if q.Now.IsZero() {
++		q.Now = time.Now()
++	}
++	report.GeneratedAt = q.Now.UTC()
++	report.RangeStart = report.GeneratedAt.Add(-time.Duration(q.Days) * 24 * time.Hour)
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	projection := "COALESCE(model, '') AS model, COALESCE(upstream_service_tier, '') AS upstream_service_tier, timestamp, COALESCE(failed, 0) AS failed, generate, COALESCE(latency_ms, 0) AS latency_ms, ttft_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(reasoning_tokens, 0) AS reasoning_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(reasoning_effort, '') AS reasoning_effort, stream, COALESCE(executor_type, '') AS executor_type"
++	filter := "auth_type = ? AND auth_index = ? AND provider = ? AND timestamp >= ? AND timestamp < ?"
++	args := []any{"oauth", q.AuthIndex, "codex", timeutil.FormatStorageTime(report.RangeStart), timeutil.FormatStorageTime(report.GeneratedAt)}
++	source := "usage_events"
++	if db.Migrator().HasTable(&entities.UsageEventArchive{}) {
++		source = "(SELECT " + projection + " FROM usage_events WHERE " + filter + " UNION ALL SELECT " + projection + " FROM usage_events_archive WHERE " + filter + ")"
++		args = append(append([]any{}, args...), args...)
++	} else {
++		source += " WHERE " + filter
++	}
++	rows, err := db.WithContext(ctx).Clauses(dbresolver.Read).Raw("SELECT "+projection+" FROM "+source, args...).Rows()
++	if err != nil {
++		return report, fmt.Errorf("read account performance: %w", err)
++	}
++	defer rows.Close()
++	groups := map[[2]string]*performanceWork{}
++	models := map[string]bool{}
++	efforts := map[string]bool{}
++	for rows.Next() {
++		var e entities.UsageEvent
++		if err := rows.Scan(&e.Model, &e.UpstreamServiceTier, &e.Timestamp, &e.Failed, &e.Generate, &e.LatencyMS, &e.TTFTMS, &e.InputTokens, &e.OutputTokens, &e.ReasoningTokens, &e.CacheReadTokens, &e.ReasoningEffort, &e.Stream, &e.ExecutorType); err != nil {
++			return report, err
++		}
++		e.Timestamp = timeutil.NormalizeStorageTime(e.Timestamp)
++		models[e.Model] = true
++		cell := performanceWorkload(e)
++		efforts[cell.effort] = true
++		if len(q.Models) > 0 && !oneOf(e.Model, q.Models...) {
++			continue
++		}
++		mode := quotaRequestedMode(e.UpstreamServiceTier)
++		if q.Mode != "" && mode != q.Mode || q.Context != "" && cell.context != q.Context || q.Output != "" && cell.output != q.Output || q.Effort != "" && cell.effort != q.Effort {
++			continue
++		}
++		key := [2]string{e.Model, mode}
++		work := groups[key]
++		if work == nil {
++			work = &performanceWork{group: PerformanceGroup{Model: e.Model, Mode: mode, Days: []PerformanceDay{}}, cells: map[performanceCell][]performanceObservation{}, daily: map[string][]float64{}}
++			groups[key] = work
++		}
++		work.group.Requests++
++		if e.Failed {
++			work.group.Failed++
++		}
++		value, valid := performanceMetric(e, q.Metric)
++		if !valid || !isFinitePerformance(value) {
++			continue
++		}
++		day := e.Timestamp.UTC().Format("2006-01-02")
++		work.values = append(work.values, value)
++		work.daily[day] = append(work.daily[day], value)
++		work.cells[cell] = append(work.cells[cell], performanceObservation{value, day})
++	}
++	if err := rows.Err(); err != nil {
++		return report, err
++	}
++	for x := range models {
++		report.Models = append(report.Models, x)
++	}
++	sort.Strings(report.Models)
++	for x := range efforts {
++		report.Efforts = append(report.Efforts, x)
++	}
++	sort.Strings(report.Efforts)
++	ordered := []*performanceWork{}
++	eligible := []*performanceWork{}
++	for _, work := range groups {
++		ordered = append(ordered, work)
++		if len(work.values) >= report.MinSamples && work.group.Mode != "unknown" {
++			eligible = append(eligible, work)
++		}
++	}
++	sort.Slice(ordered, func(i, j int) bool {
++		if ordered[i].group.Model == ordered[j].group.Model {
++			return ordered[i].group.Mode < ordered[j].group.Mode
++		}
++		return ordered[i].group.Model < ordered[j].group.Model
++	})
++	// Sort before summation: stable distributions regardless of Go map iteration order.
++	sort.Slice(eligible, func(i, j int) bool {
++		if eligible[i].group.Model == eligible[j].group.Model {
++			return eligible[i].group.Mode < eligible[j].group.Mode
++		}
++		return eligible[i].group.Model < eligible[j].group.Model
++	})
++	weights := performanceCommonWeights(eligible, report.MinCellSamples, report.MinSamples)
++	report.CommonCells = len(weights)
++	if len(weights) > 0 {
++		report.ComparisonGroups = len(eligible)
++	}
++	for _, work := range ordered {
++		work.group.Raw = performanceUnweightedStats(work.values)
++		if oneOfWork(work, eligible) && len(weights) > 0 {
++			work.group.Matched = performanceMatchedStats(work, weights, "", report.MinCellSamples, report.MinSamples)
++			work.group.Coverage = float64(work.group.Matched.Samples) / float64(len(work.values))
++		}
++		// Include every UTC date, so missing days remain gaps instead of joined lines.
++		for date := report.RangeStart.UTC().Truncate(24 * time.Hour); !date.After(report.GeneratedAt.UTC().Truncate(24 * time.Hour)); date = date.AddDate(0, 0, 1) {
++			day := date.Format("2006-01-02")
++			raw := performanceUnweightedStats(work.daily[day])
++			point := PerformanceDay{Day: day, Raw: raw}
++			if raw.Samples < 3 {
++				point.Raw.Median = nil
++				point.Raw.P90 = nil
++				point.Raw.P10 = nil
++			}
++			if oneOfWork(work, eligible) && len(weights) > 0 {
++				point.Matched = performanceMatchedStats(work, weights, day, report.MinDailyCellSamples, report.MinDailySamples)
++			}
++			work.group.Days = append(work.group.Days, point)
++		}
++		report.Groups = append(report.Groups, work.group)
++	}
++	return report, nil
++}
++func isFinitePerformance(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
++func oneOfWork(w *performanceWork, all []*performanceWork) bool {
++	for _, x := range all {
++		if x == w {
++			return true
++		}
++	}
++	return false
++}
++func performanceCommonWeights(groups []*performanceWork, minCell, minTotal int) map[performanceCell]float64 {
++	weights := map[performanceCell]float64{}
++	if len(groups) < 2 {
++		return weights
++	}
++	for cell := range groups[0].cells {
++		common := true
++		for _, g := range groups {
++			if len(g.cells[cell]) < minCell {
++				common = false
++				break
++			}
++		}
++		if common {
++			weights[cell] = 0
++		}
++	}
++	totals := make([]int, len(groups))
++	for i, g := range groups {
++		for cell := range weights {
++			totals[i] += len(g.cells[cell])
++		}
++		if totals[i] < minTotal {
++			return map[performanceCell]float64{}
++		}
++	}
++	for cell := range weights {
++		for i, g := range groups {
++			weights[cell] += float64(len(g.cells[cell])) / float64(totals[i]) / float64(len(groups))
++		}
++	}
++	return weights
++}
++func performanceMatchedStats(work *performanceWork, weights map[performanceCell]float64, day string, minCell, minTotal int) PerformanceStats {
++	values := []weightedPerformanceValue{}
++	for cell, weight := range weights {
++		observations := work.cells[cell]
++		selected := []float64{}
++		for _, x := range observations {
++			if day == "" || day == x.day {
++				selected = append(selected, x.value)
++			}
++		}
++		// Never drop an unsupported cell and silently change the reference mix.
++		if len(selected) < minCell {
++			return PerformanceStats{}
++		}
++		for _, x := range selected {
++			values = append(values, weightedPerformanceValue{x, weight / float64(len(selected))})
++		}
++	}
++	if len(values) < minTotal {
++		return PerformanceStats{}
++	}
++	return performanceWeightedStats(values)
++}
++func performanceUnweightedStats(values []float64) PerformanceStats {
++	weighted := make([]weightedPerformanceValue, len(values))
++	for i, x := range values {
++		weighted[i] = weightedPerformanceValue{x, 1}
++	}
++	return performanceWeightedStats(weighted)
++}
++func performanceWeightedStats(values []weightedPerformanceValue) PerformanceStats {
++	stats := PerformanceStats{Samples: len(values)}
++	if len(values) == 0 {
++		return stats
++	}
++	sort.Slice(values, func(i, j int) bool { return values[i].value < values[j].value })
++	total := 0.0
++	for _, x := range values {
++		total += x.weight
++	}
++	quantile := func(q float64) *float64 {
++		sum := 0.0
++		for _, x := range values {
++			sum += x.weight
++			if sum+1e-12 >= q*total {
++				v := x.value
++				return &v
++			}
++		}
++		v := values[len(values)-1].value
++		return &v
++	}
++	stats.Median = quantile(.5)
++	stats.P90 = quantile(.9)
++	stats.P10 = quantile(.1)
++	return stats
++}
+diff --git a/internal/repository/test/account_performance_test.go b/internal/repository/test/account_performance_test.go
+new file mode 100644
+index 0000000..e0b20b9
+--- /dev/null
++++ b/internal/repository/test/account_performance_test.go
+@@ -0,0 +1,190 @@
++package test
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/repository"
++	"fmt"
++	"gorm.io/gorm"
++	"math"
++	"reflect"
++	"testing"
++	"time"
++)
++
++var performanceNow = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
++
++func performanceQuery(metric string) repository.PerformanceQuery {
++	return repository.PerformanceQuery{AuthIndex: "performance-account", Days: 30, Metric: metric, Now: performanceNow}
++}
++func seedPerformance(t *testing.T, db *gorm.DB, model string, input, latency int64, n int, at time.Time) {
++	t.Helper()
++	stream, generate := true, true
++	ttft := int64(1000)
++	for i := 0; i < n; i++ {
++		e := entities.UsageEvent{EventKey: fmt.Sprintf("%s-%d-%d-%d", model, input, at.UnixNano(), i), AuthType: "oauth", AuthIndex: "performance-account", Provider: "codex", Model: model, UpstreamServiceTier: "default", Timestamp: at, InputTokens: input, OutputTokens: 100, ReasoningEffort: "low", Stream: &stream, Generate: &generate, ExecutorType: "codex-websocket", LatencyMS: latency, TTFTMS: &ttft}
++		if err := db.Create(&e).Error; err != nil {
++			t.Fatal(err)
++		}
++	}
++}
++func getPerformance(t *testing.T, db *gorm.DB, q repository.PerformanceQuery) repository.PerformanceReport {
++	t.Helper()
++	report, err := repository.BuildAccountPerformance(context.Background(), db, q)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return report
++}
++func TestPerformanceMatchedDistributionsAndArchiveEquivalence(t *testing.T) {
++	db := openTestDatabase(t)
++	at := performanceNow.Add(-time.Hour)
++	seedPerformance(t, db, "a", 1000, 5000, 50, at)
++	seedPerformance(t, db, "a", 40000, 100000, 5, at)
++	seedPerformance(t, db, "b", 1000, 2000, 5, at)
++	seedPerformance(t, db, "b", 40000, 80000, 50, at)
++	seedPerformance(t, db, "a", 200000, 900000, 20, at)
++	failed := entities.UsageEvent{EventKey: "failed", AuthType: "oauth", AuthIndex: "performance-account", Provider: "codex", Model: "a", UpstreamServiceTier: "default", Timestamp: at, Failed: true, LatencyMS: 1}
++	if err := db.Create(&failed).Error; err != nil {
++		t.Fatal(err)
++	}
++	report := getPerformance(t, db, performanceQuery("latency"))
++	if report.CommonCells != 2 || report.ComparisonGroups != 2 {
++		t.Fatalf("wrong overlap: %+v", report)
++	}
++	a, b := report.Groups[0], report.Groups[1]
++	if *a.Raw.Median != 5 || *b.Raw.Median != 80 || *a.Matched.Median != 5 || *b.Matched.Median != 2 || *a.Matched.P90 != 100 || *b.Matched.P90 != 80 {
++		t.Fatalf("percentiles were not weighted request distributions: %+v %+v", a, b)
++	}
++	if a.Matched.Samples != 55 || a.Raw.Samples != 75 || a.Failed != 1 || math.Abs(a.Coverage-55.0/75) > 1e-12 {
++		t.Fatal("lost unmatched or failed coverage")
++	}
++	if err := db.Exec("INSERT INTO usage_events_archive (" + entities.UsageEventStorageColumns + ") SELECT " + entities.UsageEventStorageColumns + " FROM usage_events").Error; err != nil {
++		t.Fatal(err)
++	}
++	if err := db.Exec("DELETE FROM usage_events").Error; err != nil {
++		t.Fatal(err)
++	}
++	archived := getPerformance(t, db, performanceQuery("latency"))
++	if !reflect.DeepEqual(report, archived) {
++		t.Fatal("archiving changed performance distributions")
++	}
++}
++func TestPerformanceDailyFixedMixDoesNotDropUnsupportedBuckets(t *testing.T) {
++	db := openTestDatabase(t)
++	day1 := performanceNow.Add(-25 * time.Hour)
++	day2 := performanceNow.Add(-time.Hour)
++	for _, model := range []string{"a", "b"} {
++		seedPerformance(t, db, model, 1000, 2000, 15, day1)
++		seedPerformance(t, db, model, 40000, 8000, 15, day1)
++		seedPerformance(t, db, model, 1000, 2000, 30, day2)
++	}
++	report := getPerformance(t, db, performanceQuery("latency"))
++	for _, group := range report.Groups {
++		if group.Matched.Samples != 60 {
++			t.Fatal("missing supported summary")
++		}
++		for _, day := range group.Days {
++			if day.Day == day1.Format("2006-01-02") && day.Matched.Median == nil {
++				t.Fatal("supported day lost")
++			}
++			if day.Day == day2.Format("2006-01-02") && (day.Raw.Median == nil || day.Matched.Median != nil) {
++				t.Fatal("daily mix silently changed or raw disappeared")
++			}
++		}
++	}
++}
++func TestPerformanceRangeAccountProviderAndFilters(t *testing.T) {
++	db := openTestDatabase(t)
++	at := performanceNow.Add(-time.Hour)
++	seedPerformance(t, db, "a", 1000, 2000, 20, at)
++	seedPerformance(t, db, "b", 1000, 3000, 20, at)
++	seedPerformance(t, db, "old", 1000, 100000, 20, performanceNow.Add(-31*24*time.Hour))
++	for i, field := range []string{"auth_index", "provider", "auth_type"} {
++		seedPerformance(t, db, fmt.Sprintf("other%d", i), 1000, 2000, 3, at)
++		if err := db.Model(&entities.UsageEvent{}).Where("model = ?", fmt.Sprintf("other%d", i)).Update(field, "other").Error; err != nil {
++			t.Fatal(err)
++		}
++	}
++	seedPerformance(t, db, "future", 1000, 100000, 20, performanceNow)
++	q := performanceQuery("latency")
++	q.Models = []string{"b"}
++	q.Context = "small"
++	q.Output = "short"
++	q.Effort = "low"
++	report := getPerformance(t, db, q)
++	if len(report.Groups) != 1 || report.Groups[0].Model != "b" || report.Groups[0].Raw.Samples != 20 || report.CommonCells != 0 || !reflect.DeepEqual(report.Models, []string{"a", "b"}) {
++		t.Fatalf("isolation/filters/options failed: %+v", report)
++	}
++	q.Context = "large"
++	if len(getPerformance(t, db, q).Groups) != 0 {
++		t.Fatal("context filter ignored")
++	}
++}
++func TestPerformanceMissingInvalidTimingsAndPhaseFloor(t *testing.T) {
++	db := openTestDatabase(t)
++	at := performanceNow.Add(-time.Hour)
++	seedPerformance(t, db, "a", 1000, 2000, 8, at)
++	var events []entities.UsageEvent
++	if err := db.Find(&events).Error; err != nil {
++		t.Fatal(err)
++	}
++	changes := []map[string]any{{"ttft_ms": nil}, {"ttft_ms": 2000}, {"ttft_ms": -1}, {"ttft_ms": 1950}, {"stream": false}, {"stream": nil}, {"output_tokens": 1}, {"generate": false}}
++	for i, e := range events {
++		if err := db.Model(&entities.UsageEvent{}).Where("id = ?", e.ID).Updates(changes[i]).Error; err != nil {
++			t.Fatal(err)
++		}
++	}
++	if n := getPerformance(t, db, performanceQuery("phase")).Groups[0].Raw.Samples; n != 0 {
++		t.Fatalf("phase guessed from missing/unstable samples: %d", n)
++	}
++	if n := getPerformance(t, db, performanceQuery("ttft")).Groups[0].Raw.Samples; n != 4 {
++		t.Fatalf("invalid ttft included: %d", n)
++	}
++	if n := getPerformance(t, db, performanceQuery("latency")).Groups[0].Raw.Samples; n != 7 {
++		t.Fatalf("non-generation timing included: %d", n)
++	}
++	seedPerformance(t, db, "b", 1000, 2000, 20, at)
++	phase := getPerformance(t, db, performanceQuery("phase"))
++	if *phase.Groups[1].Raw.Median != 100 {
++		t.Fatal("wrong active-phase denominator")
++	}
++	tps := getPerformance(t, db, performanceQuery("tps"))
++	if *tps.Groups[1].Raw.Median != 50 {
++		t.Fatal("raw TPS changed")
++	}
++}
++func TestPerformanceUnknownModesSparseAndEffortMismatch(t *testing.T) {
++	db := openTestDatabase(t)
++	at := performanceNow.Add(-time.Hour)
++	for _, model := range []string{"a", "b", "unknown", "sparse"} {
++		n := 20
++		if model == "sparse" {
++			n = 3
++		}
++		seedPerformance(t, db, model, 1000, 2000, n, at)
++	}
++	db.Model(&entities.UsageEvent{}).Where("model = ?", "unknown").Update("upstream_service_tier", "")
++	db.Model(&entities.UsageEvent{}).Where("model = ?", "b").Update("reasoning_effort", "high")
++	report := getPerformance(t, db, performanceQuery("latency"))
++	if report.CommonCells != 0 {
++		t.Fatal("different reasoning effort matched")
++	}
++	db.Model(&entities.UsageEvent{}).Where("model = ?", "b").Update("reasoning_effort", "low")
++	report = getPerformance(t, db, performanceQuery("latency"))
++	if report.ComparisonGroups != 2 {
++		t.Fatal("unknown/sparse groups entered normalization")
++	}
++	for _, g := range report.Groups {
++		if (g.Model == "unknown" || g.Model == "sparse") && (g.Raw.Median == nil || g.Matched.Median != nil) {
++			t.Fatal("raw results lost or unsupported match invented")
++		}
++	}
++}
++func TestPerformanceValidation(t *testing.T) {
++	for _, q := range []repository.PerformanceQuery{{Days: 30, Metric: "latency"}, {AuthIndex: "a", Days: 1, Metric: "latency"}, {AuthIndex: "a", Days: 30, Metric: "guess"}, {AuthIndex: "a", Days: 30, Metric: "latency", Mode: "confirmed-fast"}} {
++		if repository.ValidatePerformanceQuery(q) == nil {
++			t.Fatal("invalid filters accepted")
++		}
++	}
++}
+diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+index ac8aec1..51c25a8 100644
+--- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
++++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+@@ -13,6 +13,7 @@ import { CredentialHealthPanel } from './CredentialHealthPanel'
+ import { CredentialPriorityBadge, cacheReadRateTone, credentialToneClassName, formatCredentialNumber, formatCredentialPercent, successRateTone } from './CredentialSectionShell'
+ import { CredentialSubscriptionBadge } from './CredentialSubscriptionBadge'
+ import { CredentialRequestEventsList } from './CredentialRequestEventsList'
++import { PerformancePanel } from './PerformancePanel'
+ import { WeeklyQuotaValuePanel } from './WeeklyQuotaValuePanel'
+ import { CodexQuotaHistoryPanel } from './CodexQuotaHistoryPanel'
+ import { formatCredentialTimestamp, type CredentialDetailSelection } from './credentialViewModels'
+@@ -22,7 +23,7 @@ import credentialStyles from './CredentialSections.module.scss'
+ const REQUEST_EVENTS_PAGE_SIZE = 50
+ const ERROR_EVENTS_PAGE_SIZE = 50
+ 
+-type CredentialDetailTab = 'overview' | 'quota-history' | 'requests' | 'errors'
++type CredentialDetailTab = 'overview' | 'quota-history' | 'performance' | 'requests' | 'errors'
+ 
+ interface CredentialDetailDrawerProps {
+   readOnly?: boolean
+@@ -91,6 +92,9 @@ export function CredentialDetailDrawer({
+ }: CredentialDetailDrawerProps) {
+   const { t } = useTranslation()
+   const overviewTabId = useId()
++  const performanceTabId = useId()
++  const performancePanelId = useId()
++  const performanceTabRef = useRef<HTMLButtonElement | null>(null)
+   const quotaHistoryTabId = useId()
+   const requestsTabId = useId()
+   const errorsTabId = useId()
+@@ -147,9 +151,15 @@ export function CredentialDetailDrawer({
+   }
+   const quotaHistoryProvider = selection?.kind === 'auth-file' ? identity?.type?.trim().toLowerCase() : undefined
+   const hasQuotaHistory = quotaHistoryProvider === 'codex' || (!readOnly && quotaHistoryProvider === 'claude')
+-  const availableTabs = useMemo<CredentialDetailTab[]>(() => hasQuotaHistory
+-    ? readOnly ? ['overview', 'quota-history', 'requests'] : ['overview', 'quota-history', 'requests', 'errors']
+-    : readOnly ? ['overview', 'requests'] : ['overview', 'requests', 'errors'], [hasQuotaHistory, readOnly])
++  const hasPerformance = quotaHistoryProvider === 'codex'
++  const availableTabs = useMemo<CredentialDetailTab[]>(() => {
++    const tabs: CredentialDetailTab[] = ['overview']
++    if (hasQuotaHistory) tabs.push('quota-history')
++    if (hasPerformance) tabs.push('performance')
++    tabs.push('requests')
++    if (!readOnly) tabs.push('errors')
++    return tabs
++  }, [hasQuotaHistory, hasPerformance, readOnly])
+ 
+   const resetRequestEvents = useCallback(() => {
+     firstPageControllerRef.current?.abort()
+@@ -194,8 +204,8 @@ export function CredentialDetailDrawer({
+ 
+   useEffect(() => {
+     // 同一身份同步后可能切换类型；失去历史能力时立即退出标签。
+-    if (activeTab === 'quota-history' && !hasQuotaHistory) setActiveTab('overview')
+-  }, [activeTab, hasQuotaHistory])
++    if ((activeTab === 'quota-history' && !hasQuotaHistory) || (activeTab === 'performance' && !hasPerformance)) setActiveTab('overview')
++  }, [activeTab, hasQuotaHistory, hasPerformance])
+ 
+   const loadFirstPage = useCallback(async () => {
+     if (!open || activeTab !== 'requests' || !sourceFilter) return
+@@ -307,6 +317,7 @@ export function CredentialDetailDrawer({
+       const target = {
+         overview: overviewTabRef.current,
+         'quota-history': quotaHistoryTabRef.current,
++        performance: performanceTabRef.current,
+         requests: requestsTabRef.current,
+         errors: errorsTabRef.current,
+       }[tab]
+@@ -315,7 +326,9 @@ export function CredentialDetailDrawer({
+   }, [onRequestLogClose])
+ 
+   const handleTabKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
+-    const currentTab: CredentialDetailTab = event.currentTarget === quotaHistoryTabRef.current
++    const currentTab: CredentialDetailTab = event.currentTarget === performanceTabRef.current
++      ? 'performance'
++      : event.currentTarget === quotaHistoryTabRef.current
+       ? 'quota-history'
+       : event.currentTarget === requestsTabRef.current
+         ? 'requests'
+@@ -476,6 +489,7 @@ export function CredentialDetailDrawer({
+                 {quotaHistoryProvider === 'codex' ? t('weekly_quota.tab', 'Weekly value') : t('usage_stats.credentials_quota_history_tab')}
+               </button>
+             ) : null}
++            {hasPerformance && <button ref={performanceTabRef} id={performanceTabId} type="button" role="tab" className={styles.tabButton} aria-selected={activeTab === 'performance'} aria-controls={performancePanelId} tabIndex={activeTab === 'performance' ? 0 : -1} data-credential-detail-tab="performance" onClick={() => activateTab('performance')} onKeyDown={handleTabKeyDown}>{t('performance.title', 'Performance')}</button>}
+             <button
+               ref={requestsTabRef}
+               id={requestsTabId}
+@@ -587,6 +601,10 @@ export function CredentialDetailDrawer({
+               ? <WeeklyQuotaValuePanel key={sourceFilter} authIndex={sourceFilter} readOnlyAccountId={readOnly ? identityId : undefined} onAuthRequired={onAuthRequired} />
+               : <CodexQuotaHistoryPanel key={sourceFilter} authIndex={sourceFilter} onAuthRequired={onAuthRequired} />}
+           </section>
++        ) : activeTab === 'performance' && hasPerformance ? (
++          <section id={performancePanelId} role="tabpanel" aria-labelledby={performanceTabId} className={styles.quotaHistoryPanel}>
++            <PerformancePanel key={sourceFilter} authIndex={sourceFilter} readOnlyAccountId={readOnly ? identityId : undefined} onAuthRequired={onAuthRequired} />
++          </section>
+         ) : activeTab === 'requests' ? (
+           <section id={requestsPanelId} role="tabpanel" aria-labelledby={requestsTabId} className={styles.requestsPanel}>
+             {eventsError ? <div className={styles.requestError} role="status">{eventsError}</div> : null}
+diff --git a/web/src/components/usage/credentials/PerformancePanel.module.scss b/web/src/components/usage/credentials/PerformancePanel.module.scss
+new file mode 100644
+index 0000000..c72d98a
+--- /dev/null
++++ b/web/src/components/usage/credentials/PerformancePanel.module.scss
+@@ -0,0 +1,2 @@
++.workload { border: 1px solid var(--border-color, #80808040); border-radius: 8px; padding: 12px; summary { cursor: pointer; font-size: 13px; } }
++.models { display: flex; gap: 8px 16px; flex-wrap: wrap; padding: 12px 0; label { display: flex; gap: 6px; align-items: center; font-size: 13px; } }
+diff --git a/web/src/components/usage/credentials/PerformancePanel.tsx b/web/src/components/usage/credentials/PerformancePanel.tsx
+new file mode 100644
+index 0000000..ed693f4
+--- /dev/null
++++ b/web/src/components/usage/credentials/PerformancePanel.tsx
+@@ -0,0 +1,120 @@
++import { useEffect, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++import { Chart } from 'react-chartjs-2'
++import type { ChartData, ChartOptions } from 'chart.js'
++import '@/lib/chartjs'
++import { ApiError, fetchAccountPerformance } from '@/lib/api'
++import type { PerformanceReport, PerformanceStats } from '@/lib/types'
++import { Button } from '@/components/ui/Button'
++import { useThemeStore } from '@/stores'
++import { getUsageChartTheme, USAGE_CHART_COMPOSITION_COLORS } from '@/utils/usage/chartConfig'
++import styles from './WeeklyQuotaValuePanel.module.scss'
++import performanceStyles from './PerformancePanel.module.scss'
++
++export function PerformancePanel({ authIndex, readOnlyAccountId, onAuthRequired }: { authIndex: string; readOnlyAccountId?: string; onAuthRequired?: () => void }) {
++  const { t, i18n } = useTranslation()
++  const isDark = useThemeStore(state => state.resolvedTheme) === 'dark'
++  const [days, setDays] = useState('30')
++  const [metric, setMetric] = useState('latency')
++  const [mode, setMode] = useState('')
++  const [context, setContext] = useState('')
++  const [output, setOutput] = useState('')
++  const [effort, setEffort] = useState('')
++  const [models, setModels] = useState<string[]>([])
++  const [basis, setBasis] = useState<'raw' | 'matched'>('raw')
++  const [tail, setTail] = useState(false)
++  const [revision, setRevision] = useState(0)
++  const [result, setResult] = useState<{ key: string; report?: PerformanceReport; error?: boolean }>()
++  const [options, setOptions] = useState<{ models: string[]; efforts: string[] }>({ models: [], efforts: [] })
++  const requestKey = JSON.stringify([authIndex, readOnlyAccountId, days, metric, mode, context, output, effort, models, revision])
++  const loading = result?.key !== requestKey
++  const report = loading ? undefined : result?.report
++  useEffect(() => {
++    const controller = new AbortController()
++    fetchAccountPerformance(authIndex, { readOnlyAccountId, days, metric, mode, context, output, effort, models }, controller.signal)
++      .then(report => {
++        if (controller.signal.aborted) return
++        setResult({ key: requestKey, report })
++        setOptions({ models: report.models, efforts: report.efforts })
++      })
++      .catch((error: unknown) => {
++        if (controller.signal.aborted) return
++        if (error instanceof ApiError && error.status === 401) onAuthRequired?.()
++        setResult({ key: requestKey, error: true })
++      })
++    return () => controller.abort()
++  }, [authIndex, readOnlyAccountId, days, metric, mode, context, output, effort, models, requestKey, onAuthRequired])
++  const speed = metric === 'tps' || metric === 'phase'
++  const unit = speed ? 'tokens/s' : 's'
++  const format = (value: number | null | undefined) => value == null ? '—' : `${new Intl.NumberFormat(i18n.language, { maximumFractionDigits: 2 }).format(value)} ${unit}`
++  const modeName = (value: string) => value === 'fast' ? t('weekly_quota.fast', 'Fast requested') : value === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
++  const statValue = (stats: PerformanceStats) => tail ? speed ? stats.p10 : stats.p90 : stats.median
++  const dates = report?.groups[0]?.days.map(point => point.day) ?? []
++  const data: ChartData<'line', Array<number | null>, string> = {
++    labels: dates.map(day => new Date(`${day}T00:00:00Z`).toLocaleDateString(i18n.language, { month: 'short', day: 'numeric', timeZone: 'UTC' })),
++    datasets: report?.groups.map(group => {
++      const color = USAGE_CHART_COMPOSITION_COLORS[report.models.indexOf(group.model) % USAGE_CHART_COMPOSITION_COLORS.length].base
++      return { label: `${group.model} · ${modeName(group.mode)}`, data: group.days.map(point => statValue(point[basis])), borderColor: color, backgroundColor: color, borderDash: group.mode === 'fast' ? [7, 3] : group.mode === 'unknown' ? [2, 4] : [], borderWidth: 2, pointRadius: 3, spanGaps: false, tension: 0 }
++    }) ?? [],
++  }
++  const theme = getUsageChartTheme(isDark)
++  const chartOptions: ChartOptions<'line'> = {
++    responsive: true, maintainAspectRatio: false, animation: false,
++    interaction: { mode: 'index', intersect: false },
++    plugins: {
++      legend: { position: 'bottom', labels: { color: theme.textSecondary, boxWidth: 20, boxHeight: 2 } },
++      tooltip: { callbacks: {
++        label: item => `${item.dataset.label}: ${format(item.parsed.y)}`,
++        afterLabel: item => `${report?.groups[item.datasetIndex]?.days[item.dataIndex]?.[basis].samples ?? 0} ${t('performance.samples', 'timed requests')}`,
++      } },
++    },
++    scales: { x: { ticks: { color: theme.textSecondary, maxTicksLimit: 8 }, grid: { display: false } }, y: { beginAtZero: true, title: { display: true, text: unit, color: theme.textSecondary }, ticks: { color: theme.textSecondary }, grid: { color: theme.grid } } },
++  }
++  const select = (label: string, value: string, change: (value: string) => void, values: Array<[string, string]>) => <label>{label}<select aria-label={label} value={value} onChange={event => change(event.target.value)}>{values.map(([key, name]) => <option key={key} value={key}>{name}</option>)}</select></label>
++  const all = t('performance.all', 'All')
++  const hasChart = data.datasets.some(group => group.data.some(value => value != null))
++  return <div className={`${styles.panel} ${styles.trends}`} data-account-performance="true">
++    <div className={styles.toolbar}><h3>{t('performance.title', 'Performance')}</h3><Button size="sm" disabled={loading} onClick={() => setRevision(value => value + 1)}>{t('common.refresh', 'Refresh')}</Button></div>
++    <p className={styles.note}>{t('performance.scope', 'Recorded API requests for this shared account, across all client keys, including archived requests. Timings are measured by the proxy; client network, tool execution and complete agent tasks are not measured here.')}</p>
++    <div className={styles.filters}>
++      {select(t('performance.period', 'Period'), days, setDays, [['7', '7 days'], ['30', '30 days'], ['90', '90 days']])}
++      {select(t('performance.metric', 'Metric'), metric, setMetric, [['latency', t('performance.completion', 'Time to completion')], ['ttft', t('performance.ttft', 'First token (recorded)')], ['tps', t('performance.tps', 'End-to-end output tokens / second')], ['phase', t('performance.phase', 'Approximate phase tokens / second')]])}
++      {select(t('weekly_trends.mode', 'Mode'), mode, setMode, [['', all], ['normal', modeName('normal')], ['fast', modeName('fast')], ['unknown', modeName('unknown')]])}
++    </div>
++    <details className={performanceStyles.workload}><summary>{t('performance.workload', 'Models and workload filters')}</summary>
++      <div className={performanceStyles.models}><label><input type="checkbox" checked={!models.length} onChange={() => setModels([])} />{t('weekly_trends.all_models', 'All models')}</label>{options.models.map(model => <label key={model}><input type="checkbox" checked={!models.length || models.includes(model)} onChange={event => setModels(current => {
++        const selected = current.length ? current : options.models
++        const next = event.target.checked ? [...new Set([...selected, model])] : selected.filter(value => value !== model)
++        return next.length ? next.sort() : current
++      })} />{model}</label>)}</div>
++      <div className={styles.filters}>
++        {select(t('performance.context', 'Input size'), context, setContext, [['', all], ['small', '< 8k tokens'], ['medium', '8k–32k tokens'], ['large', '32k–128k tokens'], ['huge', '128k+ tokens']])}
++        {select(t('performance.output', 'Total output size'), output, setOutput, [['', all], ['short', '< 256 tokens'], ['medium', '256–1,024 tokens'], ['long', '1,024–4,096 tokens'], ['huge', '4,096+ tokens']])}
++        {select(t('performance.effort', 'Reasoning effort'), effort, setEffort, [['', all], ...options.efforts.map(value => [value, value] as [string, string])])}
++      </div>
++    </details>
++    {loading && <p role="status">{t('common.loading', 'Loading…')}</p>}
++    {!loading && result?.error && <p role="alert">{t('performance.error', 'Unable to load performance. Use Refresh to retry.')}</p>}
++    {report && <>
++      <p className={styles.note}>{t('performance.range', 'Recorded range')}: {new Date(report.range_start).toLocaleString(i18n.language)} – {new Date(report.generated_at).toLocaleString(i18n.language)}</p>
++      <p className={styles.note}>{speed ? t('performance.speed_direction', 'Higher is faster. Slow tail uses p10: 10% of timed requests are this slow or slower.') : t('performance.time_direction', 'Lower is faster. Slow tail uses p90: 10% of timed requests take this long or longer.')} {t('performance.distribution', 'Median and tail are request percentiles, not averages of model or bucket percentiles.')}</p>
++      <div className={styles.scroll}><table><thead><tr><th>{t('performance.group', 'Model / mode')}</th><th>{t('performance.raw', 'Actual workload')}</th><th>{t('performance.matched', 'Same workload mix')}</th><th>{t('performance.coverage', 'Matched coverage')}</th></tr></thead><tbody>{report.groups.map(group => <tr key={JSON.stringify([group.model, group.mode])}>
++        <td><strong>{group.model}</strong><small>{modeName(group.mode)}</small><small>{group.requests} {t('weekly_quota.requests', 'requests')} · {group.failed} {t('performance.failed', 'failed')}</small></td>
++        <td><strong>{format(group.raw.median)}</strong><small>{t('performance.median', 'Median')}</small><small>{speed ? 'p10' : 'p90'}: {format(speed ? group.raw.p10 : group.raw.p90)}</small><small>{group.raw.samples} {t('performance.samples', 'timed requests')}</small></td>
++        <td><strong>{group.matched.median == null ? t('performance.insufficient', 'Insufficient overlap') : format(group.matched.median)}</strong>{group.matched.median != null && <><small>{t('performance.median', 'Median')}</small><small>{speed ? 'p10' : 'p90'}: {format(speed ? group.matched.p10 : group.matched.p90)}</small></>}</td>
++        <td><strong>{group.matched.samples} / {group.raw.samples}</strong><small>{new Intl.NumberFormat(i18n.language, { style: 'percent', maximumFractionDigits: 1 }).format(group.coverage)} {t('performance.covered', 'of valid timings')}</small></td>
++      </tr>)}</tbody></table></div>
++      {!report.groups.length && <p role="status">{t('performance.empty', 'No recorded requests match these filters.')}</p>}
++      <p className={styles.note}>{t('performance.match_note', 'Matching uses common input/output size buckets, cache share (<50%, 50–90%, 90%+), exact recorded reasoning effort, streaming status and executor/transport. Each eligible model/mode contributes equally to one fixed reference workload mix for this report. Weighted request distributions produce the matched percentiles; unshared workloads are excluded. Unknown recorded fields match only unknown fields, so task difficulty and unrecorded differences can still affect comparisons.')}</p>
++      <p className={styles.note}>{report.comparison_groups} {t('performance.compared_groups', 'model/mode groups compared')} · {report.common_cells} {t('performance.common_cells', 'common workload buckets')}. {t('performance.floors', 'Matched comparisons need at least 2 groups, 20 valid timings per group and 5 per common bucket. Groups below the floor or with uncaptured mode retain raw results only. These floors do not establish statistical confidence.')}</p>
++      <h4>{t('performance.over_time', 'Performance over time')}</h4>
++      <div className={styles.filters}>
++        {select(t('performance.basis', 'Comparison'), basis, value => setBasis(value as 'raw' | 'matched'), [['raw', t('performance.raw', 'Actual workload')], ['matched', t('performance.matched', 'Same workload mix')]])}
++        {select(t('performance.percentile', 'Percentile'), tail ? 'tail' : 'median', value => setTail(value === 'tail'), [['median', t('performance.typical', 'Typical — median')], ['tail', speed ? 'Slow tail — p10' : 'Slow tail — p90']])}
++      </div>
++      {hasChart ? <div className={styles.chart}><Chart type="line" data={data} options={chartOptions} role="img" aria-label={t('performance.over_time', 'Performance over time')} /></div> : <p role="status">{t('performance.no_chart', 'Not enough supported daily samples for this comparison. Try Actual workload or a longer period.')}</p>}
++      <p className={styles.note}>{t('performance.daily_note', 'Daily UTC buckets; today and the first day may be partial. Raw points need 3 valid timings. Matched points require 20 timings and 3 in every reference bucket; missing buckets stay gaps and never change the reference mix. The fixed mix describes the selected reporting period, not a forecast.')}</p>
++      <p className={styles.note}>{t('performance.timing_note', 'First token is the existing recorded timing and may be reasoning, tool arguments or a fallback event; first visible text is not separately recorded. Output tokens include reasoning. End-to-end TPS includes startup and reasoning time. Phase TPS approximates output divided by (completion time − first-token time), only for streaming requests with at least 32 output tokens and 250 ms after first token; it is not measured visible-text decode speed. Failed requests are counted separately and excluded from timing comparisons.')}</p>
++    </>}
++  </div>
++}
+diff --git a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
+index 7ec63ed..8b6109d 100644
+--- a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
+@@ -10,11 +10,13 @@ import { CredentialDetailDrawer } from '../CredentialDetailDrawer'
+ const fetchUsageEvents = vi.fn()
+ const fetchErrorEvents = vi.fn()
+ const fetchCodexQuotaHistory = vi.fn()
++const fetchAccountPerformance = vi.fn()
+ 
+ vi.mock('@/lib/api', async (importOriginal) => {
+   const actual = await importOriginal<typeof import('@/lib/api')>()
+   return {
+     ...actual,
++    fetchAccountPerformance: (...args: unknown[]) => fetchAccountPerformance(...args),
+     fetchCodexQuotaHistory: (...args: unknown[]) => fetchCodexQuotaHistory(...args),
+     fetchErrorEvents: (...args: unknown[]) => fetchErrorEvents(...args),
+     fetchUsageEvents: (...args: unknown[]) => fetchUsageEvents(...args),
+@@ -224,6 +226,8 @@ describe('CredentialDetailDrawer', () => {
+     fetchErrorEvents.mockResolvedValueOnce(errorResponse('error-1', 'error-cursor-1')).mockResolvedValueOnce(errorResponse('error-2'))
+     fetchCodexQuotaHistory.mockReset()
+     fetchCodexQuotaHistory.mockResolvedValue(quotaHistoryResponse)
++    fetchAccountPerformance.mockReset()
++    fetchAccountPerformance.mockResolvedValue({ models: [], efforts: [], groups: [], generated_at: "2026-10-09T12:00:00Z", range_start: "2026-10-08T12:00:00Z", comparison_groups: 0, common_cells: 0 })
+     container = document.createElement('div')
+     document.body.appendChild(container)
+     root = createRoot(container)
+@@ -274,6 +278,7 @@ describe('CredentialDetailDrawer', () => {
+ 
+     await renderDrawer({ selection: unsupportedAuthFileSelection })
+     expect(document.body.querySelector('[data-credential-detail-tab="quota-history"]')).toBeNull()
++    expect(document.body.querySelector('[data-credential-detail-tab="performance"]')).toBeNull()
+     expect(document.body.querySelector('[data-credential-detail-tab="overview"]')?.getAttribute('aria-selected')).toBe('true')
+   })
+ 
+@@ -310,7 +315,13 @@ describe('CredentialDetailDrawer', () => {
+     await act(async () => {
+       quotaTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+     })
++    const performanceTab = document.body.querySelector<HTMLButtonElement>('[data-credential-detail-tab="performance"]')!
++    expect(document.activeElement).toBe(performanceTab)
++    expect(fetchAccountPerformance).toHaveBeenCalledWith('auth-file-identity-1', expect.objectContaining({ days: '30', metric: 'latency' }), expect.any(AbortSignal))
++    const signal = fetchAccountPerformance.mock.lastCall?.[2] as AbortSignal
++    await act(async () => { performanceTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+     expect(document.activeElement).toBe(requestsTab)
++    expect(signal.aborted).toBe(true)
+   })
+ 
+   it('renders Overview metrics with the list thresholds and recent cache rate', async () => {
+diff --git a/web/src/components/usage/test/PerformancePanel.test.tsx b/web/src/components/usage/test/PerformancePanel.test.tsx
+new file mode 100644
+index 0000000..bd7e1f2
+--- /dev/null
++++ b/web/src/components/usage/test/PerformancePanel.test.tsx
+@@ -0,0 +1,78 @@
++// @vitest-environment happy-dom
++import { act } from 'react'
++import { createRoot, type Root } from 'react-dom/client'
++import { afterEach, beforeEach, expect, it, vi } from 'vitest'
++import type { ChartData } from 'chart.js'
++import i18n from '@/i18n'
++import { ApiError } from '@/lib/api'
++import type { PerformanceReport, PerformanceStats } from '@/lib/types'
++import { PerformancePanel } from '../credentials/PerformancePanel'
++const mocks = vi.hoisted(() => ({ fetch: vi.fn(), charts: new Map<string, ChartData<'line', Array<number | null>, string>>() }))
++vi.mock('@/lib/api', async original => ({ ...await original<typeof import('@/lib/api')>(), fetchAccountPerformance: (...args: unknown[]) => mocks.fetch(...args) }))
++vi.mock('react-chartjs-2', () => ({ Chart: (props: { data: ChartData<'line', Array<number | null>, string>; 'aria-label': string }) => { mocks.charts.set(props['aria-label'], props.data); return <div role="img" aria-label={props['aria-label']} /> } }))
++const stats = (median: number | null = 2): PerformanceStats => ({ samples: median == null ? 0 : 20, median, p90: median == null ? null : 5, p10: median == null ? null : 1 })
++const fixture = (): PerformanceReport => ({ generated_at: '2026-10-09T12:00:00Z', range_start: '2026-10-08T12:00:00Z', metric: 'latency', models: ['a', 'b'], efforts: ['low', 'unknown'], min_samples: 20, min_cell_samples: 5, min_daily_samples: 20, min_daily_cell_samples: 3, common_cells: 1, comparison_groups: 2, groups: [
++  { model: 'a', mode: 'normal', requests: 41, failed: 1, raw: { ...stats(4), samples: 40 }, matched: stats(2), coverage: .5, days: [{ day: '2026-10-08', raw: stats(4), matched: stats(null) }, { day: '2026-10-09', raw: stats(4), matched: stats(2) }] },
++  { model: 'b', mode: 'fast', requests: 20, failed: 0, raw: stats(3), matched: stats(3), coverage: 1, days: [{ day: '2026-10-08', raw: stats(3), matched: stats(null) }, { day: '2026-10-09', raw: stats(3), matched: stats(3) }] },
++] })
++let element: HTMLDivElement; let root: Root
++beforeEach(async () => { globalThis.IS_REACT_ACT_ENVIRONMENT = true; await i18n.changeLanguage('en'); mocks.fetch.mockReset(); mocks.charts.clear(); mocks.fetch.mockResolvedValue(fixture()); element = document.createElement('div'); document.body.append(element); root = createRoot(element) })
++afterEach(async () => { await act(async () => root.unmount()); element.remove() })
++const render = async (props: Parameters<typeof PerformancePanel>[0] = { authIndex: 'account' }) => { await act(async () => root.render(<PerformancePanel {...props} />)) }
++const change = async (label: string, value: string) => { const select = element.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!; await act(async () => { select.value = value; select.dispatchEvent(new Event('change', { bubbles: true })) }) }
++it('shows separate actual/matched percentiles, coverage, failures and fixed-mix gaps', async () => {
++  await render()
++  expect(element.textContent).toContain('Time to completion')
++  expect(element.textContent).toContain('20 / 40')
++  expect(element.textContent).toContain('50%')
++  expect(element.textContent).toContain('41 requests · 1 failed')
++  expect(element.textContent).toContain('first visible text is not separately recorded')
++  await change('Comparison', 'matched')
++  const data = mocks.charts.get('Performance over time')!
++  expect(data.datasets[0].data).toEqual([null, 2])
++  expect(data.datasets[1].borderDash).toEqual([7, 3])
++  expect(data.datasets[0].spanGaps).toBe(false)
++  await change('Comparison', 'raw')
++  expect(mocks.charts.get('Performance over time')!.datasets[0].data).toEqual([4, 4])
++  await change('Percentile', 'tail')
++  expect(mocks.charts.get('Performance over time')!.datasets[0].data).toEqual([5, 5])
++  expect(mocks.fetch).toHaveBeenCalledTimes(1)
++})
++it('uses p10 for slow throughput and forwards model, period and workload filters', async () => {
++  await render()
++  await change('Metric', 'tps'); await change('Period', '7'); await change('Input size', 'large'); await change('Total output size', 'long'); await change('Reasoning effort', 'low'); await change('Mode', 'fast')
++  const checkboxes = [...element.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
++  await act(async () => checkboxes[1].click())
++  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ metric: 'tps', days: '7', context: 'large', output: 'long', effort: 'low', mode: 'fast', models: ['b'] })
++  await change('Comparison', 'raw'); await change('Percentile', 'tail')
++  expect(mocks.charts.get('Performance over time')!.datasets[0].data).toEqual([1, 1])
++  expect(element.textContent).toContain('Higher is faster')
++})
++it('preserves insufficient overlap without zero speeds or fabricated lines', async () => {
++  const report = fixture(); report.comparison_groups = 0; report.common_cells = 0
++  report.groups.forEach(group => { group.matched = stats(null); group.coverage = 0; group.days.forEach(day => { day.matched = stats(null) }) })
++  mocks.fetch.mockResolvedValue(report); await render(); await change('Comparison', 'matched')
++  expect(element.textContent).toContain('Insufficient overlap')
++  expect(element.querySelector('[role="img"]')).toBeNull()
++  expect(element.textContent).toContain('Try Actual workload')
++  await change('Comparison', 'raw'); expect(element.querySelector('[role="img"]')).not.toBeNull()
++})
++it('aborts account/filter requests and ignores late responses while routing read-only accounts', async () => {
++  let resolve: (report: PerformanceReport) => void = () => undefined
++  mocks.fetch.mockImplementationOnce(() => new Promise<PerformanceReport>(done => { resolve = done }))
++  await render({ authIndex: 'private', readOnlyAccountId: '3' })
++  const firstSignal = mocks.fetch.mock.calls[0][2] as AbortSignal
++  await render({ authIndex: 'other', readOnlyAccountId: '4' })
++  expect(firstSignal.aborted).toBe(true)
++  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ readOnlyAccountId: '4' })
++  const old = fixture(); old.groups[0].model = 'late-old-model'
++  await act(async () => resolve(old))
++  expect(element.textContent).not.toContain('late-old-model')
++})
++it('reports authentication expiry and allows retry after an error', async () => {
++  const onAuthRequired = vi.fn(); mocks.fetch.mockRejectedValueOnce(new ApiError('Expired', 401))
++  await render({ authIndex: 'account', onAuthRequired })
++  expect(onAuthRequired).toHaveBeenCalledTimes(1); expect(element.querySelector('[role="alert"]')).not.toBeNull()
++  await act(async () => element.querySelector<HTMLButtonElement>('button')!.click())
++  expect(element.querySelector('[role="alert"]')).toBeNull()
++})
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index c3fba5c..589df84 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -1110,3 +1110,14 @@ export async function fetchReadOnlyReport<T>(path: string, params = new URLSearc
+  const response=await apiFetch(apiPath('/read-only/'+path)+'?'+params.toString(),{signal,cache:'no-store'});
+  if(!response.ok) await parseApiError(response,'Unable to load reporting data');return response.json();
+ }
++
++export interface AccountPerformanceOptions { readOnlyAccountId?: string; days: string; metric: string; models: string[]; mode: string; context: string; output: string; effort: string }
++export async function fetchAccountPerformance(authIndex: string, options: AccountPerformanceOptions, signal?: AbortSignal): Promise<import('./types').PerformanceReport> {
++  const params = new URLSearchParams({ days: options.days, metric: options.metric })
++  for (const model of options.models) params.append('model', model)
++  for (const key of ['mode', 'context', 'output', 'effort'] as const) if (options[key]) params.set(key, options[key])
++  const path = options.readOnlyAccountId ? `/read-only/accounts/${encodeURIComponent(options.readOnlyAccountId)}/performance` : `/quota/performance/${encodeURIComponent(authIndex)}`
++  const response = await apiFetch(`${apiPath(path)}?${params}`, { signal })
++  if (!response.ok) await parseApiError(response, `Failed to load performance: ${response.status}`)
++  return response.json()
++}
+diff --git a/web/src/lib/test/api.test.ts b/web/src/lib/test/api.test.ts
+index b5262a7..1d9e1d6 100644
+--- a/web/src/lib/test/api.test.ts
++++ b/web/src/lib/test/api.test.ts
+@@ -1,5 +1,5 @@
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+-import { ApiError, appPath, isUsageRangeBoundsConflict, createUsageEventRequestLogDownloadURL, deleteAuthFiles, exportUsageEvents, fetchAnalysis, fetchAnalysisLatency, fetchAuthSessions, fetchCodexQuotaHistory, fetchCpaApiKeyOptions, fetchCpaApiKeys, fetchCpaApiKeySettings, fetchKeyActivity, fetchKeyAnalysis, fetchKeyAnalysisLatency, fetchKeyOverview, fetchKeyOverviewRealtime, fetchQuotaAutoRefreshSettings, fetchUsageActivity, fetchUsageOverview, fetchUsageOverviewRealtime, fetchUsageQuotaCache, fetchUsageQuotaInspectionStatus, fetchUsageQuotaResetCredits, fetchUpdateCheck, fetchUsageEventModelFilterOptions, fetchUsageEventRequestLog, fetchUsageEventSourceFilterOptions, fetchUsageEvents, fetchUsageIdentities, fetchUsageIdentitiesPage, fetchUsageQuotaRefreshTask, fetchVersion, loginWithCPAAPIKey, logout, refreshUsageQuotas, resetUsageQuota, revokeAuthSession, setAuthFilesDisabled, setCredentialDisabled, setCredentialPriority, startUsageQuotaInspection, updateAuthSessionAlias, updateCpaApiKeyAlias, updateQuotaAutoRefreshSettings } from '../api';
++import { ApiError, fetchAccountPerformance, appPath, isUsageRangeBoundsConflict, createUsageEventRequestLogDownloadURL, deleteAuthFiles, exportUsageEvents, fetchAnalysis, fetchAnalysisLatency, fetchAuthSessions, fetchCodexQuotaHistory, fetchCpaApiKeyOptions, fetchCpaApiKeys, fetchCpaApiKeySettings, fetchKeyActivity, fetchKeyAnalysis, fetchKeyAnalysisLatency, fetchKeyOverview, fetchKeyOverviewRealtime, fetchQuotaAutoRefreshSettings, fetchUsageActivity, fetchUsageOverview, fetchUsageOverviewRealtime, fetchUsageQuotaCache, fetchUsageQuotaInspectionStatus, fetchUsageQuotaResetCredits, fetchUpdateCheck, fetchUsageEventModelFilterOptions, fetchUsageEventRequestLog, fetchUsageEventSourceFilterOptions, fetchUsageEvents, fetchUsageIdentities, fetchUsageIdentitiesPage, fetchUsageQuotaRefreshTask, fetchVersion, loginWithCPAAPIKey, logout, refreshUsageQuotas, resetUsageQuota, revokeAuthSession, setAuthFilesDisabled, setCredentialDisabled, setCredentialPriority, startUsageQuotaInspection, updateAuthSessionAlias, updateCpaApiKeyAlias, updateQuotaAutoRefreshSettings } from '../api';
+ 
+ const headerValue = (init: RequestInit | undefined, name: string): string | null => new Headers(init?.headers).get(name);
+ 
+@@ -955,3 +955,19 @@ describe('fetchUsageEvents', () => {
+     expect(init).toMatchObject({ credentials: 'include', signal });
+   });
+ });
++
++it('routes performance by server-resolved account and preserves repeated model filters and base path', async () => {
++  vi.stubGlobal('window', { __APP_BASE_PATH__: '/keeper' });
++  const fetchMock = mockJSON({});
++  const signal = new AbortController().signal;
++  const options = { days: '30', metric: 'latency', models: ['a', 'b'], mode: 'fast', context: 'large', output: 'long', effort: 'low' };
++  await fetchAccountPerformance('private/account', options, signal);
++  await fetchAccountPerformance('private/account', { ...options, readOnlyAccountId: '3' }, signal);
++  const adminURL = new URL(String(fetchMock.mock.calls[0][0]), 'http://localhost');
++  const readOnlyURL = new URL(String(fetchMock.mock.calls[1][0]), 'http://localhost');
++  expect(adminURL.pathname).toBe('/keeper/api/v1/quota/performance/private%2Faccount');
++  expect(adminURL.searchParams.getAll('model')).toEqual(['a', 'b']);
++  expect(readOnlyURL.pathname).toBe('/keeper/api/v1/read-only/accounts/3/performance');
++  expect(readOnlyURL.toString()).not.toContain('private');
++  expect(fetchMock.mock.calls[1][1]).toMatchObject({ signal, credentials: 'include' });
++});
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 36cc6df..7f6d951 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -979,3 +979,8 @@ export interface WeeklyTrendPoint {
+  speed_requests: number; speed_tps: number | null; ttft_requests: number; mean_ttft_ms: number | null;
+  sample_intervals: number; sample_requests: number; percentage_points: number; full_allowance_usd: number | null;
+ }
++
++export interface PerformanceStats { samples: number; median: number | null; p90: number | null; p10: number | null }
++export interface PerformanceDay { day: string; raw: PerformanceStats; matched: PerformanceStats }
++export interface PerformanceGroup { model: string; mode: string; requests: number; failed: number; raw: PerformanceStats; matched: PerformanceStats; coverage: number; days: PerformanceDay[] }
++export interface PerformanceReport { generated_at: string; range_start: string; metric: string; models: string[]; efforts: string[]; groups: PerformanceGroup[]; common_cells: number; comparison_groups: number; min_samples: number; min_cell_samples: number; min_daily_samples: number; min_daily_cell_samples: number }

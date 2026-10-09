@@ -148,3 +148,47 @@ samples; hover for sample counts. Missing timing remains unavailable. Historical
 uncaptured modes stay separate. Solid lines indicate Normal, dashed lines Fast
 requested, and dotted lines unknown modes. Graphs do not establish confirmed
 provider execution tiers or change billing or pricing rules.
+
+
+## Account performance
+
+Open **Auth Files → Codex account → Performance** in the admin or all-key
+read-only dashboard. Compare models and outgoing Normal/Fast requested mode
+over 7, 30 or 90 days; account request history is independent of quota windows.
+Existing Weekly value raw speed graphs remain available. Performance is shared
+account reporting across all client keys and includes archived requests. The
+report reads local stored metadata only, without provider calls or prompts.
+
+Choose completion time, recorded first-token time, end-to-end output TPS or
+approximate phase TPS. Time uses median and p90 (slow tail); speed uses median
+and p10 (slow tail). Raw charts describe actual workload. The matched table
+and optional matched chart use empirical weighted request distributions, not
+an average of bucket/model percentiles. Failed requests remain counted and
+are excluded from timings; non-generation events and invalid timings are excluded.
+
+Matching uses common cells of input tokens (<8k, 8k–32k, 32k–128k, 128k+),
+total output tokens (<256, 256–1,024, 1,024–4,096, 4,096+), cache-read share
+(<50%, 50–90%, 90%+), exact recorded reasoning effort, streaming status and
+executor/transport. Each eligible group contributes equally to a fixed reference
+mix: average the groups' workload proportions after restricting to common cells.
+Every group then receives those same cell weights. At least two captured-mode
+groups, twenty timings per group and five per common cell are required. Unknown
+modes and sparse groups retain raw results only. Coverage shows the actual
+number/fraction of timings retained, and filters can narrow the compared models.
+Missing recorded dimensions match only equally unknown values. Broad size
+buckets cannot control all task differences, and sample floors are not confidence
+guarantees or a comparison of answer quality.
+
+Daily UTC points keep one fixed reference mix within the selected reporting
+period. Raw daily points need three timings; matched
+points need twenty overall and three in every reference cell. Missing evidence
+is a gap rather than a changed mix or extrapolation. First/current days can be
+partial. The reference mix describes the selected period, not a forecast.
+
+Proxy timings exclude client network delays, external tool execution and entire
+agent workflows. First token can be reasoning, tool arguments or a fallback
+event; first visible text is not separately recorded. Output counts include
+reasoning. End-to-end TPS includes all request time. Approximate phase TPS is
+output / (request time − recorded first-token time), limited to streaming
+requests with at least 32 output tokens and 250 ms after first token. It is
+not measured visible-text decode throughput. Missing timings are not reconstructed.

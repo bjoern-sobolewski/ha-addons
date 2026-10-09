@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.26
+
+- Add account Performance comparisons and daily trends for completion time, recorded first token, end-to-end TPS and approximate phase TPS.
+- Compare median and slow-tail timings using both actual requests and a shared workload mix across models and outgoing modes.
+- Match input/output size, cache share, reasoning effort, streaming and transport; expose coverage, missing samples and timing limitations.
+- Include archived requests and preserve admin/read-only account isolation.
+
 ## 0.1.25
 
 - Lead weekly cycles with API value per quota percentage point, observed consumption and a separate total API value column.

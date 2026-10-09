@@ -2,9 +2,9 @@ FROM alpine:3.20 AS source
 RUN apk add --no-cache git
 WORKDIR /src
 RUN git init && git remote add origin https://github.com/router-for-me/CLIProxyAPI.git \
-    && git fetch --depth 1 origin 6fecc6e5567912661654a4eaf9b8f5436facd1c2 \
+    && git fetch --depth 1 origin 67465884ca179a8f9098328d03a361b50003fdd7 \
     && git checkout --detach FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = 6fecc6e5567912661654a4eaf9b8f5436facd1c2
+    && test "$(git rev-parse HEAD)" = 67465884ca179a8f9098328d03a361b50003fdd7
 COPY patches/quota-traffic.patch /tmp/quota-traffic.patch
 RUN git apply --check /tmp/quota-traffic.patch && git apply /tmp/quota-traffic.patch
 COPY patches/key-names.patch /tmp/key-names.patch
@@ -19,12 +19,15 @@ COPY patches/session-cache-test.patch /tmp/session-cache-test.patch
 RUN git apply --check /tmp/session-cache-test.patch && git apply /tmp/session-cache-test.patch
 COPY patches/upstream-service-tier.patch /tmp/upstream-service-tier.patch
 RUN git apply --check /tmp/upstream-service-tier.patch && git apply /tmp/upstream-service-tier.patch
+COPY patches/interrupt-test-sync.patch /tmp/interrupt-test-sync.patch
+RUN git apply --check /tmp/interrupt-test-sync.patch && git apply /tmp/interrupt-test-sync.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/ ./
 RUN go test ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
 RUN go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
-RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.10-ha.7" -o /out/CLIProxyAPI ./cmd/server
+RUN go test ./sdk/api/handlers/openai
+RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.22-ha.1" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -48,7 +51,7 @@ COPY --from=panel-source /src/ ./
 # previously verified language release until upstream fixes its package.
 RUN npm pkg set 'overrides.@codemirror/language=6.12.4' \
     && npm install --ignore-scripts && npx --yes --package=bun@1.3.14 bun run verify
-FROM eceasy/cli-proxy-api:v8.0.10@sha256:0b007a6abd15aec1f5314908417ceab99f049f75353e3703f52f0968747f6110
+FROM eceasy/cli-proxy-api:v8.0.22@sha256:fb287227792ae14eff38063479568049c90cb692b1f299e39c6f54650584428f
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-yaml nginx-light \
@@ -60,7 +63,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.12
+ARG BUILD_VERSION=0.1.13
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

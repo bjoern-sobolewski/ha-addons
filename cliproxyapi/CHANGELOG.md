@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13
+
+- Update CLIProxyAPI from 8.0.10 to 8.0.22, including response.interrupt support, active upstream forwarding and HTTP cancellation.
+- Reconcile local OAuth diagnostics and outgoing Fast-request tracking with upstream fixes; preserve quota capture, shared key names and the customized management panel.
+- Keep the WebSocket open after an interrupted response so follow-up turns can continue.
+
 ## 0.1.12
 
 - Merge newer request-derived quota into native account windows without losing plan, credits, renewal or reset controls.
@@ -21,7 +27,7 @@
 - Keep successful account data visible during refresh and preserve its observation time on failures.
 - Add a tiny refresh icon and compact observation age beside native Auth Files quota percentages, preserving plan, renewal, credit balance and manual-reset controls.
 - Show the actual provider observation timestamp and source on hover, focus or tap without triggering provider queries or resets.
-- Use the viewer browserÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢s time zone and regional date/time preferences for observation details and Auth Files reset clocks.
+- Use the viewer browserÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢s time zone and regional date/time preferences for observation details and Auth Files reset clocks.
 
 ## 0.1.8
 

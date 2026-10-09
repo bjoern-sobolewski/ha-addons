@@ -19,10 +19,10 @@ index 10ecf27..9ca810d 100644
  	ResponseModel       string                   `json:"response_model,omitempty"`
  }
 diff --git a/internal/runtime/executor/codex_executor_execute.go b/internal/runtime/executor/codex_executor_execute.go
-index 7fdda8b..44fda03 100644
+index f5afac2..97a1373 100644
 --- a/internal/runtime/executor/codex_executor_execute.go
 +++ b/internal/runtime/executor/codex_executor_execute.go
-@@ -103,6 +103,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
+@@ -104,6 +104,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
  	})
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClient(httpClient)
@@ -30,19 +30,7 @@ index 7fdda8b..44fda03 100644
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
  		helps.RecordAPIResponseError(ctx, e.cfg, err)
-@@ -186,10 +187,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
- 		if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
- 			return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
- 		}
--		publishCodexImageToolUsage(ctx, reporter, body, eventData)
- 		if detail, ok := helps.ParseCodexUsage(eventData); ok {
- 			reporter.Publish(ctx, detail)
- 		}
-+		publishCodexImageToolUsage(ctx, reporter, body, eventData)
- 		if responseFormat == sdktranslator.FormatOpenAIResponse {
- 			out = helps.EnsureResponsesUsageDetails(out)
- 		}
-@@ -274,6 +275,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
+@@ -276,6 +277,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
  	})
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClient(httpClient)
@@ -51,10 +39,10 @@ index 7fdda8b..44fda03 100644
  	if err != nil {
  		helps.RecordAPIResponseError(ctx, e.cfg, err)
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index bae496f..a9be8a9 100644
+index 7c9fef2..2c76227 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
-@@ -112,6 +112,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -113,6 +113,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
@@ -122,10 +110,10 @@ index 0000000..04f093e
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
-index 132e416..8d3cd8d 100644
+index 32bcd07..ebf13e3 100644
 --- a/internal/runtime/executor/codex_websockets_duplex.go
 +++ b/internal/runtime/executor/codex_websockets_duplex.go
-@@ -415,6 +415,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -421,6 +421,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  				snapshot := *current
  				snapshot.originalPayload, snapshot.wsHeaders = nil, nil
  				snapshot.clientBody = []byte("{}")
@@ -135,7 +123,7 @@ index 132e416..8d3cd8d 100644
  				if reasoning := gjson.GetBytes(current.clientBody, "reasoning"); reasoning.Exists() {
  					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "reasoning", []byte(reasoning.Raw))
  				}
-@@ -433,6 +436,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -439,6 +442,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  				if !firstResponse {
  					reporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
  					reporter.SetTranslatedReasoningEffort(current.clientBody, current.to.String())
@@ -143,7 +131,7 @@ index 132e416..8d3cd8d 100644
  					reporter.StartResponseTTFT()
  				}
  				firstResponse = false
-@@ -518,6 +522,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -524,6 +528,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  					eventPrepared, pending = pending[0], pending[1:]
  					eventReporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
  					eventReporter.SetTranslatedReasoningEffort(eventPrepared.clientBody, eventPrepared.to.String())
@@ -152,10 +140,10 @@ index 132e416..8d3cd8d 100644
  					responseActive = false
  					automaticActive = false
 diff --git a/internal/runtime/executor/codex_websockets_execute.go b/internal/runtime/executor/codex_websockets_execute.go
-index 7c6eca0..85076da 100644
+index 6b6e193..72c73de 100644
 --- a/internal/runtime/executor/codex_websockets_execute.go
 +++ b/internal/runtime/executor/codex_websockets_execute.go
-@@ -193,6 +193,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+@@ -195,6 +195,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
  	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
  
  	cliproxyexecutor.MarkUpstreamAttempt(ctx)
@@ -163,7 +151,7 @@ index 7c6eca0..85076da 100644
  	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
  		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
  		if sess != nil && !isEphemeralSession {
-@@ -241,6 +242,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+@@ -243,6 +244,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
  				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
  				reporter.StartResponseTTFT()
  				cliproxyexecutor.MarkUpstreamAttempt(ctx)
@@ -172,7 +160,7 @@ index 7c6eca0..85076da 100644
  					wsReqBody = wsReqBodyRetry
  				} else {
 diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
-index b6bcb49..3f5cd4a 100644
+index 3c92424..a0e427e 100644
 --- a/internal/runtime/executor/codex_websockets_stream.go
 +++ b/internal/runtime/executor/codex_websockets_stream.go
 @@ -153,6 +153,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
@@ -268,7 +256,7 @@ index 0000000..ef78f24
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/usage_helpers.go b/internal/runtime/executor/helps/usage_helpers.go
-index 266012a..2709286 100644
+index 5774964..05b9d10 100644
 --- a/internal/runtime/executor/helps/usage_helpers.go
 +++ b/internal/runtime/executor/helps/usage_helpers.go
 @@ -44,6 +44,8 @@ type UsageReporter struct {
@@ -280,7 +268,7 @@ index 266012a..2709286 100644
  	generate            bool
  	stream              bool
  	requestedAt         time.Time
-@@ -651,6 +653,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
+@@ -627,6 +629,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
  		AuthType:            r.authType,
  		ReasoningEffort:     r.reasoning,
  		ServiceTier:         r.serviceTier,

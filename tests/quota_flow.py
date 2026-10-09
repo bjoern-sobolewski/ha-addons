@@ -61,6 +61,23 @@ def main():
      event=json.loads(ws.recv(timeout=20));assert event.get('type')!='error',event;got_quota |= event.get('type')=='codex.rate_limits'
      if event.get('type')=='response.completed':break
    assert got_quota,'upstream WebSocket event not forwarded'
+   # Exercise interruption through both packaged gateways against a held-open
+   # upstream turn, then continue on the same downstream/upstream connection.
+   mock_calls=lambda:json.loads(docker('exec',names['mock'],'python','-c','import urllib.request;print(urllib.request.urlopen("http://localhost:9000/stats").read().decode())'))['calls']
+   before_interrupt=mock_calls()
+   with connect(gateway.replace('http:','ws:')+'/v1/responses',additional_headers={'Authorization':'Bearer '+key},open_timeout=20) as ws:
+    ws.send(json.dumps({'type':'response.create','model':'a/quota-test','instructions':'__interrupt_fixture__','input':[]}))
+    created=json.loads(ws.recv(timeout=20));assert created['type']=='response.created'
+    ws.send(json.dumps({'type':'response.interrupt','response_id':created['response']['id'],'mode':'discard_partial_items','extension':'preserve-me'}))
+    interrupted=json.loads(ws.recv(timeout=20))
+    assert interrupted['type']=='response.incomplete' and interrupted['response']['incomplete_details']['reason']=='interrupted'
+    ws.send(json.dumps({'type':'response.create','model':'a/quota-test','previous_response_id':created['response']['id'],'input':[]}))
+    while True:
+     resumed=json.loads(ws.recv(timeout=20));assert resumed['type']!='error',resumed
+     if resumed['type']=='response.completed':break
+   assert mock_calls()==before_interrupt+1,'interrupt or follow-up opened another upstream connection'
+   print('PASS: in-flight response.interrupt survives both gateways unchanged and follow-up reuses the same upstream socket',flush=True)
+
    # Capture after overrides, independently of client auto and response default,
    # on both HTTP and WebSocket requests, including the read-only API/export.
    events=lambda:json.loads(request(gateway+'/test-quota/api/v1/read-only/events?range=today',opener=ro)[1])['events']

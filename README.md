@@ -4,7 +4,7 @@ CLIProxyAPI and CPA Usage Keeper packaged for Home Assistant OS on Raspberry Pi 
 
 | App | Upstream | Purpose |
 | --- | --- | --- |
-| CLIProxyAPI | 8.0.10 | Model API, provider credentials, private management, API-only gateway |
+| CLIProxyAPI | 8.0.22 | Model API, provider credentials, private management, API-only gateway |
 | CPA Usage Keeper | 1.15.9 | Password-protected usage dashboard with persistent SQLite history |
 
 These are experimental community wrappers, unaffiliated with the upstream projects. Container integration and installation on Home Assistant OS are tested. Verify provider OAuth and long Cloudflare streams in your own deployment.

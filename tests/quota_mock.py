@@ -12,9 +12,21 @@ async def responses(request):
     socket=web.WebSocketResponse(compress=False)
     if socket.can_prepare(request).ok:
         await socket.prepare(request)
+        interrupt_pending=False
         async for message in socket:
             if message.type==web.WSMsgType.TEXT:
-                assert json.loads(message.data).get('service_tier')=='priority'
+                frame=json.loads(message.data)
+                if frame.get('type')=='response.interrupt':
+                    assert interrupt_pending, 'interrupt without active turn'
+                    assert frame=={'type':'response.interrupt','response_id':'resp-interrupt','mode':'discard_partial_items','extension':'preserve-me'}, 'interrupt was rewritten'
+                    interrupt_pending=False
+                    await socket.send_json({'type':'response.incomplete','response':{**result,'id':'resp-interrupt','status':'incomplete','incomplete_details':{'reason':'interrupted'}}})
+                    continue
+                assert frame.get('service_tier')=='priority'
+                if frame.get('instructions')=='__interrupt_fixture__':
+                    interrupt_pending=True
+                    await socket.send_json({'type':'response.created','response':{'id':'resp-interrupt'}})
+                    continue
                 used=73 if account=='b' else 23
                 await socket.send_json({'type':'codex.rate_limits','rate_limits':{'primary':{'used_percent':used,'window_minutes':300,'reset_after_seconds':3600},'secondary':{'used_percent':5,'window_minutes':10080,'reset_after_seconds':86400}}})
                 await socket.send_json({'type':'response.completed','response':result})

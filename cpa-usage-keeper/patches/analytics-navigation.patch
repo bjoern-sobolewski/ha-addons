@@ -30,7 +30,7 @@ index 2f46711..2e7bc6a 100644
  		return fmt.Errorf("invalid metric")
 diff --git a/web/src/components/usage/credentials/AnalyticsModelPicker.tsx b/web/src/components/usage/credentials/AnalyticsModelPicker.tsx
 new file mode 100644
-index 0000000..eb81272
+index 0000000..328f762
 --- /dev/null
 +++ b/web/src/components/usage/credentials/AnalyticsModelPicker.tsx
 @@ -0,0 +1,35 @@
@@ -51,10 +51,10 @@ index 0000000..eb81272
 +  return <details ref={ref} className={styles.modelDropdown} onKeyDown={event => {
 +    if (event.key === 'Escape') { ref.current?.removeAttribute('open'); ref.current?.querySelector('summary')?.focus(); event.stopPropagation() }
 +  }}>
-+    <summary aria-label={t('analytics.models', 'Models')}>{t('analytics.models', 'Models')} · {selection === 'top' ? t('analytics.top_short', 'Top 5') : `${selected.length} ${t('analytics.selected', 'selected')}`}</summary>
++    <summary aria-label={t('analytics.models', 'Models')}>{t('analytics.models', 'Models')} · {selection === 'top' ? t('analytics.top_short', 'Top 2') : `${selected.length} ${t('analytics.selected', 'selected')}`}</summary>
 +    <div className={styles.modelMenu}>
 +      <div className={styles.pickerActions}>
-+        <button type="button" aria-pressed={selection === 'top'} onClick={() => onChange('top')}>{t('analytics.top', 'Top 5 by requests')}</button>
++        <button type="button" aria-pressed={selection === 'top'} onClick={() => onChange('top')}>{t('analytics.top', 'Top 2 by requests')}</button>
 +        <button type="button" aria-pressed={selection === 'all'} onClick={() => onChange('all')}>{t('analytics.all', 'Show all')}</button>
 +        <button type="button" onClick={() => onChange([])}>{t('analytics.clear', 'Clear')}</button>
 +      </div>
@@ -101,7 +101,7 @@ index 8fcedd8..34b78fa 100644
                ref={requestsTabRef}
                id={requestsTabId}
 diff --git a/web/src/components/usage/credentials/PerformancePanel.tsx b/web/src/components/usage/credentials/PerformancePanel.tsx
-index ed693f4..de65506 100644
+index ed693f4..510ccad 100644
 --- a/web/src/components/usage/credentials/PerformancePanel.tsx
 +++ b/web/src/components/usage/credentials/PerformancePanel.tsx
 @@ -7,35 +7,50 @@ import { ApiError, fetchAccountPerformance } from '@/lib/api'
@@ -220,7 +220,7 @@ index ed693f4..de65506 100644
 -    <div className={styles.toolbar}><h3>{t('performance.title', 'Performance')}</h3><Button size="sm" disabled={loading} onClick={() => setRevision(value => value + 1)}>{t('common.refresh', 'Refresh')}</Button></div>
 -    <p className={styles.note}>{t('performance.scope', 'Recorded API requests for this shared account, across all client keys, including archived requests. Timings are measured by the proxy; client network, tool execution and complete agent tasks are not measured here.')}</p>
 +    <div className={styles.toolbar}><h3>{t('analytics.response_speed', 'Response speed')}</h3><Button variant="secondary" size="sm" disabled={loading} onClick={() => setRevision(value => value + 1)}>{t('common.refresh', 'Refresh')}</Button></div>
-+    <p className={styles.note}>{t('analytics.performance_intro', 'Compare how quickly models finish your recorded requests. Start with your five most-used models, then narrow the workload for a fairer comparison.')}</p>
++    <p className={styles.note}>{t('analytics.performance_intro', 'Compare how quickly models finish your recorded requests. Start with your two most-used models, then narrow the workload for a fairer comparison.')}</p>
      <div className={styles.filters}>
 -      {select(t('performance.period', 'Period'), days, setDays, [['7', '7 days'], ['30', '30 days'], ['90', '90 days']])}
 -      {select(t('performance.metric', 'Metric'), metric, setMetric, [['latency', t('performance.completion', 'Time to completion')], ['ttft', t('performance.ttft', 'First token (recorded)')], ['tps', t('performance.tps', 'End-to-end output tokens / second')], ['phase', t('performance.phase', 'Approximate phase tokens / second')]])}
@@ -249,7 +249,7 @@ index ed693f4..de65506 100644
 +      {select(t('performance.output', 'Total output size'), output, setOutput, [['', all], ['short', '< 256 tokens'], ['medium', '256–1,024 tokens'], ['long', '1,024–4,096 tokens'], ['huge', '4,096+ tokens']])}
 +      {select(t('performance.effort', 'Reasoning effort'), effort, setEffort, [['', all], ...(discovering ? [] : catalog!.efforts).map(value => [value, value] as [string, string])])}
 +    </div></details>
-+    {noSelection && <p role="status" className={styles.empty}>{t('analytics.choose', 'Select a model to show its data, or restore Top 5.')}</p>}
++    {noSelection && <p role="status" className={styles.empty}>{t('analytics.choose', 'Select a model to show its data, or restore Top 2.')}</p>}
 +    {loading && <p role="status" className={styles.empty}>{t('common.loading', 'Loading…')}</p>}
 +    {!loading && result?.error && !noSelection && <p role="alert" className={styles.empty}>{t('performance.error', 'Unable to load performance. Use Refresh to retry.')}</p>}
      {report && <>
@@ -504,7 +504,7 @@ index e95476c..663c9cc 100644
  }
 diff --git a/web/src/components/usage/credentials/analyticsModels.ts b/web/src/components/usage/credentials/analyticsModels.ts
 new file mode 100644
-index 0000000..c59f475
+index 0000000..5f938c3
 --- /dev/null
 +++ b/web/src/components/usage/credentials/analyticsModels.ts
 @@ -0,0 +1,26 @@
@@ -521,7 +521,7 @@ index 0000000..c59f475
 +}
 +
 +export function selectedAnalyticsModels(selection: ModelSelection, models: AnalyticsModel[]): string[] {
-+  if (selection === 'top') return models.slice(0, 5).map(item => item.model)
++  if (selection === 'top') return models.slice(0, 2).map(item => item.model)
 +  if (selection === 'all') return models.map(item => item.model)
 +  return selection.filter(model => models.some(item => item.model === model))
 +}
@@ -562,7 +562,7 @@ index 481b4b3..c78b04d 100644
  
    it('renders Overview metrics with the list thresholds and recent cache rate', async () => {
 diff --git a/web/src/components/usage/test/PerformancePanel.test.tsx b/web/src/components/usage/test/PerformancePanel.test.tsx
-index bd7e1f2..c0e4c1e 100644
+index bd7e1f2..31f0fd6 100644
 --- a/web/src/components/usage/test/PerformancePanel.test.tsx
 +++ b/web/src/components/usage/test/PerformancePanel.test.tsx
 @@ -28,24 +28,24 @@ it('shows separate actual/matched percentiles, coverage, failures and fixed-mix
@@ -603,23 +603,23 @@ index bd7e1f2..c0e4c1e 100644
    expect(element.querySelector('[role="alert"]')).toBeNull()
  })
 +
-+it('defaults to five models ranked across modes, supports extra models and an empty selection', async () => {
++it('defaults to two models ranked across modes, supports extra models and an empty selection', async () => {
 +  const report = fixture()
 +  report.models = ['a', 'b', 'c', 'd', 'e', 'f']
 +  report.groups = report.models.map((model, index) => ({ ...report.groups[0], model, requests: 60 - index * 10 }))
 +  mocks.fetch.mockResolvedValue(report)
 +  await render()
-+  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ days: '7', metric: 'tps', models: ['a','b','c','d','e'] })
++  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ days: '7', metric: 'tps', models: ['a','b'] })
 +  expect(element.querySelector('select[aria-label="Speed measurement"]')).toBeNull()
-+  expect(mocks.charts.get('Response speed over time')!.datasets).toHaveLength(5)
++  expect(mocks.charts.get('Response speed over time')!.datasets).toHaveLength(2)
 +  await act(async () => element.querySelector<HTMLInputElement>('input[aria-label="f"]')!.click())
-+  expect(mocks.fetch.mock.lastCall?.[1].models).toEqual(['a','b','c','d','e','f'])
++  expect(mocks.fetch.mock.lastCall?.[1].models).toEqual(['a','b','f'])
 +  const count = mocks.fetch.mock.calls.length
 +  await act(async () => [...element.querySelectorAll('button')].find(button => button.textContent === 'Clear')!.click())
 +  expect(mocks.fetch).toHaveBeenCalledTimes(count)
 +  expect(element.querySelector('[role="img"]')).toBeNull()
-+  await act(async () => [...element.querySelectorAll('button')].find(button => button.textContent === 'Top 5 by requests')!.click())
-+  expect(mocks.fetch.mock.lastCall?.[1].models).toEqual(['a','b','c','d','e'])
++  await act(async () => [...element.querySelectorAll('button')].find(button => button.textContent === 'Top 2 by requests')!.click())
++  expect(mocks.fetch.mock.lastCall?.[1].models).toEqual(['a','b'])
 +  await change('Response speed over time', 'phase')
 +  expect(mocks.fetch.mock.lastCall?.[1].metric).toBe('phase')
 +})
@@ -661,7 +661,7 @@ index 5a32ffc..bf503ee 100644
  
  it('preserves the quota-drop rate through unused reset-time grouping', () => {
 diff --git a/web/src/components/usage/test/WeeklyTrendCharts.test.tsx b/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
-index 162f954..1c662c4 100644
+index 162f954..f9061ac 100644
 --- a/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
 +++ b/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
 @@ -26,47 +26,27 @@ it('separates model/mode lines, preserves missing prices and timing gaps, and co
@@ -670,10 +670,14 @@ index 162f954..1c662c4 100644
  
 -it('filters both charts together and switches value and speed metrics without fetching',async()=>{
 - const points=[{...point(dates[0]),full_allowance_usd:200},point(dates[0],'fast'),point(dates[0],'normal','b')]
-+it('uses a top-five multi-select for value and retains estimates and missing-data states',async()=>{
++it('uses a top-two multi-select for value and retains estimates and missing-data states',async()=>{
 + const points = ['a','b','c','d','e','f'].map((model,index)=>({...point(dates[0],'normal',model),requests:60-index*10,full_allowance_usd:200}))
   await act(async()=>root.render(<WeeklyTrendCharts points={points}/>))
-- expect(charts.get('Subscription value over time')!.datasets).toHaveLength(3)
++ expect(charts.get('Subscription value over time')!.datasets).toHaveLength(2)
++ expect(element.querySelector('select[aria-label="Speed measurement"]')).toBeNull()
++ expect(charts.has('Response speed over time')).toBe(false)
++ await act(async()=>element.querySelector<HTMLInputElement>('input[aria-label="f"]')!.click())
+  expect(charts.get('Subscription value over time')!.datasets).toHaveLength(3)
 - const change=async(label:string,value:string)=>{const select=element.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!;await act(async()=>{select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}))})}
 - await change('Model','a');await change('Mode','normal')
 - expect(charts.get('Subscription value over time')!.datasets).toHaveLength(1)
@@ -686,11 +690,6 @@ index 162f954..1c662c4 100644
 -it('shows insufficient-data states without inventing zero speeds or estimates',async()=>{
 - await act(async()=>root.render(<WeeklyTrendCharts points={[{...point(dates[0]),speed_requests:1,ttft_requests:0}]}/>))
 - expect(element.querySelector('[data-weekly-trend="speed"]')).toBeNull()
-+ expect(charts.get('Subscription value over time')!.datasets).toHaveLength(5)
-+ expect(element.querySelector('select[aria-label="Speed measurement"]')).toBeNull()
-+ expect(charts.has('Response speed over time')).toBe(false)
-+ await act(async()=>element.querySelector<HTMLInputElement>('input[aria-label="f"]')!.click())
-+ expect(charts.get('Subscription value over time')!.datasets).toHaveLength(6)
 + await act(async()=>element.querySelector<HTMLInputElement>('input[aria-label="a"]')!.click())
 + expect(charts.get('Subscription value over time')!.datasets.map(item=>item.label)).not.toContain('a · Normal')
   const select=element.querySelector<HTMLSelectElement>('select[aria-label="Value metric"]')!

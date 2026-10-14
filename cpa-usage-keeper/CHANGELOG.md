@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.31
+
+- Default Response speed and Subscription value charts to the two most-used models, with a Top 2 shortcut in the model picker. Other models remain selectable.
+
 ## 0.1.30
 
 - Add a 14-day reporting period to Response speed, alongside 7, 30 and 90 days.

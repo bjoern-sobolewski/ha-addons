@@ -132,9 +132,9 @@ the remaining history. Detailed observation charts retain the original records.
 
 
 The **Subscription value over time** chart appears before the cycle tables.
-Its model dropdown supports multiple selections and starts with the five models
+Its model dropdown supports multiple selections and starts with the two models
 with the most recorded requests in this reporting period. Show all, Clear and
-Top 5 controls are available inside the dropdown. Daily API value plots recorded
+Top 2 controls are available inside the dropdown. Daily API value plots recorded
 dollars in UTC calendar-day buckets; the current day is partial. The allowance
 view uses qualifying quota samples from the trailing seven UTC days at each
 date, with the same eligibility minimums as the table. Estimates never use future
@@ -157,7 +157,7 @@ report reads local stored metadata only, without provider calls or prompts.
 
 Use **Response speed over time** to choose total request time TPS, approximate
 streaming phase TPS, recorded first-token time or completion time. The model
-multi-select starts with the five most-used models across modes in this period;
+multi-select starts with the two most-used models across modes in this period;
 other models remain selectable. Changing model selection recalculates workload
 matching on the server. Clear shows no data instead of silently selecting all.
 Workload filters and methodology are collapsed below the main controls/chart.

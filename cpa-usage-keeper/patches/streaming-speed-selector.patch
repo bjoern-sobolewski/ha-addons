@@ -1,0 +1,303 @@
+diff --git a/internal/quota/weekly_trends.go b/internal/quota/weekly_trends.go
+index 8a55ca5..4ceff20 100644
+--- a/internal/quota/weekly_trends.go
++++ b/internal/quota/weekly_trends.go
+@@ -15,6 +15,8 @@ type WeeklyTrendPoint struct {
+ 	CostAvailable    bool      `json:"cost_available"`
+ 	SpeedRequests    int64     `json:"speed_requests"`
+ 	SpeedTPS         *float64  `json:"speed_tps"`
++	PhaseRequests    int64     `json:"phase_requests"`
++	PhaseTPS         *float64  `json:"phase_tps"`
+ 	TTFTRequests     int64     `json:"ttft_requests"`
+ 	MeanTTFTMS       *float64  `json:"mean_ttft_ms"`
+ 	SampleIntervals  int       `json:"sample_intervals"`
+@@ -65,6 +67,9 @@ func buildWeeklyTimeline(history dto.CodexQuotaEfficiencyHistory) []WeeklyTrendP
+ 				total.SpeedRequests += usage.SpeedRequests
+ 				total.SpeedOutputTokens += usage.SpeedOutputTokens
+ 				total.SpeedDurationMS += usage.SpeedDurationMS
++				total.PhaseRequests += usage.PhaseRequests
++				total.PhaseOutputTokens += usage.PhaseOutputTokens
++				total.PhaseDurationMS += usage.PhaseDurationMS
+ 				total.TTFTRequests += usage.TTFTRequests
+ 				total.TotalTTFTMS += usage.TotalTTFTMS
+ 				daily[k] = total
+@@ -95,6 +100,11 @@ func buildWeeklyTimeline(history dto.CodexQuotaEfficiencyHistory) []WeeklyTrendP
+ 				v := float64(usage.SpeedOutputTokens) * 1000 / float64(usage.SpeedDurationMS)
+ 				point.SpeedTPS = &v
+ 			}
++			point.PhaseRequests = usage.PhaseRequests
++			if usage.PhaseRequests > 0 && usage.PhaseDurationMS > 0 {
++				v := float64(usage.PhaseOutputTokens) * 1000 / float64(usage.PhaseDurationMS)
++				point.PhaseTPS = &v
++			}
+ 			if usage.TTFTRequests > 0 {
+ 				v := float64(usage.TotalTTFTMS) / float64(usage.TTFTRequests)
+ 				point.MeanTTFTMS = &v
+diff --git a/internal/quota/weekly_trends_test.go b/internal/quota/weekly_trends_test.go
+index f934d27..515a0a0 100644
+--- a/internal/quota/weekly_trends_test.go
++++ b/internal/quota/weekly_trends_test.go
+@@ -56,3 +56,18 @@ func TestWeeklyTimelineCombinesDailyFragmentsAndKeepsModesAndMissingData(t *test
+ 		t.Fatalf("missing data invented: %+v", unknown)
+ 	}
+ }
++
++func TestWeeklyTimelinePhaseSumsTokensAndDurationsAndKeepsMissingGaps(t *testing.T) {
++	day := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
++	fragment := func(tokens, duration int64) dto.CodexQuotaEfficiencyCycle {
++		return dto.CodexQuotaEfficiencyCycle{WindowSeconds: 604800, DailyUsage: []dto.QuotaDailyUsage{{Day: day, Usage: dto.CodexQuotaEfficiencyUsage{ModelModes: []dto.QuotaModelModeUsage{{Model: "a", Mode: "fast", PhaseRequests: 3, PhaseOutputTokens: tokens, PhaseDurationMS: duration}}}}}}
++	}
++	history := dto.CodexQuotaEfficiencyHistory{GeneratedAt: day.Add(24 * time.Hour), Cycles: []dto.CodexQuotaEfficiencyCycle{fragment(100, 1000), fragment(300, 9000)}}
++	rows := buildWeeklyTimeline(history)
++	if len(rows) != 2 || rows[0].PhaseRequests != 6 || rows[0].PhaseTPS == nil || *rows[0].PhaseTPS != 40 {
++		t.Fatalf("phase rate not weighted by duration: %+v", rows)
++	}
++	if rows[0].SpeedTPS != nil || rows[1].PhaseTPS != nil || rows[1].PhaseRequests != 0 {
++		t.Fatalf("missing data replaced by a rate: %+v", rows)
++	}
++}
+diff --git a/internal/repository/codex_quota_efficiency.go b/internal/repository/codex_quota_efficiency.go
+index 21e201d..3c3fb0b 100644
+--- a/internal/repository/codex_quota_efficiency.go
++++ b/internal/repository/codex_quota_efficiency.go
+@@ -49,6 +49,7 @@ type codexQuotaEfficiencyUsageEventRow struct {
+ 	LatencyMS           int64
+ 	TTFTMS              *int64
+ 	Generate            bool
++	Stream              *bool
+ 	Failed              bool
+ 	InputTokens         int64
+ 	OutputTokens        int64
+@@ -467,7 +468,7 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 	rows, err := db.WithContext(ctx).Clauses(dbresolver.Read).Raw(`SELECT
+ 		`+codexQuotaEfficiencyPricingProjection(costResolver.ActiveFields(), keepAllPricingFields)+`,
+ 		timestamp, COALESCE(failed, 0), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(reasoning_tokens, 0),
+-		cache_read_tokens, cache_creation_tokens, COALESCE(total_tokens, 0), COALESCE(latency_ms, 0), ttft_ms, COALESCE(generate, 1)
++		cache_read_tokens, cache_creation_tokens, COALESCE(total_tokens, 0), COALESCE(latency_ms, 0), ttft_ms, COALESCE(generate, 1), stream
+ 	FROM `+eventSource+`
+ 	WHERE auth_type = ? AND auth_index = ? AND provider = ? AND timestamp >= ? AND timestamp < ?
+ 	ORDER BY timestamp ASC, id ASC`,
+@@ -497,7 +498,7 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 			&event.APIGroupKey, &event.Model, &event.ModelAlias,
+ 			&event.ServiceTier, &event.UpstreamServiceTier, &event.ResponseServiceTier, &event.ReasoningEffort, &event.Endpoint, &event.ExecutorType,
+ 			&event.Timestamp, &event.Failed, &event.InputTokens, &event.OutputTokens, &event.ReasoningTokens,
+-			&event.CacheReadTokens, &event.CacheCreationTokens, &event.TotalTokens, &event.LatencyMS, &event.TTFTMS, &event.Generate,
++			&event.CacheReadTokens, &event.CacheCreationTokens, &event.TotalTokens, &event.LatencyMS, &event.TTFTMS, &event.Generate, &event.Stream,
+ 		); err != nil {
+ 			return fmt.Errorf("scan codex quota efficiency usage: %w", err)
+ 		}
+@@ -628,6 +629,12 @@ func (a *codexQuotaEfficiencyUsageAccumulator) add(event codexQuotaEfficiencyUsa
+ 			group.TTFTRequests++
+ 			group.TotalTTFTMS += *event.TTFTMS
+ 		}
++		// Same eligibility as Performance phase TPS. Never infer streaming from TTFT.
++		if event.Stream != nil && *event.Stream && event.OutputTokens >= 32 && event.TTFTMS != nil && *event.TTFTMS >= 0 && event.LatencyMS-*event.TTFTMS >= 250 {
++			group.PhaseRequests++
++			group.PhaseOutputTokens += event.OutputTokens
++			group.PhaseDurationMS += event.LatencyMS - *event.TTFTMS
++		}
+ 	}
+ 	if event.Failed {
+ 		group.FailedRequests++
+diff --git a/internal/repository/dto/codex_quota_efficiency.go b/internal/repository/dto/codex_quota_efficiency.go
+index b2c37a0..c5d3d3d 100644
+--- a/internal/repository/dto/codex_quota_efficiency.go
++++ b/internal/repository/dto/codex_quota_efficiency.go
+@@ -130,6 +130,9 @@ type CodexQuotaEfficiencyUsage struct {
+ 
+ // QuotaModelModeUsage contains reporting dimensions only, never client keys.
+ type QuotaModelModeUsage struct {
++	PhaseRequests     int64   `json:"phase_requests"`
++	PhaseOutputTokens int64   `json:"phase_output_tokens"`
++	PhaseDurationMS   int64   `json:"phase_duration_ms"`
+ 	SpeedRequests     int64   `json:"speed_requests"`
+ 	SpeedOutputTokens int64   `json:"speed_output_tokens"`
+ 	SpeedDurationMS   int64   `json:"speed_duration_ms"`
+diff --git a/internal/repository/test/weekly_quota_value_test.go b/internal/repository/test/weekly_quota_value_test.go
+index cc30e28..02d07c9 100644
+--- a/internal/repository/test/weekly_quota_value_test.go
++++ b/internal/repository/test/weekly_quota_value_test.go
+@@ -27,6 +27,8 @@ func TestWeeklyQuotaValueArchiveModeAndWindowIsolation(t *testing.T) {
+ 	normal.LatencyMS = 2000
+ 	ttft := int64(1000)
+ 	normal.TTFTMS = &ttft
++	stream := true
++	normal.Stream = &stream
+ 	unknown := usageEventForQuotaEfficiency("unknown", "oauth", "weekly-account", now.Add(-5*time.Minute), 1_000_000)
+ 	alias := "model-fast"
+ 	unknown.ModelAlias = &alias
+@@ -48,6 +50,9 @@ func TestWeeklyQuotaValueArchiveModeAndWindowIsolation(t *testing.T) {
+ 	if len(daily) != 3 || daily[1].SpeedRequests != 1 || daily[1].SpeedOutputTokens != 100 || daily[1].SpeedDurationMS != 2000 || daily[1].TTFTRequests != 1 || daily[1].TotalTTFTMS != 1000 {
+ 		t.Fatalf("wrong daily speed attribution: %+v", daily)
+ 	}
++	if daily[1].PhaseRequests != 1 || daily[1].PhaseOutputTokens != 100 || daily[1].PhaseDurationMS != 1000 {
++		t.Fatalf("wrong streaming phase attribution: %+v", daily[1])
++	}
+ 	modes := before.Cycles[0].Usage.ModelModes
+ 	if len(modes) != 3 || modes[0].Mode != "fast" || modes[0].TotalCostUSD != 2 || modes[1].Mode != "normal" || modes[2].Mode != "unknown" {
+ 		t.Fatalf("mode guessed or price lost: %+v", modes)
+@@ -118,3 +123,56 @@ func TestWeeklyDailySpeedUTCAndInvalidSampleExclusion(t *testing.T) {
+ 		t.Fatalf("invalid timings counted: %+v", fast)
+ 	}
+ }
++
++func TestWeeklyStreamingPhaseRequiresUsableCapturedStreamTimings(t *testing.T) {
++	db := openTestDatabase(t)
++	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
++	seedCodexQuotaEfficiencyRoleCycle(t, db, "phase-account", entities.CodexQuotaWindowRolePrimary, now.Add(-6*24*time.Hour), now.Add(24*time.Hour), []codexQuotaEfficiencySegmentSeed{{remaining: 90, first: now.Add(-time.Hour), last: now}})
++	valid := usageEventForQuotaEfficiency("valid", "oauth", "phase-account", now.Add(-time.Minute), 1000)
++	valid.UpstreamServiceTier = "priority"
++	valid.OutputTokens, valid.LatencyMS = 100, 2000
++	ttft, yes, no := int64(1000), true, false
++	valid.TTFTMS, valid.Stream = &ttft, &yes
++	events := []entities.UsageEvent{valid}
++	for _, kind := range []string{"missing-stream", "non-stream", "missing-ttft", "negative-ttft", "equal-ttft", "later-ttft", "tiny-phase", "short-output", "failed", "non-generation", "boundary"} {
++		e := valid
++		e.EventKey = kind
++		switch kind {
++		case "missing-stream":
++			e.Stream = nil
++		case "non-stream":
++			e.Stream = &no
++		case "missing-ttft":
++			e.TTFTMS = nil
++		case "negative-ttft":
++			v := int64(-1)
++			e.TTFTMS = &v
++		case "equal-ttft":
++			v := e.LatencyMS
++			e.TTFTMS = &v
++		case "later-ttft":
++			v := e.LatencyMS + 1
++			e.TTFTMS = &v
++		case "tiny-phase":
++			e.LatencyMS = ttft + 249
++		case "short-output":
++			e.OutputTokens = 31
++		case "failed":
++			e.Failed = true
++		case "non-generation":
++			e.Generate = &no
++		case "boundary":
++			e.OutputTokens, e.LatencyMS = 32, ttft+250
++		}
++		events = append(events, e)
++	}
++	seedCodexQuotaEfficiencyUsage(t, db, events...)
++	history, err := repository.BuildCodexQuotaEfficiencyHistory(context.Background(), db, dto.CodexQuotaEfficiencyQuery{AuthIndex: "phase-account", Now: now, RangeStart: now.Add(-7 * 24 * time.Hour), WeeklyOnly: true}, codexQuotaEfficiencyPricingResolver(t))
++	if err != nil {
++		t.Fatal(err)
++	}
++	g := history.Cycles[0].DailyUsage[0].Usage.ModelModes[0]
++	if g.Mode != "fast" || g.PhaseRequests != 2 || g.PhaseOutputTokens != 132 || g.PhaseDurationMS != 1250 {
++		t.Fatalf("invalid streaming samples included: %+v", g)
++	}
++}
+diff --git a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+index 206a8c4..e95476c 100644
+--- a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
++++ b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+@@ -8,7 +8,7 @@ import { useThemeStore } from '@/stores'
+ import { buildUsageChartTooltipStyle, getUsageChartTheme, USAGE_CHART_COMPOSITION_COLORS } from '@/utils/usage/chartConfig'
+ import styles from './WeeklyQuotaValuePanel.module.scss'
+ 
+-export type TrendMetric = 'delivered' | 'allowance' | 'speed' | 'ttft'
++export type TrendMetric = 'delivered' | 'allowance' | 'speed' | 'phase' | 'ttft'
+ const MIN_SPEED_REQUESTS = 3
+ const groupKey = (point: Pick<WeeklyTrendPoint, 'model' | 'mode'>) => JSON.stringify([point.model, point.mode])
+ 
+@@ -30,6 +30,7 @@ export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: Tr
+       if (metric === 'delivered') return point.cost_available ? point.total_cost_usd : null
+       if (metric === 'allowance') return point.full_allowance_usd
+       if (metric === 'speed') return point.speed_requests >= MIN_SPEED_REQUESTS ? point.speed_tps : null
++      if (metric === 'phase') return (point.phase_requests ?? 0) >= MIN_SPEED_REQUESTS ? point.phase_tps ?? null : null
+       return point.ttft_requests >= MIN_SPEED_REQUESTS && point.mean_ttft_ms != null ? point.mean_ttft_ms / 1000 : null
+     }),
+   })) }
+@@ -42,6 +43,8 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
+   const [mode, setMode] = useState('')
+   const [valueMetric, setValueMetric] = useState<TrendMetric>('delivered')
+   const [speedMetric, setSpeedMetric] = useState<TrendMetric>('speed')
++  const [measurement, setMeasurement] = useState<'total' | 'streaming'>('total')
++  const measuredSpeedMetric = speedMetric === 'speed' && measurement === 'streaming' ? 'phase' : speedMetric
+   const modeLabel = (value: string) => value === 'fast' ? t('weekly_quota.fast', 'Fast requested') : value === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
+   const models = [...new Set(points.map(point => point.model))].sort()
+   const chartTheme = getUsageChartTheme(isDark)
+@@ -63,7 +66,7 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
+             if (!point) return ''
+             return metric === 'allowance'
+               ? t('weekly_trends.quota_samples', '{{points}} points · {{intervals}} intervals · {{requests}} requests in trailing 7 days', { points: point.percentage_points, intervals: point.sample_intervals, requests: point.sample_requests })
+-              : t('weekly_trends.requests', '{{count}} requests', { count: metric === 'speed' ? point.speed_requests : metric === 'ttft' ? point.ttft_requests : point.requests })
++              : t('weekly_trends.requests', '{{count}} requests', { count: metric === 'speed' ? point.speed_requests : metric === 'phase' ? point.phase_requests ?? 0 : metric === 'ttft' ? point.ttft_requests : point.requests })
+           },
+         } },
+       },
+@@ -80,6 +83,10 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
+     <div className={styles.filters}>
+       <label>{t('weekly_trends.model', 'Model')} <select aria-label={t('weekly_trends.model', 'Model')} value={model} onChange={event => setModel(event.target.value)}><option value="">{t('weekly_trends.all_models', 'All models')}</option>{models.map(value => <option key={value} value={value}>{value || '—'}</option>)}</select></label>
+       <label>{t('weekly_trends.mode', 'Mode')} <select aria-label={t('weekly_trends.mode', 'Mode')} value={mode} onChange={event => setMode(event.target.value)}><option value="">{t('weekly_trends.all_modes', 'All modes')}</option>{['normal', 'fast', 'unknown'].map(value => <option key={value} value={value}>{modeLabel(value)}</option>)}</select></label>
++      <label>{t('weekly_trends.measurement', 'Speed measurement')} <select aria-label={t('weekly_trends.measurement', 'Speed measurement')} value={measurement} disabled={speedMetric === 'ttft'} onChange={event => setMeasurement(event.target.value as 'total' | 'streaming')}>
++        <option value="total">{t('weekly_trends.total_time', 'Total request time')}</option>
++        <option value="streaming">{t('weekly_trends.streaming_time', 'Streaming phase (approx.)')}</option>
++      </select></label>
+     </div>
+     <p className={styles.note}>{t('weekly_trends.days', 'Daily UTC buckets across the reporting period; today is partial. Each line is one model and requested mode. Solid: Normal · Dashed: Fast requested · Dotted: Mode not captured.')}</p>
+     <label className={styles.metric}>{t('weekly_trends.value', 'Subscription value over time')} <select aria-label={t('weekly_trends.value_metric', 'Value metric')} value={valueMetric} onChange={event => setValueMetric(event.target.value as TrendMetric)}>
+@@ -91,7 +98,12 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
+     <label className={styles.metric}>{t('weekly_trends.speed', 'Response speed over time')} <select aria-label={t('weekly_trends.speed_metric', 'Speed metric')} value={speedMetric} onChange={event => setSpeedMetric(event.target.value as TrendMetric)}>
+       <option value="speed">{t('weekly_trends.tps', 'Output tokens / second')}</option><option value="ttft">{t('weekly_trends.ttft', 'Time to first token')}</option>
+     </select></label>
+-    {renderChart(speedMetric, t('weekly_trends.speed', 'Response speed over time'), speedMetric === 'ttft' ? 's' : 'tokens/s')}
+-    <p className={styles.note}>{t('weekly_trends.speed_note', 'Speed is total output tokens divided by total request time for successful generation requests with valid timing. This includes waiting and reasoning time. Time to first token is the mean of captured timings. At least 3 timed requests per day and group are required; missing timings are gaps.')}</p>
++    {renderChart(measuredSpeedMetric, t('weekly_trends.speed', 'Response speed over time'), speedMetric === 'ttft' ? 's' : 'tokens/s')}
++    <p className={styles.note}>{speedMetric === 'ttft'
++      ? t('weekly_trends.ttft_note', 'Time to first token is the mean of recorded timings; the event can be reasoning or tool arguments, rather than first visible text. The speed measurement selector applies only to tokens per second.')
++      : measurement === 'streaming'
++        ? t('weekly_trends.phase_note', 'Streaming phase TPS = total output tokens / total (request duration − recorded first-token time), using only successful streaming generation requests with at least 32 output tokens and 250 ms after the first token. This excludes the initial wait, but includes reasoning tokens and is not an exact visible-text streaming rate.')
++        : t('weekly_trends.total_note', 'Total-time TPS = total output tokens / total request duration for successful generation requests. This includes the initial wait and reasoning time.')}
++      {' '}{t('weekly_trends.timing_samples', 'At least 3 eligible timed requests per day and model/mode are required; missing timings remain gaps. Rates are calculated from summed tokens and durations, not averaged request rates.')}</p>
+   </section>
+ }
+diff --git a/web/src/components/usage/test/WeeklyTrendCharts.test.tsx b/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
+index 2fe84ea..162f954 100644
+--- a/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
++++ b/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
+@@ -47,3 +47,26 @@ it('shows insufficient-data states without inventing zero speeds or estimates',a
+  expect(element.textContent).toContain('Not enough qualifying quota samples')
+  expect(element.textContent).toContain('Not enough valid timing samples')
+ })
++
++it('places measurement after mode, defaults to total time and switches only the speed chart', async () => {
++ const points = [{...point(dates[0]), phase_requests: 4, phase_tps: 80}, {...point(dates[1]), phase_requests: 2, phase_tps: 120}, point(dates[2])]
++ await act(async () => root.render(<WeeklyTrendCharts points={points}/>))
++ const labels = Array.from(element.querySelectorAll('select')).map(select => select.getAttribute('aria-label'))
++ expect(labels.indexOf('Speed measurement')).toBe(labels.indexOf('Mode') + 1)
++ const select = element.querySelector<HTMLSelectElement>('select[aria-label="Speed measurement"]')!
++ expect(select.value).toBe('total')
++ expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([30, 30, 30])
++ const valueChart = charts.get('Subscription value over time')!
++ await act(async () => { select.value = 'streaming'; select.dispatchEvent(new Event('change', {bubbles:true})) })
++ expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([80, null, null])
++ expect(charts.get('Subscription value over time')).toEqual(valueChart)
++ expect(element.textContent).toContain('not an exact visible-text streaming rate')
++ const metric = element.querySelector<HTMLSelectElement>('select[aria-label="Speed metric"]')!
++ await act(async () => { metric.value = 'ttft'; metric.dispatchEvent(new Event('change', {bubbles:true})) })
++ expect(select.disabled).toBe(true)
++ expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([2, 2, 2])
++ await act(async () => { metric.value = 'speed'; metric.dispatchEvent(new Event('change', {bubbles:true})) })
++ expect(select.disabled).toBe(false)
++ expect(select.value).toBe('streaming')
++ expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([80, null, null])
++})
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 2ab364c..0a97dc3 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -1010,6 +1010,7 @@ export interface WeeklyModelValue {
+ export interface WeeklyTrendPoint {
+  day: string; model: string; mode: string; requests: number; total_cost_usd: number; cost_available: boolean;
+  speed_requests: number; speed_tps: number | null; ttft_requests: number; mean_ttft_ms: number | null;
++ phase_requests?: number; phase_tps?: number | null;
+  sample_intervals: number; sample_requests: number; percentage_points: number; full_allowance_usd: number | null;
+ }
+ 

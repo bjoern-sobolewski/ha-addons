@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.28
+
+- Add Speed measurement immediately after Mode in weekly graphs: Total request time (default) or Streaming phase (approx.).
+- Calculate phase TPS from stored streaming requests and recorded first-token timings, including archived history; preserve gaps for missing or insufficient samples.
+- Keep value graphs and first-token measurements independent, and explain that phase TPS includes reasoning tokens and is not exact visible-text decode throughput.
+
 ## 0.1.27
 
 - Update Keeper to 1.15.11, including streaming indicators, User-Agent copying and the compact usage distribution chart.

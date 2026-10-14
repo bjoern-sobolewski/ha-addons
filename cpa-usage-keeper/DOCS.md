@@ -149,6 +149,18 @@ uncaptured modes stay separate. Solid lines indicate Normal, dashed lines Fast
 requested, and dotted lines unknown modes. Graphs do not establish confirmed
 provider execution tiers or change billing or pricing rules.
 
+The **Speed measurement** selector directly after **Mode** defaults to **Total
+request time**. Select **Streaming phase (approx.)** to divide summed output
+tokens by summed (request duration minus recorded first-token time), using only
+successful streaming generation requests with at least 32 output tokens and
+250 ms after the first recorded token. Each daily model/mode point needs at
+least three eligible requests. Historical and archived requests are computed
+from existing metadata; no database migration or new provider request is needed.
+Missing streaming flags or usable timings remain gaps. Output includes reasoning
+tokens, and the first event can be reasoning or tool arguments, so this estimate
+is not exact visible-text decode throughput. The selector changes only the speed
+graph and is disabled while viewing time to first token.
+
 
 ## Account performance
 

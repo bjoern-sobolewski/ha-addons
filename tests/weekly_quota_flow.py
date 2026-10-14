@@ -30,8 +30,8 @@ for cycle_id,start,end,percentages in [(9001,reset-timedelta(days=7),reset,[80,2
     for i in range(30):
         at = start+timedelta(minutes=1+2*i)
         table = 'usage_events_archive' if cycle_id==9001 else 'usage_events'
-        c.execute('INSERT INTO '+table+' (id,event_key,api_group_key,provider,auth_type,auth_index,model,upstream_service_tier,timestamp,input_tokens,total_tokens,failed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                  (cycle_id*100+i,'synthetic-event-'+str(cycle_id*100+i),'synthetic-private-client-key','codex','oauth','synthetic-weekly-auth','weekly-test-model','priority',stamp(at),1000000,1000000,0))
+        c.execute('INSERT INTO '+table+' (id,event_key,api_group_key,provider,auth_type,auth_index,model,upstream_service_tier,timestamp,input_tokens,total_tokens,failed,output_tokens,generate,stream,latency_ms,ttft_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                  (cycle_id*100+i,'synthetic-event-'+str(cycle_id*100+i),'synthetic-private-client-key','codex','oauth','synthetic-weekly-auth','weekly-test-model','priority',stamp(at),1000000,1000100,0,100,1,1,2000,1000))
 # Independent account with no quota cycles: performance is stored request metadata.
 c.execute("INSERT INTO usage_identities (id,name,auth_type,identity,type,provider,is_deleted) VALUES (9101,'Synthetic performance',1,'synthetic-performance-auth','codex','codex',0)")
 event_id = 2000000
@@ -85,6 +85,11 @@ def main():
             # Both cycles have eligible samples; the old cycle has one 60-point drop.
             assert mode['ready'] and mode['sample_requests'] == 40
             assert mode['percentage_points'] == 66 and abs(mode['full_allowance_usd'] - 4000/66) < 1e-9
+            timeline = report['weekly_value']['timeline']
+            timed = [point for point in timeline if point['phase_requests']]
+            assert sum(point['phase_requests'] for point in timed) == 60, timed
+            assert all(point['phase_tps'] == 100 and point['speed_tps'] == 50 for point in timed), timed
+            assert all(point['phase_tps'] is None for point in timeline if not point['phase_requests'])
             resets = {item['cycle_id']: item for item in report['weekly_value']['resets']}
             assert resets[9001]['rollover_observed_at'] and report['cycles'][1]['last_remaining_percent'] == 20
             for hidden in (password, readonly, management, 'synthetic-weekly-auth', 'synthetic-private-client-key'):

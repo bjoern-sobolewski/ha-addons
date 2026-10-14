@@ -1,3 +1,33 @@
+diff --git a/internal/api/test/account_performance_test.go b/internal/api/test/account_performance_test.go
+index 7fb9f29..3621193 100644
+--- a/internal/api/test/account_performance_test.go
++++ b/internal/api/test/account_performance_test.go
+@@ -28,8 +28,8 @@ func (p *performanceProviderStub) GetAccountPerformance(_ context.Context, q rep
+ func TestPerformanceAdminValidationAndErrors(t *testing.T) {
+ 	provider := &performanceProviderStub{}
+ 	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+-	response := serveAPIGet(router, "/api/v1/quota/performance/account?days=7&metric=ttft&model=a&model=b&mode=fast&context=small&output=short&effort=low")
+-	if response.Code != 200 || provider.request.AuthIndex != "account" || provider.request.Days != 7 || len(provider.request.Models) != 2 || provider.request.Metric != "ttft" || provider.request.Context != "small" {
++	response := serveAPIGet(router, "/api/v1/quota/performance/account?days=14&metric=ttft&model=a&model=b&mode=fast&context=small&output=short&effort=low")
++	if response.Code != 200 || provider.request.AuthIndex != "account" || provider.request.Days != 14 || len(provider.request.Models) != 2 || provider.request.Metric != "ttft" || provider.request.Context != "small" {
+ 		t.Fatalf("bad forwarding: %d %+v", response.Code, provider.request)
+ 	}
+ 	for _, query := range []string{"days=1", "days=bad", "metric=bad", "mode=bad", "context=bad"} {
+diff --git a/internal/repository/account_performance.go b/internal/repository/account_performance.go
+index 2f46711..2e7bc6a 100644
+--- a/internal/repository/account_performance.go
++++ b/internal/repository/account_performance.go
+@@ -75,8 +75,8 @@ func ValidatePerformanceQuery(q PerformanceQuery) error {
+ 	if strings.TrimSpace(q.AuthIndex) == "" {
+ 		return fmt.Errorf("account is required")
+ 	}
+-	if q.Days != 7 && q.Days != 30 && q.Days != 90 {
+-		return fmt.Errorf("days must be 7, 30 or 90")
++	if q.Days != 7 && q.Days != 14 && q.Days != 30 && q.Days != 90 {
++		return fmt.Errorf("days must be 7, 14, 30 or 90")
+ 	}
+ 	if !oneOf(q.Metric, "latency", "ttft", "tps", "phase") {
+ 		return fmt.Errorf("invalid metric")
 diff --git a/web/src/components/usage/credentials/AnalyticsModelPicker.tsx b/web/src/components/usage/credentials/AnalyticsModelPicker.tsx
 new file mode 100644
 index 0000000..eb81272
@@ -71,7 +101,7 @@ index 8fcedd8..34b78fa 100644
                ref={requestsTabRef}
                id={requestsTabId}
 diff --git a/web/src/components/usage/credentials/PerformancePanel.tsx b/web/src/components/usage/credentials/PerformancePanel.tsx
-index ed693f4..5dcf2f2 100644
+index ed693f4..de65506 100644
 --- a/web/src/components/usage/credentials/PerformancePanel.tsx
 +++ b/web/src/components/usage/credentials/PerformancePanel.tsx
 @@ -7,35 +7,50 @@ import { ApiError, fetchAccountPerformance } from '@/lib/api'
@@ -192,10 +222,11 @@ index ed693f4..5dcf2f2 100644
 +    <div className={styles.toolbar}><h3>{t('analytics.response_speed', 'Response speed')}</h3><Button variant="secondary" size="sm" disabled={loading} onClick={() => setRevision(value => value + 1)}>{t('common.refresh', 'Refresh')}</Button></div>
 +    <p className={styles.note}>{t('analytics.performance_intro', 'Compare how quickly models finish your recorded requests. Start with your five most-used models, then narrow the workload for a fairer comparison.')}</p>
      <div className={styles.filters}>
-+    {!discovering && <AnalyticsModelPicker models={models} selection={selection} onChange={value => setSelectionState({ account: accountKey, value })} />}
-       {select(t('performance.period', 'Period'), days, setDays, [['7', '7 days'], ['30', '30 days'], ['90', '90 days']])}
+-      {select(t('performance.period', 'Period'), days, setDays, [['7', '7 days'], ['30', '30 days'], ['90', '90 days']])}
 -      {select(t('performance.metric', 'Metric'), metric, setMetric, [['latency', t('performance.completion', 'Time to completion')], ['ttft', t('performance.ttft', 'First token (recorded)')], ['tps', t('performance.tps', 'End-to-end output tokens / second')], ['phase', t('performance.phase', 'Approximate phase tokens / second')]])}
 -      {select(t('weekly_trends.mode', 'Mode'), mode, setMode, [['', all], ['normal', modeName('normal')], ['fast', modeName('fast')], ['unknown', modeName('unknown')]])}
++    {!discovering && <AnalyticsModelPicker models={models} selection={selection} onChange={value => setSelectionState({ account: accountKey, value })} />}
++      {select(t('performance.period', 'Period'), days, setDays, [['7', '7 days'], ['14', '14 days'], ['30', '30 days'], ['90', '90 days']])}
 +      {select(t('analytics.speed_measure', 'Response speed over time'), metric, setMetric, [['tps', t('analytics.total_tps', 'Total request time — tokens/s')], ['phase', t('analytics.phase_tps', 'Streaming phase — tokens/s (approx.)')], ['ttft', t('performance.ttft', 'First token (recorded)')], ['latency', t('performance.completion', 'Time to completion')]])}
 +      {select(t('weekly_trends.mode', 'Mode'), mode, setMode, [['captured', t('analytics.captured', 'Normal + Fast')], ['', t('analytics.all_modes', 'All, including uncaptured')], ['normal', modeName('normal')], ['fast', modeName('fast')], ['unknown', modeName('unknown')]])}
      </div>
@@ -531,7 +562,7 @@ index 481b4b3..c78b04d 100644
  
    it('renders Overview metrics with the list thresholds and recent cache rate', async () => {
 diff --git a/web/src/components/usage/test/PerformancePanel.test.tsx b/web/src/components/usage/test/PerformancePanel.test.tsx
-index bd7e1f2..f521dca 100644
+index bd7e1f2..c0e4c1e 100644
 --- a/web/src/components/usage/test/PerformancePanel.test.tsx
 +++ b/web/src/components/usage/test/PerformancePanel.test.tsx
 @@ -28,24 +28,24 @@ it('shows separate actual/matched percentiles, coverage, failures and fixed-mix
@@ -555,12 +586,12 @@ index bd7e1f2..f521dca 100644
  it('uses p10 for slow throughput and forwards model, period and workload filters', async () => {
    await render()
 -  await change('Metric', 'tps'); await change('Period', '7'); await change('Input size', 'large'); await change('Total output size', 'long'); await change('Reasoning effort', 'low'); await change('Mode', 'fast')
-+  await change('Response speed over time', 'tps'); await change('Period', '30'); await change('Input size', 'large'); await change('Total output size', 'long'); await change('Reasoning effort', 'low'); await change('Mode', 'fast')
++  await change('Response speed over time', 'tps'); await change('Period', '14'); await change('Input size', 'large'); await change('Total output size', 'long'); await change('Reasoning effort', 'low'); await change('Mode', 'fast')
    const checkboxes = [...element.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
 -  await act(async () => checkboxes[1].click())
 -  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ metric: 'tps', days: '7', context: 'large', output: 'long', effort: 'low', mode: 'fast', models: ['b'] })
 +  await act(async () => checkboxes[0].click())
-+  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ metric: 'tps', days: '30', context: 'large', output: 'long', effort: 'low', mode: 'fast', models: ['b'] })
++  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ metric: 'tps', days: '14', context: 'large', output: 'long', effort: 'low', mode: 'fast', models: ['b'] })
    await change('Comparison', 'raw'); await change('Percentile', 'tail')
 -  expect(mocks.charts.get('Performance over time')!.datasets[0].data).toEqual([1, 1])
 +  expect(mocks.charts.get('Response speed over time')!.datasets[0].data).toEqual([1, 1])

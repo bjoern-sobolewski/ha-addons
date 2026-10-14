@@ -150,7 +150,7 @@ have been consolidated into this tab.
 
 Open **Auth Files → Codex account → Response speed** in the admin or all-key
 read-only dashboard. Compare models and outgoing Normal/Fast requested mode
-over 7, 30 or 90 days; account request history is independent of quota windows.
+over 7, 14, 30 or 90 days; account request history is independent of quota windows.
 The default is 7 days, total-time TPS and Normal + Fast modes. This is shared
 account reporting across all client keys and includes archived requests. The
 report reads local stored metadata only, without provider calls or prompts.

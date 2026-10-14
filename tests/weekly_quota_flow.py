@@ -98,7 +98,7 @@ def main():
             assert request(prefix + '/quota/history/synthetic-weekly-auth', opener=opener)[0] == 404
             assert request(prefix + '/read-only/accounts/0/weekly-quota', opener=opener)[0] == 404
             assert request(url + '?window_role=bad', opener=opener)[0] == 400
-            performance_url = prefix + '/read-only/accounts/9101/performance?days=30&metric=latency'
+            performance_url = prefix + '/read-only/accounts/9101/performance?days=14&metric=latency'
             assert request(performance_url)[0] == 401
             status, performance_body = request(performance_url, opener=opener)
             assert status == 200, (status, performance_body)

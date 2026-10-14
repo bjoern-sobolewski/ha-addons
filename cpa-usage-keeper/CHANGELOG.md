@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.30
+
+- Add a 14-day reporting period to Response speed, alongside 7, 30 and 90 days.
+
 ## 0.1.29
 
 - Move response speed into its own tab before Weekly value, with total-time TPS, approximate streaming TPS, first-token time and completion time in one dropdown.

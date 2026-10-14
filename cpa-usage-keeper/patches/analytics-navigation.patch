@@ -1,0 +1,699 @@
+diff --git a/web/src/components/usage/credentials/AnalyticsModelPicker.tsx b/web/src/components/usage/credentials/AnalyticsModelPicker.tsx
+new file mode 100644
+index 0000000..eb81272
+--- /dev/null
++++ b/web/src/components/usage/credentials/AnalyticsModelPicker.tsx
+@@ -0,0 +1,35 @@
++import { useEffect, useRef } from 'react'
++import { useTranslation } from 'react-i18next'
++import { analyticsModelColor, selectedAnalyticsModels, type AnalyticsModel, type ModelSelection } from './analyticsModels'
++import styles from './WeeklyQuotaValuePanel.module.scss'
++
++export function AnalyticsModelPicker({ models, selection, onChange }: { models: AnalyticsModel[]; selection: ModelSelection; onChange: (selection: ModelSelection) => void }) {
++  const { t, i18n } = useTranslation()
++  const ref = useRef<HTMLDetailsElement>(null)
++  const selected = selectedAnalyticsModels(selection, models)
++  useEffect(() => {
++    const close = (event: PointerEvent) => { if (!ref.current?.contains(event.target as Node)) ref.current?.removeAttribute('open') }
++    document.addEventListener('pointerdown', close)
++    return () => document.removeEventListener('pointerdown', close)
++  }, [])
++  return <details ref={ref} className={styles.modelDropdown} onKeyDown={event => {
++    if (event.key === 'Escape') { ref.current?.removeAttribute('open'); ref.current?.querySelector('summary')?.focus(); event.stopPropagation() }
++  }}>
++    <summary aria-label={t('analytics.models', 'Models')}>{t('analytics.models', 'Models')} · {selection === 'top' ? t('analytics.top_short', 'Top 5') : `${selected.length} ${t('analytics.selected', 'selected')}`}</summary>
++    <div className={styles.modelMenu}>
++      <div className={styles.pickerActions}>
++        <button type="button" aria-pressed={selection === 'top'} onClick={() => onChange('top')}>{t('analytics.top', 'Top 5 by requests')}</button>
++        <button type="button" aria-pressed={selection === 'all'} onClick={() => onChange('all')}>{t('analytics.all', 'Show all')}</button>
++        <button type="button" onClick={() => onChange([])}>{t('analytics.clear', 'Clear')}</button>
++      </div>
++      <div className={styles.modelOptions} role="group" aria-label={t('analytics.models', 'Models')}>
++        {models.map(item => <label key={item.model} className={styles.modelOption}>
++          <input type="checkbox" aria-label={item.model || 'Unnamed model'} checked={selected.includes(item.model)} onChange={() => onChange(selected.includes(item.model) ? selected.filter(value => value !== item.model) : [...selected, item.model])} />
++          <span className={styles.swatch} style={{ backgroundColor: analyticsModelColor(item.model, models) }} />
++          <span>{item.model || '—'}</span><small>{new Intl.NumberFormat(i18n.language, { notation: 'compact', maximumFractionDigits: 1 }).format(item.requests)}</small>
++        </label>)}
++      </div>
++      <p className={styles.meta}>{t('analytics.ranking_note', 'Ranked by recorded requests in this period.')}</p>
++    </div>
++  </details>
++}
+diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+index 8fcedd8..34b78fa 100644
+--- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
++++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+@@ -155,8 +155,8 @@ export function CredentialDetailDrawer({
+   const hasPerformance = quotaHistoryProvider === 'codex'
+   const availableTabs = useMemo<CredentialDetailTab[]>(() => {
+     const tabs: CredentialDetailTab[] = ['overview']
+-    if (hasQuotaHistory) tabs.push('quota-history')
+     if (hasPerformance) tabs.push('performance')
++    if (hasQuotaHistory) tabs.push('quota-history')
+     tabs.push('requests')
+     if (!readOnly) tabs.push('errors')
+     return tabs
+@@ -474,6 +474,7 @@ export function CredentialDetailDrawer({
+             >
+               {t('usage_stats.credentials_detail_overview_tab')}
+             </button>
++            {hasPerformance && <button ref={performanceTabRef} id={performanceTabId} type="button" role="tab" className={styles.tabButton} aria-selected={activeTab === 'performance'} aria-controls={performancePanelId} tabIndex={activeTab === 'performance' ? 0 : -1} data-credential-detail-tab="performance" onClick={() => activateTab('performance')} onKeyDown={handleTabKeyDown}>{t('analytics.response_speed', 'Response speed')}</button>}
+             {hasQuotaHistory ? (
+               <button
+                 ref={quotaHistoryTabRef}
+@@ -491,7 +492,7 @@ export function CredentialDetailDrawer({
+                 {quotaHistoryProvider === 'codex' ? t('weekly_quota.tab', 'Weekly value') : t('usage_stats.credentials_quota_history_tab')}
+               </button>
+             ) : null}
+-            {hasPerformance && <button ref={performanceTabRef} id={performanceTabId} type="button" role="tab" className={styles.tabButton} aria-selected={activeTab === 'performance'} aria-controls={performancePanelId} tabIndex={activeTab === 'performance' ? 0 : -1} data-credential-detail-tab="performance" onClick={() => activateTab('performance')} onKeyDown={handleTabKeyDown}>{t('performance.title', 'Performance')}</button>}
++
+             <button
+               ref={requestsTabRef}
+               id={requestsTabId}
+diff --git a/web/src/components/usage/credentials/PerformancePanel.tsx b/web/src/components/usage/credentials/PerformancePanel.tsx
+index ed693f4..c2f4d5f 100644
+--- a/web/src/components/usage/credentials/PerformancePanel.tsx
++++ b/web/src/components/usage/credentials/PerformancePanel.tsx
+@@ -7,35 +7,50 @@ import { ApiError, fetchAccountPerformance } from '@/lib/api'
+ import type { PerformanceReport, PerformanceStats } from '@/lib/types'
+ import { Button } from '@/components/ui/Button'
+ import { useThemeStore } from '@/stores'
+-import { getUsageChartTheme, USAGE_CHART_COMPOSITION_COLORS } from '@/utils/usage/chartConfig'
++import { buildUsageChartTooltipStyle, getUsageChartTheme } from '@/utils/usage/chartConfig'
++import { AnalyticsModelPicker } from './AnalyticsModelPicker'
++import { analyticsModeSelected, analyticsModelColor, rankAnalyticsModels, selectedAnalyticsModels, type AnalyticsModel, type ModelSelection } from './analyticsModels'
+ import styles from './WeeklyQuotaValuePanel.module.scss'
+-import performanceStyles from './PerformancePanel.module.scss'
+ 
+ export function PerformancePanel({ authIndex, readOnlyAccountId, onAuthRequired }: { authIndex: string; readOnlyAccountId?: string; onAuthRequired?: () => void }) {
+   const { t, i18n } = useTranslation()
+   const isDark = useThemeStore(state => state.resolvedTheme) === 'dark'
+-  const [days, setDays] = useState('30')
+-  const [metric, setMetric] = useState('latency')
+-  const [mode, setMode] = useState('')
++  const [days, setDays] = useState('7')
++  const [metric, setMetric] = useState('tps')
++  const [mode, setMode] = useState('captured')
+   const [context, setContext] = useState('')
+   const [output, setOutput] = useState('')
+   const [effort, setEffort] = useState('')
+-  const [models, setModels] = useState<string[]>([])
++  const accountKey = JSON.stringify([authIndex, readOnlyAccountId])
++  const catalogKey = JSON.stringify([accountKey, days])
++  const [selectionState, setSelectionState] = useState<{ account: string; value: ModelSelection }>()
++  const selection = selectionState?.account === accountKey ? selectionState.value : 'top'
++  const [catalog, setCatalog] = useState<{ key: string; models: AnalyticsModel[]; efforts: string[] }>()
++  const discovering = catalog?.key !== catalogKey
++  const models = discovering ? [] : catalog!.models
++  const selectedModels = selectedAnalyticsModels(selection, models)
++  const requestModels = discovering || selection === 'all' ? [] : selectedModels
++  const noSelection = !discovering && models.length > 0 && !selectedModels.length
+   const [basis, setBasis] = useState<'raw' | 'matched'>('raw')
+   const [tail, setTail] = useState(false)
+   const [revision, setRevision] = useState(0)
+   const [result, setResult] = useState<{ key: string; report?: PerformanceReport; error?: boolean }>()
+-  const [options, setOptions] = useState<{ models: string[]; efforts: string[] }>({ models: [], efforts: [] })
+-  const requestKey = JSON.stringify([authIndex, readOnlyAccountId, days, metric, mode, context, output, effort, models, revision])
+-  const loading = result?.key !== requestKey
+-  const report = loading ? undefined : result?.report
++  const requestKey = JSON.stringify([accountKey, days, metric, mode, context, output, effort, requestModels, discovering, revision])
++  const loading = !noSelection && result?.key !== requestKey
++  const report = loading || noSelection ? undefined : result?.report
+   useEffect(() => {
++    if (noSelection) return
+     const controller = new AbortController()
+-    fetchAccountPerformance(authIndex, { readOnlyAccountId, days, metric, mode, context, output, effort, models }, controller.signal)
++    // Discover request totals without workload filters before asking the server to
++    // match the selected models. Merely hiding lines would leave the wrong mix.
++    const query = discovering
++      ? { readOnlyAccountId, days, metric: 'latency', mode: '', context: '', output: '', effort: '', models: [] }
++      : { readOnlyAccountId, days, metric, mode: mode === 'captured' ? '' : mode, context, output, effort, models: requestModels }
++    fetchAccountPerformance(authIndex, query, controller.signal)
+       .then(report => {
+         if (controller.signal.aborted) return
++        if (discovering) setCatalog({ key: catalogKey, models: rankAnalyticsModels(report.groups, report.models), efforts: report.efforts })
+         setResult({ key: requestKey, report })
+-        setOptions({ models: report.models, efforts: report.efforts })
+       })
+       .catch((error: unknown) => {
+         if (controller.signal.aborted) return
+@@ -43,78 +58,83 @@ export function PerformancePanel({ authIndex, readOnlyAccountId, onAuthRequired
+         setResult({ key: requestKey, error: true })
+       })
+     return () => controller.abort()
+-  }, [authIndex, readOnlyAccountId, days, metric, mode, context, output, effort, models, requestKey, onAuthRequired])
++    // requestKey contains every query dimension, including the resolved model list.
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [requestKey, noSelection, onAuthRequired])
+   const speed = metric === 'tps' || metric === 'phase'
+   const unit = speed ? 'tokens/s' : 's'
+   const format = (value: number | null | undefined) => value == null ? '—' : `${new Intl.NumberFormat(i18n.language, { maximumFractionDigits: 2 }).format(value)} ${unit}`
+   const modeName = (value: string) => value === 'fast' ? t('weekly_quota.fast', 'Fast requested') : value === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
++  const groups = (report?.groups ?? []).filter(group => selectedModels.includes(group.model) && analyticsModeSelected(group.mode, mode))
++    .sort((a, b) => selectedModels.indexOf(a.model) - selectedModels.indexOf(b.model) || a.mode.localeCompare(b.mode))
+   const statValue = (stats: PerformanceStats) => tail ? speed ? stats.p10 : stats.p90 : stats.median
+-  const dates = report?.groups[0]?.days.map(point => point.day) ?? []
++  const chartGroups = groups.filter(group => group.days.some(point => statValue(point[basis]) != null))
++  const dates = groups[0]?.days.map(point => point.day) ?? []
+   const data: ChartData<'line', Array<number | null>, string> = {
+     labels: dates.map(day => new Date(`${day}T00:00:00Z`).toLocaleDateString(i18n.language, { month: 'short', day: 'numeric', timeZone: 'UTC' })),
+-    datasets: report?.groups.map(group => {
+-      const color = USAGE_CHART_COMPOSITION_COLORS[report.models.indexOf(group.model) % USAGE_CHART_COMPOSITION_COLORS.length].base
++    datasets: chartGroups.map(group => {
++      const color = analyticsModelColor(group.model, models)
+       return { label: `${group.model} · ${modeName(group.mode)}`, data: group.days.map(point => statValue(point[basis])), borderColor: color, backgroundColor: color, borderDash: group.mode === 'fast' ? [7, 3] : group.mode === 'unknown' ? [2, 4] : [], borderWidth: 2, pointRadius: 3, spanGaps: false, tension: 0 }
+-    }) ?? [],
++    }),
+   }
+   const theme = getUsageChartTheme(isDark)
+   const chartOptions: ChartOptions<'line'> = {
+     responsive: true, maintainAspectRatio: false, animation: false,
+-    interaction: { mode: 'index', intersect: false },
+-    plugins: {
+-      legend: { position: 'bottom', labels: { color: theme.textSecondary, boxWidth: 20, boxHeight: 2 } },
+-      tooltip: { callbacks: {
+-        label: item => `${item.dataset.label}: ${format(item.parsed.y)}`,
+-        afterLabel: item => `${report?.groups[item.datasetIndex]?.days[item.dataIndex]?.[basis].samples ?? 0} ${t('performance.samples', 'timed requests')}`,
+-      } },
+-    },
++    interaction: { mode: 'nearest', intersect: false },
++    plugins: { legend: { position: 'bottom', labels: { color: theme.textSecondary, boxWidth: 20, boxHeight: 2 } }, tooltip: { ...buildUsageChartTooltipStyle(theme), callbacks: {
++      label: item => `${item.dataset.label}: ${format(item.parsed.y)}`,
++      afterLabel: item => `${chartGroups[item.datasetIndex]?.days[item.dataIndex]?.[basis].samples ?? 0} ${t('performance.samples', 'timed requests')}`,
++    } } },
+     scales: { x: { ticks: { color: theme.textSecondary, maxTicksLimit: 8 }, grid: { display: false } }, y: { beginAtZero: true, title: { display: true, text: unit, color: theme.textSecondary }, ticks: { color: theme.textSecondary }, grid: { color: theme.grid } } },
+   }
+   const select = (label: string, value: string, change: (value: string) => void, values: Array<[string, string]>) => <label>{label}<select aria-label={label} value={value} onChange={event => change(event.target.value)}>{values.map(([key, name]) => <option key={key} value={key}>{name}</option>)}</select></label>
+   const all = t('performance.all', 'All')
+-  const hasChart = data.datasets.some(group => group.data.some(value => value != null))
+   return <div className={`${styles.panel} ${styles.trends}`} data-account-performance="true">
+-    <div className={styles.toolbar}><h3>{t('performance.title', 'Performance')}</h3><Button size="sm" disabled={loading} onClick={() => setRevision(value => value + 1)}>{t('common.refresh', 'Refresh')}</Button></div>
+-    <p className={styles.note}>{t('performance.scope', 'Recorded API requests for this shared account, across all client keys, including archived requests. Timings are measured by the proxy; client network, tool execution and complete agent tasks are not measured here.')}</p>
++    <div className={styles.toolbar}><h3>{t('analytics.response_speed', 'Response speed')}</h3><Button variant="secondary" size="sm" disabled={loading} onClick={() => setRevision(value => value + 1)}>{t('common.refresh', 'Refresh')}</Button></div>
++    <p className={styles.note}>{t('analytics.performance_intro', 'Compare how quickly models finish your recorded requests. Start with your five most-used models, then narrow the workload for a fairer comparison.')}</p>
+     <div className={styles.filters}>
+       {select(t('performance.period', 'Period'), days, setDays, [['7', '7 days'], ['30', '30 days'], ['90', '90 days']])}
+-      {select(t('performance.metric', 'Metric'), metric, setMetric, [['latency', t('performance.completion', 'Time to completion')], ['ttft', t('performance.ttft', 'First token (recorded)')], ['tps', t('performance.tps', 'End-to-end output tokens / second')], ['phase', t('performance.phase', 'Approximate phase tokens / second')]])}
+-      {select(t('weekly_trends.mode', 'Mode'), mode, setMode, [['', all], ['normal', modeName('normal')], ['fast', modeName('fast')], ['unknown', modeName('unknown')]])}
++      {select(t('analytics.speed_measure', 'Response speed over time'), metric, setMetric, [['tps', t('analytics.total_tps', 'Total request time — tokens/s')], ['phase', t('analytics.phase_tps', 'Streaming phase — tokens/s (approx.)')], ['ttft', t('performance.ttft', 'First token (recorded)')], ['latency', t('performance.completion', 'Time to completion')]])}
++      {select(t('weekly_trends.mode', 'Mode'), mode, setMode, [['captured', t('analytics.captured', 'Normal + Fast')], ['', t('analytics.all_modes', 'All, including uncaptured')], ['normal', modeName('normal')], ['fast', modeName('fast')], ['unknown', modeName('unknown')]])}
+     </div>
+-    <details className={performanceStyles.workload}><summary>{t('performance.workload', 'Models and workload filters')}</summary>
+-      <div className={performanceStyles.models}><label><input type="checkbox" checked={!models.length} onChange={() => setModels([])} />{t('weekly_trends.all_models', 'All models')}</label>{options.models.map(model => <label key={model}><input type="checkbox" checked={!models.length || models.includes(model)} onChange={event => setModels(current => {
+-        const selected = current.length ? current : options.models
+-        const next = event.target.checked ? [...new Set([...selected, model])] : selected.filter(value => value !== model)
+-        return next.length ? next.sort() : current
+-      })} />{model}</label>)}</div>
+-      <div className={styles.filters}>
+-        {select(t('performance.context', 'Input size'), context, setContext, [['', all], ['small', '< 8k tokens'], ['medium', '8k–32k tokens'], ['large', '32k–128k tokens'], ['huge', '128k+ tokens']])}
+-        {select(t('performance.output', 'Total output size'), output, setOutput, [['', all], ['short', '< 256 tokens'], ['medium', '256–1,024 tokens'], ['long', '1,024–4,096 tokens'], ['huge', '4,096+ tokens']])}
+-        {select(t('performance.effort', 'Reasoning effort'), effort, setEffort, [['', all], ...options.efforts.map(value => [value, value] as [string, string])])}
+-      </div>
+-    </details>
+-    {loading && <p role="status">{t('common.loading', 'Loading…')}</p>}
+-    {!loading && result?.error && <p role="alert">{t('performance.error', 'Unable to load performance. Use Refresh to retry.')}</p>}
++    {!discovering && <AnalyticsModelPicker models={models} selection={selection} onChange={value => setSelectionState({ account: accountKey, value })} />}
++    <details className={styles.method}><summary>{t('analytics.workload_filters', 'Refine workload')}</summary><div className={styles.filters}>
++      {select(t('performance.context', 'Input size'), context, setContext, [['', all], ['small', '< 8k tokens'], ['medium', '8k–32k tokens'], ['large', '32k–128k tokens'], ['huge', '128k+ tokens']])}
++      {select(t('performance.output', 'Total output size'), output, setOutput, [['', all], ['short', '< 256 tokens'], ['medium', '256–1,024 tokens'], ['long', '1,024–4,096 tokens'], ['huge', '4,096+ tokens']])}
++      {select(t('performance.effort', 'Reasoning effort'), effort, setEffort, [['', all], ...(discovering ? [] : catalog!.efforts).map(value => [value, value] as [string, string])])}
++    </div></details>
++    {noSelection && <p role="status" className={styles.empty}>{t('analytics.choose', 'Select a model to show its data, or restore Top 5.')}</p>}
++    {loading && <p role="status" className={styles.empty}>{t('common.loading', 'Loading…')}</p>}
++    {!loading && result?.error && !noSelection && <p role="alert" className={styles.empty}>{t('performance.error', 'Unable to load performance. Use Refresh to retry.')}</p>}
+     {report && <>
+-      <p className={styles.note}>{t('performance.range', 'Recorded range')}: {new Date(report.range_start).toLocaleString(i18n.language)} – {new Date(report.generated_at).toLocaleString(i18n.language)}</p>
+-      <p className={styles.note}>{speed ? t('performance.speed_direction', 'Higher is faster. Slow tail uses p10: 10% of timed requests are this slow or slower.') : t('performance.time_direction', 'Lower is faster. Slow tail uses p90: 10% of timed requests take this long or longer.')} {t('performance.distribution', 'Median and tail are request percentiles, not averages of model or bucket percentiles.')}</p>
+-      <div className={styles.scroll}><table><thead><tr><th>{t('performance.group', 'Model / mode')}</th><th>{t('performance.raw', 'Actual workload')}</th><th>{t('performance.matched', 'Same workload mix')}</th><th>{t('performance.coverage', 'Matched coverage')}</th></tr></thead><tbody>{report.groups.map(group => <tr key={JSON.stringify([group.model, group.mode])}>
+-        <td><strong>{group.model}</strong><small>{modeName(group.mode)}</small><small>{group.requests} {t('weekly_quota.requests', 'requests')} · {group.failed} {t('performance.failed', 'failed')}</small></td>
+-        <td><strong>{format(group.raw.median)}</strong><small>{t('performance.median', 'Median')}</small><small>{speed ? 'p10' : 'p90'}: {format(speed ? group.raw.p10 : group.raw.p90)}</small><small>{group.raw.samples} {t('performance.samples', 'timed requests')}</small></td>
+-        <td><strong>{group.matched.median == null ? t('performance.insufficient', 'Insufficient overlap') : format(group.matched.median)}</strong>{group.matched.median != null && <><small>{t('performance.median', 'Median')}</small><small>{speed ? 'p10' : 'p90'}: {format(speed ? group.matched.p10 : group.matched.p90)}</small></>}</td>
+-        <td><strong>{group.matched.samples} / {group.raw.samples}</strong><small>{new Intl.NumberFormat(i18n.language, { style: 'percent', maximumFractionDigits: 1 }).format(group.coverage)} {t('performance.covered', 'of valid timings')}</small></td>
++      <section className={styles.card} aria-label={t('analytics.response_speed_chart', 'Response speed over time')}>
++        <div className={styles.sectionHeading}><h4>{t('analytics.response_speed_chart', 'Response speed over time')}</h4><span className={styles.meta}>{speed ? t('analytics.higher', 'Higher is faster') : t('analytics.lower', 'Lower is faster')} · UTC</span></div>
++        <div className={styles.filters}>
++          {select(t('performance.basis', 'Comparison'), basis, value => setBasis(value as 'raw' | 'matched'), [['raw', t('performance.raw', 'Actual workload')], ['matched', t('performance.matched', 'Same workload mix')]])}
++          {select(t('performance.percentile', 'Percentile'), tail ? 'tail' : 'median', value => setTail(value === 'tail'), [['median', t('performance.typical', 'Typical — median')], ['tail', speed ? 'Slow tail — p10' : 'Slow tail — p90']])}
++        </div>
++        <div className={styles.modeKey}><span><i />Normal</span><span><i className={styles.fast} />Fast requested</span>{(mode === '' || mode === 'unknown') && <span><i className={styles.unknown} />Mode not captured</span>}</div>
++        {data.datasets.length ? <div className={styles.chart}><Chart type="line" data={data} options={chartOptions} role="img" aria-label={t('analytics.response_speed_chart', 'Response speed over time')} /></div> : <p role="status" className={styles.empty}>{t('performance.no_chart', 'Not enough supported daily samples for this comparison. Try Actual workload or a longer period.')}</p>}
++        <p className={styles.note}>{t('analytics.performance_chart_note', 'Colors identify models; line styles identify modes. Missing daily samples stay gaps. Select fewer models if the comparison has insufficient overlap.')}</p>
++      </section>
++      <div className={styles.sectionHeading}><h4>{t('analytics.comparison_table', 'Model comparison')}</h4><span className={styles.meta}>{t('analytics.median_tail', 'Median / slow tail')} ({speed ? 'p10' : 'p90'})</span></div>
++      <div className={styles.scroll}><table><thead><tr><th>{t('performance.group', 'Model / mode')}</th><th>{t('performance.raw', 'Actual workload')}</th><th>{t('performance.matched', 'Same workload mix')}</th><th>{t('performance.coverage', 'Matched coverage')}</th></tr></thead><tbody>{groups.map(group => <tr key={JSON.stringify([group.model, group.mode])}>
++        <td><strong><span className={styles.swatch} style={{ backgroundColor: analyticsModelColor(group.model, models) }} /> {group.model}</strong><small>{modeName(group.mode)}</small><small>{group.requests} {t('weekly_quota.requests', 'requests')} · {group.failed} {t('performance.failed', 'failed')}</small></td>
++        <td><strong>{format(group.raw.median)}</strong><small>{speed ? 'p10' : 'p90'}: {format(speed ? group.raw.p10 : group.raw.p90)}</small><small>{group.raw.samples} {t('performance.samples', 'timed requests')}</small></td>
++        <td><strong>{group.matched.median == null ? t('performance.insufficient', 'Insufficient overlap') : format(group.matched.median)}</strong>{group.matched.median != null && <small>{speed ? 'p10' : 'p90'}: {format(speed ? group.matched.p10 : group.matched.p90)}</small>}</td>
++        <td><strong>{new Intl.NumberFormat(i18n.language, { style: 'percent', maximumFractionDigits: 1 }).format(group.coverage)}</strong><small>{group.matched.samples} / {group.raw.samples}</small></td>
+       </tr>)}</tbody></table></div>
+-      {!report.groups.length && <p role="status">{t('performance.empty', 'No recorded requests match these filters.')}</p>}
+-      <p className={styles.note}>{t('performance.match_note', 'Matching uses common input/output size buckets, cache share (<50%, 50–90%, 90%+), exact recorded reasoning effort, streaming status and executor/transport. Each eligible model/mode contributes equally to one fixed reference workload mix for this report. Weighted request distributions produce the matched percentiles; unshared workloads are excluded. Unknown recorded fields match only unknown fields, so task difficulty and unrecorded differences can still affect comparisons.')}</p>
+-      <p className={styles.note}>{report.comparison_groups} {t('performance.compared_groups', 'model/mode groups compared')} · {report.common_cells} {t('performance.common_cells', 'common workload buckets')}. {t('performance.floors', 'Matched comparisons need at least 2 groups, 20 valid timings per group and 5 per common bucket. Groups below the floor or with uncaptured mode retain raw results only. These floors do not establish statistical confidence.')}</p>
+-      <h4>{t('performance.over_time', 'Performance over time')}</h4>
+-      <div className={styles.filters}>
+-        {select(t('performance.basis', 'Comparison'), basis, value => setBasis(value as 'raw' | 'matched'), [['raw', t('performance.raw', 'Actual workload')], ['matched', t('performance.matched', 'Same workload mix')]])}
+-        {select(t('performance.percentile', 'Percentile'), tail ? 'tail' : 'median', value => setTail(value === 'tail'), [['median', t('performance.typical', 'Typical — median')], ['tail', speed ? 'Slow tail — p10' : 'Slow tail — p90']])}
+-      </div>
+-      {hasChart ? <div className={styles.chart}><Chart type="line" data={data} options={chartOptions} role="img" aria-label={t('performance.over_time', 'Performance over time')} /></div> : <p role="status">{t('performance.no_chart', 'Not enough supported daily samples for this comparison. Try Actual workload or a longer period.')}</p>}
+-      <p className={styles.note}>{t('performance.daily_note', 'Daily UTC buckets; today and the first day may be partial. Raw points need 3 valid timings. Matched points require 20 timings and 3 in every reference bucket; missing buckets stay gaps and never change the reference mix. The fixed mix describes the selected reporting period, not a forecast.')}</p>
+-      <p className={styles.note}>{t('performance.timing_note', 'First token is the existing recorded timing and may be reasoning, tool arguments or a fallback event; first visible text is not separately recorded. Output tokens include reasoning. End-to-end TPS includes startup and reasoning time. Phase TPS approximates output divided by (completion time − first-token time), only for streaming requests with at least 32 output tokens and 250 ms after first token; it is not measured visible-text decode speed. Failed requests are counted separately and excluded from timing comparisons.')}</p>
++      {!groups.length && <p role="status" className={styles.empty}>{t('performance.empty', 'No recorded requests match these filters.')}</p>}
++      <p className={styles.meta}>{report.comparison_groups} {t('performance.compared_groups', 'model/mode groups compared')} · {report.common_cells} {t('performance.common_cells', 'common workload buckets')}</p>
++      <p className={styles.note}>{t('analytics.timing_limit', 'Proxy timings include reasoning and exclude client network delays and external tool execution. First token is not necessarily first visible text.')}</p>
++      <details className={styles.method}><summary>{t('analytics.performance_method', 'How matching and timing work')}</summary>
++        <p className={styles.note}>{t('performance.match_note', 'Matching uses common input/output size buckets, cache share (<50%, 50–90%, 90%+), exact recorded reasoning effort, streaming status and executor/transport. Each eligible model/mode contributes equally to one fixed reference workload mix for this report. Weighted request distributions produce the matched percentiles; unshared workloads are excluded. Unknown recorded fields match only unknown fields, so task difficulty and unrecorded differences can still affect comparisons.')}</p>
++        <p className={styles.note}>{t('performance.floors', 'Matched comparisons need at least 2 groups, 20 valid timings per group and 5 per common bucket. Groups below the floor or with uncaptured mode retain raw results only. These floors do not establish statistical confidence.')}</p>
++        <p className={styles.note}>{speed ? t('performance.speed_direction', 'Higher is faster. Slow tail uses p10: 10% of timed requests are this slow or slower.') : t('performance.time_direction', 'Lower is faster. Slow tail uses p90: 10% of timed requests take this long or longer.')}</p>
++        <p className={styles.note}>{t('performance.daily_note', 'Daily UTC buckets; today and the first day may be partial. Raw points need 3 valid timings. Matched points require 20 timings and 3 in every reference bucket; missing buckets stay gaps and never change the reference mix. The fixed mix describes the selected reporting period, not a forecast.')}</p>
++        <p className={styles.note}>{t('performance.timing_note', 'First token is the existing recorded timing and may be reasoning, tool arguments or a fallback event; first visible text is not separately recorded. Output tokens include reasoning. End-to-end TPS includes startup and reasoning time. Phase TPS approximates output divided by (completion time − first-token time), only for streaming requests with at least 32 output tokens and 250 ms after first token; it is not measured visible-text decode speed. Failed requests are counted separately and excluded from timing comparisons.')}</p>
++        <p className={styles.meta}>{new Date(report.range_start).toLocaleString(i18n.language)} – {new Date(report.generated_at).toLocaleString(i18n.language)}</p>
++      </details>
+     </>}
+   </div>
+ }
+diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
+index e153098..29f90ed 100644
+--- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
++++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
+@@ -1,33 +1,41 @@
+-.panel {
+-  display: flex;
+-  flex-direction: column;
+-  gap: 12px;
+-  min-width: 0;
+-  h3, h4, p { margin: 0; }
+-}
+-.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+-.note { font-size: 12px; line-height: 1.6; opacity: .75; }
+-.scroll {
+-  max-width: 100%;
+-  overflow-x: auto;
+-  border: 1px solid var(--border-color, #80808040);
+-  border-radius: 8px;
++.panel, .trends { display: flex; flex-direction: column; gap: 18px; min-width: 0; color: var(--text-primary); h3, h4, p { margin: 0; } }
++
++.toolbar, .sectionHeading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
++.toolbar h3 { font-size: 19px; font-weight: 750; }
++.sectionHeading { font-size: 13px; font-weight: 650; small { color: var(--text-secondary); margin-left: 6px; font-weight: 400; } }
++.note { font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
++.meta { font-size: 11px; color: var(--text-secondary); }
++.card { border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-primary); padding: 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
++.views, .pickerActions { display: flex; gap: 4px; flex-wrap: wrap; button { font: inherit; font-size: 12px; border: 1px solid transparent; color: var(--text-secondary); background: transparent; border-radius: 7px; padding: 7px 10px; cursor: pointer; &[aria-pressed='true'] { background: var(--bg-secondary); color: var(--text-primary); border-color: var(--border-color); } &:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; } } }
++.views { padding-bottom: 8px; border-bottom: 1px solid var(--border-color); button { font-size: 13px; padding: 8px 14px; } }
++.filters { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-end; }
++.filters label, .metric { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-secondary); }
++.panel select { max-width: 100%; padding: 8px 10px; min-height: 36px; border: 1px solid var(--border-color); border-radius: 7px; background: var(--bg-secondary); color: var(--text-primary); font: inherit; font-size: 13px; }
++.scroll { max-width: 100%; overflow-x: auto; border: 1px solid var(--border-color); border-radius: 10px;
+   table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+-  th, td { padding: 12px; vertical-align: top; border-bottom: 1px solid var(--border-color, #80808040); min-width: 130px; }
+-  th { font-weight: 600; }
+-  small { display: block; margin-top: 5px; font-size: 11px; opacity: .75; }
++  th, td { padding: 12px 14px; vertical-align: top; border-bottom: 1px solid var(--border-color); min-width: 112px; }
++  th { font-size: 11px; font-weight: 650; color: var(--text-secondary); background: var(--bg-secondary); }
++  small { display: block; margin-top: 4px; font-size: 11px; line-height: 1.5; color: var(--text-secondary); }
++  strong { font-variant-numeric: tabular-nums; font-weight: 650; }
+   tr:last-child td { border-bottom: 0; }
++  tr[data-current='true'] { background: color-mix(in srgb, var(--success-color, #10b981) 5%, var(--bg-primary)); }
+ }
+-
+-.trends { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+-.filters { display: flex; flex-wrap: wrap; gap: 12px; }
+-.filters label, .metric { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+-.trends select { max-width: 100%; padding: 6px 8px; border: 1px solid var(--border-color, #80808040); border-radius: 6px; background: var(--bg-secondary); color: inherit; }
+-.chart { height: 300px; min-width: 0; width: 100%; position: relative; }
+-@media (max-width: 600px) { .chart { height: 320px; } }
+-
+-.scroll .cyclesTable {
+-  th, td { min-width: 105px; }
+-  th:last-child, td:last-child { min-width: 170px; }
+-}
++.cyclesTable { th:first-child, td:first-child { min-width: 150px; } th:last-child, td:last-child { min-width: 140px; } }
+ .cycleRate { font-size: 15px; }
++.badge { display: inline-block; font-size: 10px; line-height: 1.6; padding: 2px 7px; margin-top: 5px; border-radius: 5px; color: var(--text-secondary); background: var(--bg-secondary); border: 1px solid var(--border-color); }
++.quotaBar { height: 4px; margin-top: 7px; max-width: 90px; border-radius: 4px; background: var(--bg-secondary); overflow: hidden; span { display: block; height: 100%; background: var(--success-color, #10b981); } }
++.method { border-top: 1px solid var(--border-color); padding-top: 12px; summary { font-size: 12px; color: var(--text-secondary); cursor: pointer; } p { margin-top: 10px; } }
++.coverage { font-size: 11px; summary { cursor: pointer; color: var(--text-secondary); } }
++.chart { height: 290px; min-width: 0; width: 100%; position: relative; }
++.modeKey { display: flex; flex-wrap: wrap; gap: 14px; font-size: 11px; color: var(--text-secondary); span { display: inline-flex; gap: 6px; align-items: center; } i { width: 22px; border-top: 2px solid currentColor; } .fast { border-top-style: dashed; } .unknown { border-top-style: dotted; } }
++.modelPicker { display: flex; flex-direction: column; gap: 10px; }
++.modelChips { display: flex; gap: 7px; flex-wrap: wrap; }
++.modelChip { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; padding: 6px 9px; border: 1px solid var(--border-color); border-radius: 7px; font-size: 11px; color: var(--text-secondary); &[data-selected='true'] { background: var(--bg-secondary); color: var(--text-primary); } input { width: 13px; height: 13px; margin: 0; accent-color: var(--text-primary); } small { color: var(--text-secondary); font-size: 10px; } }
++.swatch { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
++.moreModels { summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; } .modelChips { margin-top: 10px; } }
++.empty { padding: 18px; border: 1px dashed var(--border-color); border-radius: 8px; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
++@media (max-width: 600px) { .panel { gap: 14px; } .card { padding: 12px; } .chart { height: 250px; } .filters { gap: 10px; } .filters label { flex: 1 1 140px; } .toolbar h3 { font-size: 17px; } }
++.modelDropdown { position: relative; font-size: 13px; align-self: flex-end; summary { cursor: pointer; padding: 9px 12px; border: 1px solid var(--border-color); border-radius: 7px; background: var(--bg-secondary); min-width: 155px; } summary:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; } }
++.modelMenu { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; width: min(360px, calc(100vw - 64px)); padding: 12px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-primary); box-shadow: 0 8px 28px #0003; display: flex; flex-direction: column; gap: 10px; }
++.modelOptions { max-height: 260px; overflow-y: auto; }
++.modelOptions .modelOption { display: flex; flex-direction: row; align-items: center; gap: 8px; padding: 8px 4px; cursor: pointer; color: var(--text-primary); small { margin-left: auto; color: var(--text-secondary); } input { margin: 0; } }
+diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
+index 551262b..7c27cb6 100644
+--- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
++++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
+@@ -56,11 +56,13 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+       </select>
+     </label>}
+     {history && !history.cycles.length && <p>{t('weekly_quota.empty', 'No weekly quota observations yet. History will appear after weekly quota is captured.')}</p>}
++      {report?.timeline && <WeeklyTrendCharts key={cycleViewKey} points={report.timeline} />}
+     {!!history?.cycles.length && <>
+       <h4>{t('weekly_quota.cycle_value_title', 'Weekly cycle value per percentage point')}</h4>
+       <p className={styles.note}>{t('weekly_quota.cycle_rate_note', 'API value / 1% is the recorded value between observed quota drops divided by the percentage points consumed in those same intervals, averaged across all models and modes. Total API value includes all cycle requests, including archived requests and usage outside observed drops. Remaining is the last observed value; a passed reset time alone does not confirm a rollover.')}</p>
+       <div className={styles.scroll}><table className={styles.cyclesTable}>
+         <thead><tr>
++          <th>{t('analytics.remaining_at_reset', 'Remaining at reset / latest')}</th>
+           <th>{t('weekly_quota.cycle_rate', 'API value / 1%')}</th>
+           <th>{t('weekly_quota.observed_used', 'Observed quota used')}</th>
+           <th>{t('weekly_quota.total_value', 'Total API value')}</th>
+@@ -72,13 +74,15 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+           const shortened = cycle.effective_ended_at !== cycle.reset_at
+           const value = weeklyCycleValue(cycle)
+           return <tr key={cycle.id}>
++            <td><strong>{cycle.last_remaining_percent == null ? '—' : `${cycle.last_remaining_percent}%`}</strong><small>{date(cycle.last_observed_at)}</small></td>
+             <td><strong className={styles.cycleRate}>{value.costPerPoint != null ? money(value.costPerPoint) : value.points > 0 ? t('weekly_quota.unpriced', 'Pricing incomplete') : t('weekly_quota.no_drop', 'No observed drop')}</strong>
+               {value.costPerPoint != null && <small>{t('weekly_quota.sampled_value', '{{value}} in observed drops', { value: money(value.cost) })}</small>}</td>
++
+             <td><strong>{value.points} {t('weekly_quota.points', 'percentage points')}</strong><small>{value.intervals} {t('weekly_quota.intervals', 'intervals')}</small></td>
+             <td><strong>{cycle.usage.cost_available ? money(cycle.usage.total_cost_usd) : t('weekly_quota.unpriced', 'Pricing incomplete')}</strong><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small></td>
+             <td><strong>{date(shortened && !current ? cycle.effective_ended_at : cycle.reset_at)}</strong><small>{current ? t('weekly_quota.scheduled', 'Scheduled') : reset?.rollover_observed_at ? t('weekly_quota.observed', 'Rollover observed') : shortened ? t('weekly_quota.changed', 'Window changed') : t('weekly_quota.unconfirmed', 'Awaiting rollover observation')}</small>
+               {reset?.rollover_observed_at && <small>{date(reset.rollover_observed_at)}</small>}</td>
+-            <td><small><strong>{t('weekly_quota.remaining', 'Last remaining')}: {cycle.last_remaining_percent == null ? '—' : `${cycle.last_remaining_percent}%`}</strong></small><small>{date(cycle.last_observed_at)}</small>
++            <td>
+               {reset && <small>{t('weekly_quota.age', '{{minutes}} min before {{boundary}}', { minutes: Math.round(reset.last_observation_age_seconds / 60), boundary: current ? t('weekly_quota.report_time', 'report time') : t('weekly_quota.cycle_end', 'cycle end') })}</small>}
+               <small>{t('weekly_quota.first', 'First observed')}: {date(cycle.first_observed_at)}</small>
+               {combinedUpdates > 0 && <small>{t('weekly_quota.combined', '{{count}} reset-time updates combined while quota stayed at 100%', { count: combinedUpdates })}</small>}
+@@ -87,7 +91,6 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+         })}</tbody>
+       </table></div>
+       {cycleRows.length > 5 && <Button size="sm" onClick={() => setExpandedCyclesFor(showAllCycles ? undefined : cycleViewKey)}>{showAllCycles ? t('weekly_quota.show_recent', 'Show recent cycles') : t('weekly_quota.show_older', 'Show older cycles ({{count}})', { count: cycleRows.length - 5 })}</Button>}
+-      {report?.timeline && <WeeklyTrendCharts key={cycleViewKey} points={report.timeline} />}
+       <h4>{t('weekly_quota.models', 'Value by model and requested mode')}</h4>
+       <p className={styles.note}>{t('weekly_quota.sample_note', 'Estimates need at least {{points}} percentage points, {{intervals}} qualifying intervals and {{requests}} requests. Only intervals of at most {{minutes}} minutes with one model/mode, complete pricing and no failed requests qualify. These are eligibility floors, not a confidence guarantee.', { points: report?.min_points, intervals: report?.min_intervals, requests: report?.min_requests, minutes: (report?.max_interval_seconds ?? 0) / 60 })}</p>
+       {report && <p className={styles.note}>{t('weekly_quota.sample_coverage', '{{eligible}} of {{observed}} observed percentage points qualify; {{excluded}} intervals excluded.', { eligible: report.eligible_points, observed: report.observed_points, excluded: report.excluded_intervals })}</p>}
+diff --git a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+index e95476c..663c9cc 100644
+--- a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
++++ b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+@@ -6,16 +6,18 @@ import '@/lib/chartjs'
+ import type { WeeklyTrendPoint } from '@/lib/types'
+ import { useThemeStore } from '@/stores'
+ import { buildUsageChartTooltipStyle, getUsageChartTheme, USAGE_CHART_COMPOSITION_COLORS } from '@/utils/usage/chartConfig'
++import { AnalyticsModelPicker } from './AnalyticsModelPicker'
++import { rankAnalyticsModels, selectedAnalyticsModels, type ModelSelection } from './analyticsModels'
+ import styles from './WeeklyQuotaValuePanel.module.scss'
+ 
+ export type TrendMetric = 'delivered' | 'allowance' | 'speed' | 'phase' | 'ttft'
+ const MIN_SPEED_REQUESTS = 3
+ const groupKey = (point: Pick<WeeklyTrendPoint, 'model' | 'mode'>) => JSON.stringify([point.model, point.mode])
+ 
+-export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: TrendMetric, model: string, mode: string, label: (mode: string) => string, locale: string): ChartData<'line', Array<number | null>, string> {
++export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: TrendMetric, model: string | string[], mode: string, label: (mode: string) => string, locale: string): ChartData<'line', Array<number | null>, string> {
+   const days = [...new Set(points.map(point => point.day))].sort()
+   const models = [...new Set(points.map(point => point.model))].sort()
+-  const selected = points.filter(point => (!model || point.model === model) && (!mode || point.mode === mode))
++  const selected = points.filter(point => (Array.isArray(model) ? model.includes(point.model) : !model || point.model === model) && (!mode || point.mode === mode))
+   const groups = [...new Map(selected.map(point => [groupKey(point), point])).values()]
+   const lookup = new Map(selected.map(point => [JSON.stringify([point.day, point.model, point.mode]), point]))
+   return { labels: days.map(day => new Date(day).toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' })), datasets: groups.map(group => ({
+@@ -39,16 +41,14 @@ export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: Tr
+ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
+   const { t, i18n } = useTranslation()
+   const isDark = useThemeStore(state => state.resolvedTheme) === 'dark'
+-  const [model, setModel] = useState('')
++  const [selection, setSelection] = useState<ModelSelection>('top')
+   const [mode, setMode] = useState('')
+   const [valueMetric, setValueMetric] = useState<TrendMetric>('delivered')
+-  const [speedMetric, setSpeedMetric] = useState<TrendMetric>('speed')
+-  const [measurement, setMeasurement] = useState<'total' | 'streaming'>('total')
+-  const measuredSpeedMetric = speedMetric === 'speed' && measurement === 'streaming' ? 'phase' : speedMetric
+   const modeLabel = (value: string) => value === 'fast' ? t('weekly_quota.fast', 'Fast requested') : value === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
+-  const models = [...new Set(points.map(point => point.model))].sort()
++  const models = rankAnalyticsModels(points)
++  const model = selectedAnalyticsModels(selection, models)
+   const chartTheme = getUsageChartTheme(isDark)
+-  const selected = points.filter(point => (!model || model === point.model) && (!mode || mode === point.mode))
++  const selected = points.filter(point => model.includes(point.model) && (!mode || mode === point.mode))
+   const renderChart = (metric: TrendMetric, title: string, unit: string) => {
+     const data = buildWeeklyTrendChartData(points, metric, model, mode, modeLabel, i18n.language)
+     const hasData = data.datasets.some(dataset => dataset.data.some(value => value != null))
+@@ -78,15 +78,11 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
+     return hasData ? <div className={styles.chart} data-weekly-trend={metric}><Chart type="line" data={data} options={options} role="img" aria-label={title} /></div>
+       : <p role="status" className={styles.note}>{metric === 'allowance' ? t('weekly_trends.no_estimates', 'Not enough qualifying quota samples for this selection yet.') : metric === 'delivered' ? t('weekly_trends.no_value', 'No fully priced recorded values for this selection yet.') : t('weekly_trends.no_speed', 'Not enough valid timing samples for this selection yet.')}</p>
+   }
+-  return <section className={styles.trends} aria-label={t('weekly_trends.title', 'Value and speed over time')}>
+-    <h4>{t('weekly_trends.title', 'Value and speed over time')}</h4>
++  return <section className={styles.trends} aria-label={t('analytics.value_title', 'Subscription value over time')}>
++    <h4>{t('analytics.value_title', 'Subscription value over time')}</h4>
+     <div className={styles.filters}>
+-      <label>{t('weekly_trends.model', 'Model')} <select aria-label={t('weekly_trends.model', 'Model')} value={model} onChange={event => setModel(event.target.value)}><option value="">{t('weekly_trends.all_models', 'All models')}</option>{models.map(value => <option key={value} value={value}>{value || '—'}</option>)}</select></label>
++      <AnalyticsModelPicker models={models} selection={selection} onChange={setSelection} />
+       <label>{t('weekly_trends.mode', 'Mode')} <select aria-label={t('weekly_trends.mode', 'Mode')} value={mode} onChange={event => setMode(event.target.value)}><option value="">{t('weekly_trends.all_modes', 'All modes')}</option>{['normal', 'fast', 'unknown'].map(value => <option key={value} value={value}>{modeLabel(value)}</option>)}</select></label>
+-      <label>{t('weekly_trends.measurement', 'Speed measurement')} <select aria-label={t('weekly_trends.measurement', 'Speed measurement')} value={measurement} disabled={speedMetric === 'ttft'} onChange={event => setMeasurement(event.target.value as 'total' | 'streaming')}>
+-        <option value="total">{t('weekly_trends.total_time', 'Total request time')}</option>
+-        <option value="streaming">{t('weekly_trends.streaming_time', 'Streaming phase (approx.)')}</option>
+-      </select></label>
+     </div>
+     <p className={styles.note}>{t('weekly_trends.days', 'Daily UTC buckets across the reporting period; today is partial. Each line is one model and requested mode. Solid: Normal · Dashed: Fast requested · Dotted: Mode not captured.')}</p>
+     <label className={styles.metric}>{t('weekly_trends.value', 'Subscription value over time')} <select aria-label={t('weekly_trends.value_metric', 'Value metric')} value={valueMetric} onChange={event => setValueMetric(event.target.value as TrendMetric)}>
+@@ -95,15 +91,5 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
+     {renderChart(valueMetric, t('weekly_trends.value', 'Subscription value over time'), 'USD')}
+     {valueMetric === 'allowance' && <p className={styles.note}>{t('weekly_trends.estimate_note', 'Each estimate uses qualifying samples from the trailing seven UTC days, with the same 5-point, 3-interval and 20-request minimums as the table. Missing estimates are gaps; changes can reflect workload and caching.')}</p>}
+     {valueMetric === 'delivered' && selected.some(point => !point.cost_available) && <p className={styles.note}>{t('weekly_trends.missing_prices', 'Days with incomplete pricing are gaps, rather than zero-dollar values.')}</p>}
+-    <label className={styles.metric}>{t('weekly_trends.speed', 'Response speed over time')} <select aria-label={t('weekly_trends.speed_metric', 'Speed metric')} value={speedMetric} onChange={event => setSpeedMetric(event.target.value as TrendMetric)}>
+-      <option value="speed">{t('weekly_trends.tps', 'Output tokens / second')}</option><option value="ttft">{t('weekly_trends.ttft', 'Time to first token')}</option>
+-    </select></label>
+-    {renderChart(measuredSpeedMetric, t('weekly_trends.speed', 'Response speed over time'), speedMetric === 'ttft' ? 's' : 'tokens/s')}
+-    <p className={styles.note}>{speedMetric === 'ttft'
+-      ? t('weekly_trends.ttft_note', 'Time to first token is the mean of recorded timings; the event can be reasoning or tool arguments, rather than first visible text. The speed measurement selector applies only to tokens per second.')
+-      : measurement === 'streaming'
+-        ? t('weekly_trends.phase_note', 'Streaming phase TPS = total output tokens / total (request duration − recorded first-token time), using only successful streaming generation requests with at least 32 output tokens and 250 ms after the first token. This excludes the initial wait, but includes reasoning tokens and is not an exact visible-text streaming rate.')
+-        : t('weekly_trends.total_note', 'Total-time TPS = total output tokens / total request duration for successful generation requests. This includes the initial wait and reasoning time.')}
+-      {' '}{t('weekly_trends.timing_samples', 'At least 3 eligible timed requests per day and model/mode are required; missing timings remain gaps. Rates are calculated from summed tokens and durations, not averaged request rates.')}</p>
+   </section>
+ }
+diff --git a/web/src/components/usage/credentials/analyticsModels.ts b/web/src/components/usage/credentials/analyticsModels.ts
+new file mode 100644
+index 0000000..c59f475
+--- /dev/null
++++ b/web/src/components/usage/credentials/analyticsModels.ts
+@@ -0,0 +1,26 @@
++import { USAGE_CHART_COMPOSITION_COLORS } from '@/utils/usage/chartConfig'
++
++export type AnalyticsModel = { model: string; requests: number }
++export type ModelSelection = 'top' | 'all' | string[]
++
++export function rankAnalyticsModels(usage: AnalyticsModel[], names: string[] = []): AnalyticsModel[] {
++  const counts = new Map(names.map(model => [model, 0]))
++  for (const item of usage) counts.set(item.model, (counts.get(item.model) ?? 0) + item.requests)
++  return [...counts].map(([model, requests]) => ({ model, requests }))
++    .sort((a, b) => b.requests - a.requests || a.model.localeCompare(b.model))
++}
++
++export function selectedAnalyticsModels(selection: ModelSelection, models: AnalyticsModel[]): string[] {
++  if (selection === 'top') return models.slice(0, 5).map(item => item.model)
++  if (selection === 'all') return models.map(item => item.model)
++  return selection.filter(model => models.some(item => item.model === model))
++}
++
++export function analyticsModelColor(model: string, models: AnalyticsModel[]): string {
++  const names = models.map(item => item.model).sort()
++  return USAGE_CHART_COMPOSITION_COLORS[Math.max(0, names.indexOf(model)) % USAGE_CHART_COMPOSITION_COLORS.length].base
++}
++
++export function analyticsModeSelected(mode: string, filter: string): boolean {
++  return filter === 'captured' ? mode === 'normal' || mode === 'fast' : !filter || mode === filter
++}
+diff --git a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
+index 481b4b3..c78b04d 100644
+--- a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
+@@ -334,17 +334,16 @@ describe('CredentialDetailDrawer', () => {
+     await act(async () => {
+       overviewTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+     })
+-    expect(document.activeElement).toBe(quotaTab)
+-    await act(async () => {
+-      quotaTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+-    })
+     const performanceTab = document.body.querySelector<HTMLButtonElement>('[data-credential-detail-tab="performance"]')!
+     expect(document.activeElement).toBe(performanceTab)
+-    expect(fetchAccountPerformance).toHaveBeenCalledWith('auth-file-identity-1', expect.objectContaining({ days: '30', metric: 'latency' }), expect.any(AbortSignal))
++    expect(performanceTab.textContent).toContain('Response speed')
++    expect(fetchAccountPerformance).toHaveBeenCalledWith('auth-file-identity-1', expect.objectContaining({ days: '7', metric: 'tps' }), expect.any(AbortSignal))
+     const signal = fetchAccountPerformance.mock.lastCall?.[2] as AbortSignal
+     await act(async () => { performanceTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+-    expect(document.activeElement).toBe(requestsTab)
++    expect(document.activeElement).toBe(quotaTab)
+     expect(signal.aborted).toBe(true)
++    await act(async () => { quotaTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
++    expect(document.activeElement).toBe(requestsTab)
+   })
+ 
+   it('renders Overview metrics with the list thresholds and recent cache rate', async () => {
+diff --git a/web/src/components/usage/test/PerformancePanel.test.tsx b/web/src/components/usage/test/PerformancePanel.test.tsx
+index bd7e1f2..f521dca 100644
+--- a/web/src/components/usage/test/PerformancePanel.test.tsx
++++ b/web/src/components/usage/test/PerformancePanel.test.tsx
+@@ -28,24 +28,24 @@ it('shows separate actual/matched percentiles, coverage, failures and fixed-mix
+   expect(element.textContent).toContain('41 requests · 1 failed')
+   expect(element.textContent).toContain('first visible text is not separately recorded')
+   await change('Comparison', 'matched')
+-  const data = mocks.charts.get('Performance over time')!
++  const data = mocks.charts.get('Response speed over time')!
+   expect(data.datasets[0].data).toEqual([null, 2])
+   expect(data.datasets[1].borderDash).toEqual([7, 3])
+   expect(data.datasets[0].spanGaps).toBe(false)
+   await change('Comparison', 'raw')
+-  expect(mocks.charts.get('Performance over time')!.datasets[0].data).toEqual([4, 4])
++  expect(mocks.charts.get('Response speed over time')!.datasets[0].data).toEqual([4, 4])
+   await change('Percentile', 'tail')
+-  expect(mocks.charts.get('Performance over time')!.datasets[0].data).toEqual([5, 5])
+-  expect(mocks.fetch).toHaveBeenCalledTimes(1)
++  expect(mocks.charts.get('Response speed over time')!.datasets[0].data).toEqual([1, 1])
++  expect(mocks.fetch).toHaveBeenCalledTimes(2)
+ })
+ it('uses p10 for slow throughput and forwards model, period and workload filters', async () => {
+   await render()
+-  await change('Metric', 'tps'); await change('Period', '7'); await change('Input size', 'large'); await change('Total output size', 'long'); await change('Reasoning effort', 'low'); await change('Mode', 'fast')
++  await change('Response speed over time', 'tps'); await change('Period', '30'); await change('Input size', 'large'); await change('Total output size', 'long'); await change('Reasoning effort', 'low'); await change('Mode', 'fast')
+   const checkboxes = [...element.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+-  await act(async () => checkboxes[1].click())
+-  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ metric: 'tps', days: '7', context: 'large', output: 'long', effort: 'low', mode: 'fast', models: ['b'] })
++  await act(async () => checkboxes[0].click())
++  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ metric: 'tps', days: '30', context: 'large', output: 'long', effort: 'low', mode: 'fast', models: ['b'] })
+   await change('Comparison', 'raw'); await change('Percentile', 'tail')
+-  expect(mocks.charts.get('Performance over time')!.datasets[0].data).toEqual([1, 1])
++  expect(mocks.charts.get('Response speed over time')!.datasets[0].data).toEqual([1, 1])
+   expect(element.textContent).toContain('Higher is faster')
+ })
+ it('preserves insufficient overlap without zero speeds or fabricated lines', async () => {
+@@ -76,3 +76,24 @@ it('reports authentication expiry and allows retry after an error', async () =>
+   await act(async () => element.querySelector<HTMLButtonElement>('button')!.click())
+   expect(element.querySelector('[role="alert"]')).toBeNull()
+ })
++
++it('defaults to five models ranked across modes, supports extra models and an empty selection', async () => {
++  const report = fixture()
++  report.models = ['a', 'b', 'c', 'd', 'e', 'f']
++  report.groups = report.models.map((model, index) => ({ ...report.groups[0], model, requests: 60 - index * 10 }))
++  mocks.fetch.mockResolvedValue(report)
++  await render()
++  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ days: '7', metric: 'tps', models: ['a','b','c','d','e'] })
++  expect(element.querySelector('select[aria-label="Speed measurement"]')).toBeNull()
++  expect(mocks.charts.get('Response speed over time')!.datasets).toHaveLength(5)
++  await act(async () => element.querySelector<HTMLInputElement>('input[aria-label="f"]')!.click())
++  expect(mocks.fetch.mock.lastCall?.[1].models).toEqual(['a','b','c','d','e','f'])
++  const count = mocks.fetch.mock.calls.length
++  await act(async () => [...element.querySelectorAll('button')].find(button => button.textContent === 'Clear')!.click())
++  expect(mocks.fetch).toHaveBeenCalledTimes(count)
++  expect(element.querySelector('[role="img"]')).toBeNull()
++  await act(async () => [...element.querySelectorAll('button')].find(button => button.textContent === 'Top 5 by requests')!.click())
++  expect(mocks.fetch.mock.lastCall?.[1].models).toEqual(['a','b','c','d','e'])
++  await change('Response speed over time', 'phase')
++  expect(mocks.fetch.mock.lastCall?.[1].metric).toBe('phase')
++})
+diff --git a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
+index 5a32ffc..bf503ee 100644
+--- a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
++++ b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
+@@ -154,14 +154,14 @@ it('leads with weighted value per observed point and keeps total delivered value
+   expect(weeklyCycleValue(response.cycles[0])).toEqual({ points: 4, intervals: 2, cost: 9, costPerPoint: 2.25 })
+   api.fetchCodexQuotaHistory.mockResolvedValue(response)
+   await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" readOnlyAccountId="3" />))
+-  expect([...element.querySelectorAll('table:first-of-type th')].slice(0, 5).map(cell => cell.textContent)).toEqual(['API value / 1%', 'Observed quota used', 'Total API value', 'Reset / rollover', 'Observation coverage'])
++  expect([...element.querySelectorAll('table:first-of-type th')].slice(0, 6).map(cell => cell.textContent)).toEqual(['Remaining at reset / latest', 'API value / 1%', 'Observed quota used', 'Total API value', 'Reset / rollover', 'Observation coverage'])
+   const cells = element.querySelector('table tbody tr')!.querySelectorAll('td')
+-  expect(cells[0].textContent).toContain('$2.25')
+-  expect(cells[0].textContent).toContain('$9.00 in observed drops')
+-  expect(cells[1].textContent).toContain('4 percentage points')
+-  expect(cells[2].textContent).toContain('$12.00')
+-  expect(cells[4].textContent).toContain('Last remaining: 77%')
+-  expect(cells[4].textContent).toContain('Observation began after the cycle started')
++  expect(cells[1].textContent).toContain('$2.25')
++  expect(cells[1].textContent).toContain('$9.00 in observed drops')
++  expect(cells[2].textContent).toContain('4 percentage points')
++  expect(cells[3].textContent).toContain('$12.00')
++  expect(cells[0].textContent).toContain('77%')
++  expect(cells[5].textContent).toContain('Observation began after the cycle started')
+ })
+ 
+ it('keeps complete observed rates when total pricing is incomplete, but hides rates with missing interval prices', () => {
+@@ -178,8 +178,8 @@ it('does not infer used quota from last remaining, or treat no observed drops as
+   expect(weeklyCycleValue(response.cycles[0]).costPerPoint).toBeNull()
+   api.fetchCodexQuotaHistory.mockResolvedValue(response)
+   await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" />))
+-  expect(element.querySelector('table tbody tr td')!.textContent).toBe('No observed drop')
+-  expect(element.querySelector('table tbody tr td:nth-child(3)')!.textContent).toContain('$12.00')
++  expect(element.querySelector('table tbody tr td:nth-child(2)')!.textContent).toBe('No observed drop')
++  expect(element.querySelector('table tbody tr td:nth-child(4)')!.textContent).toContain('$12.00')
+ })
+ 
+ it('preserves the quota-drop rate through unused reset-time grouping', () => {
+diff --git a/web/src/components/usage/test/WeeklyTrendCharts.test.tsx b/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
+index 162f954..1c662c4 100644
+--- a/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
++++ b/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
+@@ -26,47 +26,27 @@ it('separates model/mode lines, preserves missing prices and timing gaps, and co
+  expect(buildWeeklyTrendChartData(points,'allowance','a','normal',mode=>mode,'en').datasets[0].data).toEqual([null,null,null])
+ })
+ 
+-it('filters both charts together and switches value and speed metrics without fetching',async()=>{
+- const points=[{...point(dates[0]),full_allowance_usd:200},point(dates[0],'fast'),point(dates[0],'normal','b')]
++it('uses a top-five multi-select for value and retains estimates and missing-data states',async()=>{
++ const points = ['a','b','c','d','e','f'].map((model,index)=>({...point(dates[0],'normal',model),requests:60-index*10,full_allowance_usd:200}))
+  await act(async()=>root.render(<WeeklyTrendCharts points={points}/>))
+- expect(charts.get('Subscription value over time')!.datasets).toHaveLength(3)
+- const change=async(label:string,value:string)=>{const select=element.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!;await act(async()=>{select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}))})}
+- await change('Model','a');await change('Mode','normal')
+- expect(charts.get('Subscription value over time')!.datasets).toHaveLength(1)
+- expect(charts.get('Response speed over time')!.datasets).toHaveLength(1)
+- await change('Value metric','allowance');expect(charts.get('Subscription value over time')!.datasets[0].data).toEqual([200])
+- await change('Speed metric','ttft');expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([2])
+- expect(element.textContent).toContain('trailing seven UTC days')
+-})
+-
+-it('shows insufficient-data states without inventing zero speeds or estimates',async()=>{
+- await act(async()=>root.render(<WeeklyTrendCharts points={[{...point(dates[0]),speed_requests:1,ttft_requests:0}]}/>))
+- expect(element.querySelector('[data-weekly-trend="speed"]')).toBeNull()
++ expect(charts.get('Subscription value over time')!.datasets).toHaveLength(5)
++ expect(element.querySelector('select[aria-label="Speed measurement"]')).toBeNull()
++ expect(charts.has('Response speed over time')).toBe(false)
++ await act(async()=>element.querySelector<HTMLInputElement>('input[aria-label="f"]')!.click())
++ expect(charts.get('Subscription value over time')!.datasets).toHaveLength(6)
++ await act(async()=>element.querySelector<HTMLInputElement>('input[aria-label="a"]')!.click())
++ expect(charts.get('Subscription value over time')!.datasets.map(item=>item.label)).not.toContain('a · Normal')
+  const select=element.querySelector<HTMLSelectElement>('select[aria-label="Value metric"]')!
+  await act(async()=>{select.value='allowance';select.dispatchEvent(new Event('change',{bubbles:true}))})
++ expect(charts.get('Subscription value over time')!.datasets[0].data).toEqual([200])
++ expect(element.textContent).toContain('trailing seven UTC days')
++ await act(async()=>[...element.querySelectorAll('button')].find(button=>button.textContent==='Clear')!.click())
++ expect(element.querySelector('[role="img"]')).toBeNull()
+  expect(element.textContent).toContain('Not enough qualifying quota samples')
+- expect(element.textContent).toContain('Not enough valid timing samples')
+ })
+ 
+-it('places measurement after mode, defaults to total time and switches only the speed chart', async () => {
+- const points = [{...point(dates[0]), phase_requests: 4, phase_tps: 80}, {...point(dates[1]), phase_requests: 2, phase_tps: 120}, point(dates[2])]
+- await act(async () => root.render(<WeeklyTrendCharts points={points}/>))
+- const labels = Array.from(element.querySelectorAll('select')).map(select => select.getAttribute('aria-label'))
+- expect(labels.indexOf('Speed measurement')).toBe(labels.indexOf('Mode') + 1)
+- const select = element.querySelector<HTMLSelectElement>('select[aria-label="Speed measurement"]')!
+- expect(select.value).toBe('total')
+- expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([30, 30, 30])
+- const valueChart = charts.get('Subscription value over time')!
+- await act(async () => { select.value = 'streaming'; select.dispatchEvent(new Event('change', {bubbles:true})) })
+- expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([80, null, null])
+- expect(charts.get('Subscription value over time')).toEqual(valueChart)
+- expect(element.textContent).toContain('not an exact visible-text streaming rate')
+- const metric = element.querySelector<HTMLSelectElement>('select[aria-label="Speed metric"]')!
+- await act(async () => { metric.value = 'ttft'; metric.dispatchEvent(new Event('change', {bubbles:true})) })
+- expect(select.disabled).toBe(true)
+- expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([2, 2, 2])
+- await act(async () => { metric.value = 'speed'; metric.dispatchEvent(new Event('change', {bubbles:true})) })
+- expect(select.disabled).toBe(false)
+- expect(select.value).toBe('streaming')
+- expect(charts.get('Response speed over time')!.datasets[0].data).toEqual([80, null, null])
++it('preserves phase gaps and uses only selected models',()=>{
++ const points=[{...point(dates[0]),phase_requests:4,phase_tps:80},{...point(dates[1]),phase_requests:2,phase_tps:120},point(dates[2])]
++ expect(buildWeeklyTrendChartData(points,'phase',['a'],'normal',mode=>mode,'en').datasets[0].data).toEqual([80,null,null])
++ expect(buildWeeklyTrendChartData(points,'phase',[],'normal',mode=>mode,'en').datasets).toEqual([])
+ })

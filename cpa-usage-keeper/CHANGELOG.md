@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.29
+
+- Move response speed into its own tab before Weekly value, with total-time TPS, approximate streaming TPS, first-token time and completion time in one dropdown.
+- Add model multi-select dropdowns, defaulting to the five most-used models in the selected reporting period. Recalculate workload matching for the selected models.
+- Put charts before detailed tables, collapse methodology, and show remaining quota before cycle usage and value.
+
 ## 0.1.28
 
 - Add Speed measurement immediately after Mode in weekly graphs: Total request time (default) or Streaming phase (approx.).

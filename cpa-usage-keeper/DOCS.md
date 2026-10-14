@@ -131,48 +131,38 @@ and API value. Five recent cycles are shown initially; Show older cycles expands
 the remaining history. Detailed observation charts retain the original records.
 
 
-The **Value and speed over time** section offers shared model and mode filters.
-Daily API value plots recorded dollars in UTC calendar-day buckets; the current
-day is partial. The allowance view uses qualifying quota samples from the
-trailing seven UTC days at each date, with the same eligibility minimums as the
-table. Estimates never use future samples and disappear when supporting samples
-age out. Incomplete daily pricing appears as a gap. Current configured prices
-also apply to historical graph values, including archived requests.
+The **Subscription value over time** chart appears before the cycle tables.
+Its model dropdown supports multiple selections and starts with the five models
+with the most recorded requests in this reporting period. Show all, Clear and
+Top 5 controls are available inside the dropdown. Daily API value plots recorded
+dollars in UTC calendar-day buckets; the current day is partial. The allowance
+view uses qualifying quota samples from the trailing seven UTC days at each
+date, with the same eligibility minimums as the table. Estimates never use future
+samples and disappear when supporting samples age out. Incomplete daily pricing
+appears as a gap. Current prices also apply to historical and archived requests.
+Remaining quota has its own column before observed usage and API value.
 
-Response speed is total output tokens divided by total end-to-end request time
-for successful generation requests with positive output and valid durations,
-matching Request Events. Waiting and reasoning time are included; this is not
-streaming-only decode throughput. Time to first token is the mean of valid
-captured timings. Each daily model/mode point requires at least three timing
-samples; hover for sample counts. Missing timing remains unavailable. Historical
-uncaptured modes stay separate. Solid lines indicate Normal, dashed lines Fast
-requested, and dotted lines unknown modes. Graphs do not establish confirmed
-provider execution tiers or change billing or pricing rules.
+Response timing is on the separate **Response speed** tab before Weekly value.
+The previous combined weekly speed graph and separate Speed measurement selector
+have been consolidated into this tab.
 
-The **Speed measurement** selector directly after **Mode** defaults to **Total
-request time**. Select **Streaming phase (approx.)** to divide summed output
-tokens by summed (request duration minus recorded first-token time), using only
-successful streaming generation requests with at least 32 output tokens and
-250 ms after the first recorded token. Each daily model/mode point needs at
-least three eligible requests. Historical and archived requests are computed
-from existing metadata; no database migration or new provider request is needed.
-Missing streaming flags or usable timings remain gaps. Output includes reasoning
-tokens, and the first event can be reasoning or tool arguments, so this estimate
-is not exact visible-text decode throughput. The selector changes only the speed
-graph and is disabled while viewing time to first token.
+## Response speed
 
-
-## Account performance
-
-Open **Auth Files → Codex account → Performance** in the admin or all-key
+Open **Auth Files → Codex account → Response speed** in the admin or all-key
 read-only dashboard. Compare models and outgoing Normal/Fast requested mode
 over 7, 30 or 90 days; account request history is independent of quota windows.
-Existing Weekly value raw speed graphs remain available. Performance is shared
+The default is 7 days, total-time TPS and Normal + Fast modes. This is shared
 account reporting across all client keys and includes archived requests. The
 report reads local stored metadata only, without provider calls or prompts.
 
-Choose completion time, recorded first-token time, end-to-end output TPS or
-approximate phase TPS. Time uses median and p90 (slow tail); speed uses median
+Use **Response speed over time** to choose total request time TPS, approximate
+streaming phase TPS, recorded first-token time or completion time. The model
+multi-select starts with the five most-used models across modes in this period;
+other models remain selectable. Changing model selection recalculates workload
+matching on the server. Clear shows no data instead of silently selecting all.
+Workload filters and methodology are collapsed below the main controls/chart.
+
+Time uses median and p90 (slow tail); speed uses median
 and p10 (slow tail). Raw charts describe actual workload. The matched table
 and optional matched chart use empirical weighted request distributions, not
 an average of bucket/model percentiles. Failed requests remain counted and

@@ -1,8 +1,8 @@
 diff --git a/internal/api/quota.go b/internal/api/quota.go
-index 140885c..004c6d0 100644
+index 71c4229..62ea19c 100644
 --- a/internal/api/quota.go
 +++ b/internal/api/quota.go
-@@ -55,7 +55,7 @@ func registerQuotaRoutes(router gin.IRoutes, provider QuotaProvider) {
+@@ -56,7 +56,7 @@ func registerQuotaRoutes(router gin.IRoutes, provider QuotaProvider) {
  			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required"})
  			return
  		}
@@ -568,25 +568,25 @@ index 0000000..3cee9a0
 +	return tx.Exec("CREATE INDEX IF NOT EXISTS idx_usage_events_archive_quota ON usage_events_archive (auth_index, timestamp, id)").Error
 +}
 diff --git a/internal/repository/migration/migration.go b/internal/repository/migration/migration.go
-index 61c681c..e33893d 100644
+index 035dcd2..9e2bba6 100644
 --- a/internal/repository/migration/migration.go
 +++ b/internal/repository/migration/migration.go
-@@ -253,6 +253,7 @@ func orderedMigrations() []databaseMigration {
- 		{version: migrationNormalizeUsageEventParentSessionNull, run: normalizeUsageEventParentSessionNullMigration},
+@@ -256,6 +256,7 @@ func orderedMigrations() []databaseMigration {
  		{version: migrationLimitLatencySamplePoints, run: limitLatencySamplePointsMigration, destructive: true},
  		{version: "20261005_usage_upstream_service_tier", run: addUsageUpstreamServiceTierMigration},
+ 		{version: migrationAddUsageEventTraceMetadata, run: addUsageEventTraceMetadataMigration},
 +		{version: "20261007_weekly_quota_archive_index", run: addWeeklyQuotaArchiveIndex},
  	}
  }
  
 diff --git a/internal/repository/migration/test/migration_test.go b/internal/repository/migration/test/migration_test.go
-index 7d5fd17..fd92f91 100644
+index fd8d456..e989f57 100644
 --- a/internal/repository/migration/test/migration_test.go
 +++ b/internal/repository/migration/test/migration_test.go
-@@ -95,6 +95,7 @@ func TestOrderedMigrationsPreservesExecutionOrder(t *testing.T) {
- 		"20260922_normalize_usage_event_parent_session_null",
+@@ -96,6 +96,7 @@ func TestOrderedMigrationsPreservesExecutionOrder(t *testing.T) {
  		"20260925_limit_latency_sample_points",
  		"20261005_usage_upstream_service_tier",
+ 		"20261008_usage_event_trace_metadata",
 +		"20261007_weekly_quota_archive_index",
  	}
  	assertStringSlicesEqual(t, want, got)
@@ -748,18 +748,18 @@ index 0ff24b5..7f9cde4 100644
    useEffect(() => {
      lastRequestOptionsRef.current = {}
 diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
-index 4dfbf4f..ac8aec1 100644
+index 7605b18..6700359 100644
 --- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
 +++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
-@@ -13,6 +13,7 @@ import { CredentialHealthPanel } from './CredentialHealthPanel'
- import { CredentialPriorityBadge, cacheReadRateTone, credentialToneClassName, formatCredentialNumber, formatCredentialPercent, successRateTone } from './CredentialSectionShell'
+@@ -14,6 +14,7 @@ import { CredentialPriorityBadge, cacheReadRateTone, credentialToneClassName, fo
  import { CredentialSubscriptionBadge } from './CredentialSubscriptionBadge'
+ import { CredentialKimiSiteBadge } from './CredentialKimiSiteBadge'
  import { CredentialRequestEventsList } from './CredentialRequestEventsList'
 +import { WeeklyQuotaValuePanel } from './WeeklyQuotaValuePanel'
  import { CodexQuotaHistoryPanel } from './CodexQuotaHistoryPanel'
  import { formatCredentialTimestamp, type CredentialDetailSelection } from './credentialViewModels'
  import styles from './CredentialDetailDrawer.module.scss'
-@@ -145,9 +146,9 @@ export function CredentialDetailDrawer({
+@@ -146,9 +147,9 @@ export function CredentialDetailDrawer({
      }
    }
    const quotaHistoryProvider = selection?.kind === 'auth-file' ? identity?.type?.trim().toLowerCase() : undefined
@@ -771,7 +771,7 @@ index 4dfbf4f..ac8aec1 100644
      : readOnly ? ['overview', 'requests'] : ['overview', 'requests', 'errors'], [hasQuotaHistory, readOnly])
  
    const resetRequestEvents = useCallback(() => {
-@@ -472,7 +473,7 @@ export function CredentialDetailDrawer({
+@@ -474,7 +475,7 @@ export function CredentialDetailDrawer({
                  onClick={() => activateTab('quota-history')}
                  onKeyDown={handleTabKeyDown}
                >
@@ -780,7 +780,7 @@ index 4dfbf4f..ac8aec1 100644
                </button>
              ) : null}
              <button
-@@ -582,7 +583,9 @@ export function CredentialDetailDrawer({
+@@ -584,7 +585,9 @@ export function CredentialDetailDrawer({
            </section>
          ) : activeTab === 'quota-history' && hasQuotaHistory ? (
            <section id={quotaHistoryPanelId} role="tabpanel" aria-labelledby={quotaHistoryTabId} className={styles.quotaHistoryPanel}>
@@ -927,7 +927,7 @@ index 0000000..081d219
 +  </div>
 +}
 diff --git a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
-index 7cb9247..7ec63ed 100644
+index 41c4c77..e80a82f 100644
 --- a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
 +++ b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
 @@ -29,7 +29,7 @@ vi.mock('react-i18next', () => {
@@ -939,7 +939,7 @@ index 7cb9247..7ec63ed 100644
    }
  })
  
-@@ -260,9 +260,9 @@ describe('CredentialDetailDrawer', () => {
+@@ -283,9 +283,9 @@ describe('CredentialDetailDrawer', () => {
      await act(async () => {
        quotaTab.click()
      })
@@ -1160,7 +1160,7 @@ index 0000000..120ff7e
 +  expect(element.querySelector('table tbody')!.children).toHaveLength(5)
 +})
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index 6c81256..c3fba5c 100644
+index 9fb280d..8671c96 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
 @@ -727,6 +727,8 @@ export async function fetchUsageQuotaCache(authIndexes: string[], signal?: Abort
@@ -1185,10 +1185,10 @@ index 6c81256..c3fba5c 100644
      await parseApiError(response, `Failed to load quota history: ${response.status}`)
    }
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
-index 4f3baaf..7175306 100644
+index cad444f..6a87279 100644
 --- a/web/src/lib/types.ts
 +++ b/web/src/lib/types.ts
-@@ -612,6 +612,7 @@ export interface CodexQuotaHistoryCycle {
+@@ -645,6 +645,7 @@ export interface CodexQuotaHistoryCycle {
  
  // CodexQuotaHistoryResponse 一次请求驱动当前周期图表和包含进行中周期的最近三十天完整列表。
  export interface CodexQuotaHistoryResponse {
@@ -1196,7 +1196,7 @@ index 4f3baaf..7175306 100644
    generated_at: string
    range_start: string
    windows: CodexQuotaHistoryWindow[]
-@@ -958,3 +959,16 @@ export interface UsageFilterWindow {
+@@ -991,3 +992,16 @@ export interface UsageFilterWindow {
    endMs?: number
    windowMinutes?: number
  }

@@ -300,10 +300,10 @@ index 0000000..bc9bbec
 +	}
 +}
 diff --git a/internal/app/app.go b/internal/app/app.go
-index d489cb7..6ab9413 100644
+index 87a6f2f..6375a54 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
-@@ -327,6 +327,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+@@ -328,6 +328,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
  		FrameAncestorOrigins:            frameAncestorOrigins(cfg),
  		TrustedProxyCIDRs:               cfg.TrustedProxyCIDRs,
  		APIKeyViewerLocalRankingEnabled: cfg.APIKeyViewerLocalRankingEnabled,
@@ -312,10 +312,10 @@ index d489cb7..6ab9413 100644
  	authHandler := api.NewAuthHandler(authConfig, sessionManager)
  
 diff --git a/internal/config/config.go b/internal/config/config.go
-index 7770fd5..82d318e 100644
+index dc97092..3f5b249 100644
 --- a/internal/config/config.go
 +++ b/internal/config/config.go
-@@ -59,6 +59,7 @@ type Config struct {
+@@ -60,6 +60,7 @@ type Config struct {
  	CPARequestLogAccessEnabled bool
  	// APIKeyViewerLocalRankingEnabled 控制 API Key Viewer 是否可只读查看本地排行。
  	APIKeyViewerLocalRankingEnabled bool
@@ -323,7 +323,7 @@ index 7770fd5..82d318e 100644
  	// RedisQueueAddr 是 CPA management data stream 的 TCP 地址，空值时按 CPA_BASE_URL 推导。
  	RedisQueueAddr string
  	// RedisQueueTLS 控制是否使用 TLS 连接 Redis 队列。
-@@ -246,6 +247,11 @@ func Load(options LoadOptions) (*Config, error) {
+@@ -257,6 +258,11 @@ func Load(options LoadOptions) (*Config, error) {
  		return nil, err
  	}
  
@@ -335,7 +335,7 @@ index 7770fd5..82d318e 100644
  	appBasePath, err := normalizeBasePath(strings.TrimSpace(os.Getenv("APP_BASE_PATH")))
  	if err != nil {
  		return nil, fmt.Errorf("APP_BASE_PATH is invalid: %w", err)
-@@ -266,6 +272,7 @@ func Load(options LoadOptions) (*Config, error) {
+@@ -277,6 +283,7 @@ func Load(options LoadOptions) (*Config, error) {
  		CPAManagementKey:                strings.TrimSpace(os.Getenv("CPA_MANAGEMENT_KEY")),
  		CPARequestLogAccessEnabled:      cpaRequestLogAccessEnabled,
  		APIKeyViewerLocalRankingEnabled: apiKeyViewerLocalRankingEnabled,
@@ -344,7 +344,7 @@ index 7770fd5..82d318e 100644
  		RedisQueueTLS:                   redisQueueTLS,
  		RedisQueueBatchSize:             redisQueueBatchSize,
 diff --git a/web/src/App.tsx b/web/src/App.tsx
-index 07ff9f8..814f442 100644
+index 77179c2..583346c 100644
 --- a/web/src/App.tsx
 +++ b/web/src/App.tsx
 @@ -9,6 +9,7 @@ import { AppFooter } from './components/AppFooter';
@@ -355,7 +355,7 @@ index 07ff9f8..814f442 100644
  import { KeyRankingPage } from './pages/KeyRankingPage';
  import { LoginPage } from './pages/LoginPage';
  import { UsagePage } from './pages/UsagePage';
-@@ -173,7 +174,9 @@ function App() {
+@@ -176,7 +177,9 @@ function App() {
    } else if (authState === 'unauthenticated') {
      page = <LoginPage loading={submitting} adminError={adminLoginError} apiKeyError={apiKeyLoginError} onPasswordSubmit={handlePasswordLogin} onAPIKeySubmit={handleAPIKeyLogin} />;
    } else if (authRole === 'api_key_viewer') {
@@ -429,7 +429,7 @@ index 0000000..efbfc2a
 +  } finally {await act(async () => root.unmount());}
 +});
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index d26f64d..a8c1332 100644
+index 0140de6..7bdb3b7 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -68,6 +68,15 @@ const resources = {
@@ -448,7 +448,7 @@ index d26f64d..a8c1332 100644
        key_overview: {
          eyebrow: 'Key overview',
          title: 'API Key usage overview',
-@@ -1000,6 +1009,15 @@ const resources = {
+@@ -1027,6 +1036,15 @@ const resources = {
          api_key_login_failed: '当前无法打开 API Key 看板',
          session_expired: '登录状态已失效，请重新登录。'
        },
@@ -464,7 +464,7 @@ index d26f64d..a8c1332 100644
        key_overview: {
          eyebrow: 'API Key 概览',
          title: 'API Key 用量概览',
-@@ -1932,6 +1950,15 @@ const resources = {
+@@ -1986,6 +2004,15 @@ const resources = {
          api_key_login_failed: '目前無法開啟 API Key 看板',
          session_expired: '登入狀態已失效，請重新登入。'
        },
@@ -481,7 +481,7 @@ index d26f64d..a8c1332 100644
          eyebrow: 'API Key 總覽',
          title: 'API Key 用量總覽',
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index f74721a..bf62a55 100644
+index 90be025..a80680b 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
 @@ -2,6 +2,20 @@ import { type AnalysisLatencyDiagnostics, type AnalysisResponse, type AuthFilesM
@@ -514,7 +514,7 @@ index f74721a..bf62a55 100644
  }
  
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
-index 95cd13e..3bfbfbb 100644
+index fef27a8..5061d80 100644
 --- a/web/src/lib/types.ts
 +++ b/web/src/lib/types.ts
 @@ -4,6 +4,7 @@ export interface AuthSessionAPIKeySummary {

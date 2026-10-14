@@ -672,10 +672,10 @@ index 0000000..2fe84ea
 + expect(element.textContent).toContain('Not enough valid timing samples')
 +})
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
-index 7175306..36cc6df 100644
+index 6a87279..a9533b2 100644
 --- a/web/src/lib/types.ts
 +++ b/web/src/lib/types.ts
-@@ -961,6 +961,7 @@ export interface UsageFilterWindow {
+@@ -994,6 +994,7 @@ export interface UsageFilterWindow {
  }
  
  export interface WeeklyQuotaValue {
@@ -683,7 +683,7 @@ index 7175306..36cc6df 100644
   min_points: number; min_intervals: number; min_requests: number; max_interval_seconds: number;
   excluded_intervals: number; eligible_points: number; observed_points: number;
   modes: WeeklyModelValue[];
-@@ -972,3 +973,9 @@ export interface WeeklyModelValue {
+@@ -1005,3 +1006,9 @@ export interface WeeklyModelValue {
   ready: boolean; cost_per_point: number | null; full_allowance_usd: number | null;
   min_cost_per_point: number | null; max_cost_per_point: number | null;
  }

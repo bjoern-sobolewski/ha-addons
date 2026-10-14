@@ -1,5 +1,5 @@
 diff --git a/sdk/api/handlers/openai/openai_responses_interrupt_test.go b/sdk/api/handlers/openai/openai_responses_interrupt_test.go
-index f53fd26..c8f5a7c 100644
+index f53fd269..c8f5a7ce 100644
 --- a/sdk/api/handlers/openai/openai_responses_interrupt_test.go
 +++ b/sdk/api/handlers/openai/openai_responses_interrupt_test.go
 @@ -272,6 +272,7 @@ func (e *homeInterruptExecutor) InterruptExecutionSession(ctx context.Context, s

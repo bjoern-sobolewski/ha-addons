@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.27
+
+- Update Keeper to 1.15.11, including streaming indicators, User-Agent copying and the compact usage distribution chart.
+- Include upstream quota refresh recovery, Claude reset grants, international Kimi support and shared xAI weekly usage details.
+- Preserve newly reported total-only Responses usage and execution/session metadata in hot and archived history; token totals are corrected for new requests only.
+- Retain weekly value, reset history, workload-matched performance, outgoing Fast-mode pricing, saved sessions and read-only reporting isolation.
+- Keep archived request retention unlimited by default.
+
 ## 0.1.26
 
 - Add account Performance comparisons and daily trends for completion time, recorded first token, end-to-end TPS and approximate phase TPS.

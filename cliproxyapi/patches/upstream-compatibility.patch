@@ -1,0 +1,13 @@
+diff --git a/internal/api/handlers/management/auth_files_diagnostic_test.go b/internal/api/handlers/management/auth_files_diagnostic_test.go
+index ff3202c7..03f6065e 100644
+--- a/internal/api/handlers/management/auth_files_diagnostic_test.go
++++ b/internal/api/handlers/management/auth_files_diagnostic_test.go
+@@ -45,7 +45,7 @@ func TestRefreshAuthFilesTerminalDiagnosticKeepsManagementStatus(t *testing.T) {
+ 		}
+ 	}
+ 	auth, _ := manager.GetByID("fixture.json")
+-	entry := handler.buildAuthFileEntryLocked(auth)
++	entry := handler.buildAuthFileEntryLocked(auth, authFileQuotaContext{v8: true})
+ 	if entry["reauth_required"] != true || entry["reauth_reason"] != "refresh_token_expired" {
+ 		t.Fatalf("list diagnostic absent: %+v", entry)
+ 	}

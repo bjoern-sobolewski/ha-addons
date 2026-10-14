@@ -159,7 +159,7 @@ index fa45dca..939f378 100644
  			}
  		}
 diff --git a/internal/app/app.go b/internal/app/app.go
-index 3cf51e2..dac1033 100644
+index 38e1906..8cd6a6d 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
 @@ -199,6 +199,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
@@ -170,7 +170,7 @@ index 3cf51e2..dac1033 100644
  	quotaService := quota.NewServiceWithOptions(db, cpaClient, quota.ServiceOptions{
  		UsageHeaderSnapshotFlushInterval: time.Second,
  		RefreshWorkerLimit:               cfg.QuotaRefreshWorkerLimit,
-@@ -306,7 +307,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+@@ -307,7 +308,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
  	usageIdentityService := service.NewUsageIdentityServiceWithOptions(db, recentUsageCache, service.UsageIdentityServiceOptions{
  		OnDisplayNameChanged: quotaService.UpdateUsageIdentityDisplayNameSnapshot,
  	})

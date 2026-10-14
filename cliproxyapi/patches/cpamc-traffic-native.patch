@@ -1,5 +1,5 @@
 diff --git a/src/features/authFiles/AuthFilesPage.tsx b/src/features/authFiles/AuthFilesPage.tsx
-index 470aec7..6796e9d 100644
+index 01ec04b..7ce9a3f 100644
 --- a/src/features/authFiles/AuthFilesPage.tsx
 +++ b/src/features/authFiles/AuthFilesPage.tsx
 @@ -89,6 +89,7 @@ export function AuthFilesPage() {
@@ -72,7 +72,7 @@ index b07c1ad..ffc1cc5 100644
            onRefreshingChange={setAccountRefreshing}
          />
 diff --git a/src/features/authFiles/components/AuthFileQuotaSection.tsx b/src/features/authFiles/components/AuthFileQuotaSection.tsx
-index 81acf8c..70ac00a 100644
+index fa09158..b33f29e 100644
 --- a/src/features/authFiles/components/AuthFileQuotaSection.tsx
 +++ b/src/features/authFiles/components/AuthFileQuotaSection.tsx
 @@ -1,3 +1,6 @@
@@ -82,7 +82,7 @@ index 81acf8c..70ac00a 100644
  import { AuthFileObservation } from '@/features/quota/authFileObservation';
  import { withQuotaObservation } from '@/features/quota/observationFormat';
  import { useCallback, useRef, useState } from 'react';
-@@ -33,6 +36,7 @@ export type AuthFileQuotaSectionProps = {
+@@ -34,6 +37,7 @@ export type AuthFileQuotaSectionProps = {
    file: AuthFileItem;
    quotaType: QuotaProviderType;
    disableControls: boolean;
@@ -90,10 +90,11 @@ index 81acf8c..70ac00a 100644
    onRefreshingChange?: (refreshing: boolean) => void;
  };
  
-@@ -60,6 +64,13 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+@@ -61,6 +65,14 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+     if (quotaType === 'xai') return state.xaiQuota[cacheKey] as QuotaCardState | undefined;
      return assertNever(quotaType);
    });
-   const quota = storedQuota;
++  const quota = storedQuota;
 +  const traffic = useTrafficQuota(
 +    normalizeAuthIndex(file.auth_index ?? file.authIndex) ?? '',
 +    quotaType,
@@ -101,10 +102,19 @@ index 81acf8c..70ac00a 100644
 +  );
 +  const displayQuota = mergeTrafficQuota(quotaType, storedQuota, traffic, t);
 +  const hasDisplay = displayQuota?.status === 'success';
+   const retainedClaudeUsage =
+     quotaType === 'claude' && hasClaudeUsageData(quota as ClaudeQuotaState | undefined);
  
-   const updateQuotaState = useQuotaStore(
-     (state) => state[adapter.storeSetter] as unknown as QuotaMapUpdater
-@@ -217,7 +228,16 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+@@ -194,7 +206,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+   const quotaStatus = quota?.status ?? 'idle';
+   const canRefreshQuota = !disableControls && !file.disabled && !resettingQuota && !refreshingQuota;
+   const canUseResetQuota = canRefreshQuota && quotaStatus !== 'loading';
+-  const showRefreshQuotaAction = quotaStatus !== 'idle';
++  const showRefreshQuotaAction = quotaStatus !== 'idle' || hasDisplay;
+   const showResetQuotaAction = quota !== undefined && Boolean(adapter.canResetQuota?.(quota));
+   const resetQuotaAction =
+     adapter.resetQuota && showResetQuotaAction ? (
+@@ -221,7 +233,16 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
  
    return (
      <div className={styles.quotaSection}>
@@ -122,10 +132,19 @@ index 81acf8c..70ac00a 100644
          <div className={styles.quotaMessage}>{t(`${adapter.i18nPrefix}.loading`)}</div>
        ) : quotaStatus === 'idle' ? (
          <button
-@@ -261,9 +281,9 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+@@ -247,7 +268,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+       ) : !retainedClaudeUsage ? (
+         <div className={styles.quotaMessage}>{t(`${adapter.i18nPrefix}.idle`)}</div>
+       ) : null}
+-      {retainedClaudeUsage && quota && <AuthFileObservation.Provider value={quota}>
++      {!hasDisplay && retainedClaudeUsage && quota && <AuthFileObservation.Provider value={quota}>
+           <div className={styles.nativeQuotaBody}>
+             <adapter.Body quota={quota} classes={compactQuotaClasses} />
+           </div>
+@@ -270,9 +291,9 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
            {resetQuotaAction}
          </div>
-       }
+       )}
 -      {refreshError && quotaStatus === 'success' && (
 +      {(refreshError || (hasDisplay && quotaStatus === 'error' && quotaErrorMessage)) && (
          <div className={styles.quotaError} role="alert">
@@ -271,7 +290,7 @@ index 8aee917..07ffb6c 100644
      <>
        <span className={styles.remaining}>
 diff --git a/src/features/quota/components/QuotaCard.tsx b/src/features/quota/components/QuotaCard.tsx
-index b1814ad..34154f9 100644
+index 5e97963..e14a9fb 100644
 --- a/src/features/quota/components/QuotaCard.tsx
 +++ b/src/features/quota/components/QuotaCard.tsx
 @@ -1,3 +1,8 @@
@@ -281,9 +300,9 @@ index b1814ad..34154f9 100644
 +import { AuthFileObservation } from '../authFileObservation';
 +import { readAuthFilesUiState } from '@/features/authFiles/uiState';
  /**
-  * 额度卡片：头部（提供商图标 + mono 文件名）+ 四态 body + 动作 footer。
-  *
-@@ -55,6 +60,13 @@ export function QuotaCard(props: QuotaCardProps) {
+  * Provider quota card: identity, loading/error state, quota body, and actions.
+  * Claude observations remain visible while refreshing or after a failed read.
+@@ -53,6 +58,13 @@ export function QuotaCard(props: QuotaCardProps) {
    const { t } = useTranslation();
    const adapter = QUOTA_ADAPTERS[entry.type];
    const file = entry.file;
@@ -294,10 +313,10 @@ index b1814ad..34154f9 100644
 +  );
 +  const displayQuota = mergeTrafficQuota(entry.type, quota, traffic, t);
 +  const hasDisplay = displayQuota?.status === 'success';
+   const retainedClaudeUsage =
+     entry.type === 'claude' && hasClaudeUsageData(quota as ClaudeQuotaState | undefined);
    const displayName = getQuotaDisplayName(file);
- 
-   // 挂载时捕获一次延迟：后续 props 变 null 不影响本卡（React 19 禁渲染期读 ref）
-@@ -128,7 +140,19 @@ export function QuotaCard(props: QuotaCardProps) {
+@@ -135,7 +147,19 @@ export function QuotaCard(props: QuotaCardProps) {
              )}
            </>
          )}
@@ -318,8 +337,12 @@ index b1814ad..34154f9 100644
            <button
              type="button"
              className={styles.idleBody}
-@@ -159,7 +183,7 @@ export function QuotaCard(props: QuotaCardProps) {
+@@ -169,10 +193,10 @@ export function QuotaCard(props: QuotaCardProps) {
+             {t(`${adapter.i18nPrefix}.loading`)}
+           </div>
          )}
+-        {retainedClaudeUsage && quota && <adapter.Body quota={quota} classes={quotaClasses} />}
++        {!hasDisplay && retainedClaudeUsage && quota && <adapter.Body quota={quota} classes={quotaClasses} />}
        </div>
  
 -      {status !== 'idle' && (
@@ -340,10 +363,10 @@ index 3b6bde9..886cdae 100644
  
  /** Record a provider response once; reading or enriching the cache never renews it. */
 diff --git a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
-index 2d68f55..0443150 100644
+index 231d173..4d3d9b8 100644
 --- a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
 +++ b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
-@@ -69,7 +69,7 @@ export function ClaudeQuotaBody({ quota, classes }: QuotaBodyProps<ClaudeQuotaSt
+@@ -162,7 +162,7 @@ export function ClaudeQuotaBody({ quota, classes }: QuotaBodyProps<ClaudeQuotaSt
                <div className={classes.quotaRowHeader}>
                  <span className={classes.quotaModel}>{windowLabel}</span>
                  <div className={classes.quotaMeta}>
@@ -609,10 +632,10 @@ index 0000000..c957d86
 +    : snapshot.filter((item) => item.auth_index === index && item.provider === provider);
 +}
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 7cb5fa0..cef393a 100644
+index 2a29196..dd019b9 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -2240,5 +2240,14 @@
+@@ -2283,5 +2283,14 @@
      "source": "Source",
      "provider_query": "Provider quota query",
      "stale": "Stale observation"
@@ -628,10 +651,10 @@ index 7cb5fa0..cef393a 100644
    }
  }
 diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
-index 2c2e0bc..46fd2e2 100644
+index 475a1cd..3f95661 100644
 --- a/src/i18n/locales/ru.json
 +++ b/src/i18n/locales/ru.json
-@@ -2234,5 +2234,14 @@
+@@ -2277,5 +2277,14 @@
      "source": "Источник",
      "provider_query": "Запрос квоты провайдера",
      "stale": "Устаревшие данные"
@@ -647,10 +670,10 @@ index 2c2e0bc..46fd2e2 100644
    }
  }
 diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
-index 1c1f599..af31732 100644
+index 580be4d..9062ebd 100644
 --- a/src/i18n/locales/zh-CN.json
 +++ b/src/i18n/locales/zh-CN.json
-@@ -2238,5 +2238,14 @@
+@@ -2282,5 +2282,14 @@
      "source": "来源",
      "provider_query": "服务商额度查询",
      "stale": "数据已过期"
@@ -666,10 +689,10 @@ index 1c1f599..af31732 100644
    }
  }
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 636af4e..a02bcee 100644
+index 458d9a3..8080b62 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -2264,5 +2264,14 @@
+@@ -2310,5 +2310,14 @@
      "source": "來源",
      "provider_query": "服務商額度查詢",
      "stale": "資料已過期"
@@ -685,10 +708,10 @@ index 636af4e..a02bcee 100644
    }
  }
 diff --git a/src/types/quota.ts b/src/types/quota.ts
-index f659d13..60e4be8 100644
+index 0b544db..b02ed14 100644
 --- a/src/types/quota.ts
 +++ b/src/types/quota.ts
-@@ -158,6 +158,8 @@ export interface ClaudeProfileResponse {
+@@ -195,6 +195,8 @@ export interface ClaudeProfileResponse {
  }
  
  export interface ClaudeQuotaWindow {
@@ -697,7 +720,7 @@ index f659d13..60e4be8 100644
    id: string;
    label: string;
    labelKey?: string;
-@@ -227,6 +229,8 @@ export interface AntigravityQuotaState {
+@@ -281,6 +283,8 @@ export interface PluginQuotaState extends AntigravityQuotaState {
  }
  
  export interface CodexQuotaWindow {

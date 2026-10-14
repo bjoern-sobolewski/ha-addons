@@ -45,7 +45,7 @@ index fe1a621..7ff2bb8 100644
 +  return response.names;
 +}
 diff --git a/src/features/config/components/blocks/ApiKeysCardEditor.tsx b/src/features/config/components/blocks/ApiKeysCardEditor.tsx
-index 7e51d45..d0ccd8d 100644
+index 09a2f57..d1c7156 100644
 --- a/src/features/config/components/blocks/ApiKeysCardEditor.tsx
 +++ b/src/features/config/components/blocks/ApiKeysCardEditor.tsx
 @@ -1,9 +1,9 @@
@@ -128,26 +128,26 @@ index 7e51d45..d0ccd8d 100644
      // Retain old fingerprints: configuration edits can still be discarded or fail to save.
      if (editingApiKeyId === null) {
        setApiKeyIds([...renderApiKeyIds, makeClientId()]);
-@@ -150,7 +158,7 @@ function ScopedApiKeysCardEditor({
-     <div className="form-group" style={{ marginBottom: 0 }}>
-       <div className={styles.blockHeaderRow}>
-         <label style={{ margin: 0 }}>{t('config_management.visual.api_keys.label')}</label>
+@@ -155,7 +163,7 @@ function ScopedApiKeysCardEditor({
+           </span>
+           <span className={styles.apiKeysHint}>{t('config_management.visual.api_keys.hint')}</span>
+         </div>
 -        <Button size="sm" onClick={openAddModal} disabled={disabled}>
 +        <Button size="sm" onClick={openAddModal} disabled={disabled || savingName || !namesReady}>
            {t('config_management.visual.api_keys.add')}
          </Button>
        </div>
-@@ -164,7 +172,7 @@ function ScopedApiKeysCardEditor({
-               <div className="item-meta">
-                 <div className="pill">#{index + 1}</div>
-                 <div className="item-title">
+@@ -169,7 +177,7 @@ function ScopedApiKeysCardEditor({
+               <span className={styles.apiKeyIndex}>#{index + 1}</span>
+               <span className={styles.apiKeyMeta}>
+                 <span className={styles.apiKeyName}>
 -                  {names[nameFingerprints[index]] ??
 +                  {names[nameFingerprints[index]] ||
                      t('config_management.visual.api_keys.input_label')}
-                 </div>
-                 <div className="item-subtitle">{maskApiKey(String(key || ''))}</div>
-@@ -174,7 +182,7 @@ function ScopedApiKeysCardEditor({
-                   variant="secondary"
+                 </span>
+                 <span className={styles.apiKeyValue}>{maskApiKey(String(key || ''))}</span>
+@@ -179,7 +187,7 @@ function ScopedApiKeysCardEditor({
+                   variant="ghost"
                    size="sm"
                    onClick={() => handleCopy(key)}
 -                  disabled={disabled}
@@ -155,8 +155,8 @@ index 7e51d45..d0ccd8d 100644
                  >
                    {t('common.copy')}
                  </Button>
-@@ -182,7 +190,7 @@ function ScopedApiKeysCardEditor({
-                   variant="secondary"
+@@ -187,7 +195,7 @@ function ScopedApiKeysCardEditor({
+                   variant="ghost"
                    size="sm"
                    onClick={() => openEditModal(renderApiKeyIds[index] ?? '')}
 -                  disabled={disabled}
@@ -164,21 +164,21 @@ index 7e51d45..d0ccd8d 100644
                  >
                    {t('config_management.visual.common.edit')}
                  </Button>
-@@ -190,7 +198,7 @@ function ScopedApiKeysCardEditor({
-                   variant="danger"
+@@ -196,7 +204,7 @@ function ScopedApiKeysCardEditor({
                    size="sm"
+                   className={styles.apiKeyDelete}
                    onClick={() => handleDelete(renderApiKeyIds[index] ?? '')}
 -                  disabled={disabled}
 +                  disabled={disabled || savingName || !namesReady}
                  >
                    {t('config_management.visual.common.delete')}
                  </Button>
-@@ -201,10 +209,11 @@ function ScopedApiKeysCardEditor({
+@@ -206,9 +214,11 @@ function ScopedApiKeysCardEditor({
+         </ol>
        )}
  
-       <div className="hint">{t('config_management.visual.api_keys.hint')}</div>
 +      {namesError && <div className="error-box">{namesError}</div>}
- 
++
        <Modal
          open={modalOpen}
 -        onClose={closeModal}
@@ -186,7 +186,7 @@ index 7e51d45..d0ccd8d 100644
          title={
            editingApiKeyId !== null
              ? t('config_management.visual.api_keys.edit_title')
-@@ -212,10 +221,10 @@ function ScopedApiKeysCardEditor({
+@@ -216,10 +226,10 @@ function ScopedApiKeysCardEditor({
          }
          footer={
            <>
@@ -199,7 +199,7 @@ index 7e51d45..d0ccd8d 100644
                {editingApiKeyId !== null
                  ? t('config_management.visual.common.update')
                  : t('config_management.visual.common.add')}
-@@ -228,11 +237,12 @@ function ScopedApiKeysCardEditor({
+@@ -232,11 +242,12 @@ function ScopedApiKeysCardEditor({
            <input
              id={nameInputId}
              className="input"
@@ -213,7 +213,7 @@ index 7e51d45..d0ccd8d 100644
            />
            <div id={nameHintId} className="hint">
              {t('config_management.visual.api_keys.name_hint')}
-@@ -249,7 +259,7 @@ function ScopedApiKeysCardEditor({
+@@ -253,7 +264,7 @@ function ScopedApiKeysCardEditor({
                placeholder={t('config_management.visual.api_keys.input_placeholder')}
                value={inputValue}
                onChange={(e) => setInputValue(e.target.value)}
@@ -222,7 +222,7 @@ index 7e51d45..d0ccd8d 100644
                aria-describedby={formError ? `${apiKeyErrorId} ${apiKeyHintId}` : apiKeyHintId}
                aria-invalid={Boolean(formError)}
              />
-@@ -258,7 +268,7 @@ function ScopedApiKeysCardEditor({
+@@ -262,7 +273,7 @@ function ScopedApiKeysCardEditor({
                variant="secondary"
                size="sm"
                onClick={handleGenerate}
@@ -232,10 +232,10 @@ index 7e51d45..d0ccd8d 100644
                {t('config_management.visual.api_keys.generate')}
              </Button>
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index f356196..310d9b4 100644
+index e1af672..c2cbb78 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -1445,8 +1445,8 @@
+@@ -1483,8 +1483,8 @@
          "input_placeholder": "Paste your API key",
          "name_label": "Name / description (optional)",
          "name_placeholder": "For example: Alice's laptop",
@@ -247,10 +247,10 @@ index f356196..310d9b4 100644
          "error_empty": "Please enter an API key",
          "error_invalid": "API key contains invalid characters",
 diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
-index b420bf3..088deb8 100644
+index 768f6b2..e1c7f9b 100644
 --- a/src/i18n/locales/ru.json
 +++ b/src/i18n/locales/ru.json
-@@ -1448,8 +1448,8 @@
+@@ -1486,8 +1486,8 @@
          "input_placeholder": "Вставьте API-ключ",
          "name_label": "Имя / описание (необязательно)",
          "name_placeholder": "Например: ноутбук Анны",
@@ -262,10 +262,10 @@ index b420bf3..088deb8 100644
          "error_empty": "Введите API-ключ",
          "error_invalid": "API-ключ содержит недопустимые символы",
 diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
-index fce60cb..0f477b9 100644
+index c12b3c3..70bb845 100644
 --- a/src/i18n/locales/zh-CN.json
 +++ b/src/i18n/locales/zh-CN.json
-@@ -1443,8 +1443,8 @@
+@@ -1482,8 +1482,8 @@
          "input_placeholder": "粘贴你的 API 密钥",
          "name_label": "名称 / 说明（可选）",
          "name_placeholder": "例如：小明的笔记本",
@@ -277,10 +277,10 @@ index fce60cb..0f477b9 100644
          "error_empty": "请输入 API 密钥",
          "error_invalid": "API 密钥包含无效字符",
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index cee344d..79dbb7b 100644
+index c64679d..0d9a2fb 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -1469,8 +1469,8 @@
+@@ -1510,8 +1510,8 @@
          "input_placeholder": "貼上你的 API 金鑰",
          "name_label": "名稱 / 說明（選填）",
          "name_placeholder": "例如：小明的筆記型電腦",
@@ -305,7 +305,7 @@ index 58d2915..9d8244b 100644
  
      const pending = render(snapshot, { onReset: () => {}, resetting: true });
 diff --git a/tests/providerModelOptions.test.ts b/tests/providerModelOptions.test.ts
-index d609322..d51fd03 100644
+index ae0f78b..9c20b39 100644
 --- a/tests/providerModelOptions.test.ts
 +++ b/tests/providerModelOptions.test.ts
 @@ -1,4 +1,5 @@
@@ -313,8 +313,8 @@ index d609322..d51fd03 100644
 +import i18n from '../src/i18n';
  import { createElement } from 'react';
  import { renderToStaticMarkup } from 'react-dom/server';
- import {
-@@ -185,21 +186,21 @@ describe('provider model options', () => {
+ import { createInstance } from 'i18next';
+@@ -195,21 +196,21 @@ describe('provider model options', () => {
  
    test('gates fields by provider capability', () => {
      const vertex = render('vertex');

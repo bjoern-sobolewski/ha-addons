@@ -1,6 +1,6 @@
 diff --git a/internal/api/handlers/management/api_key_names.go b/internal/api/handlers/management/api_key_names.go
 new file mode 100644
-index 0000000..fc1520f
+index 00000000..fc1520ff
 --- /dev/null
 +++ b/internal/api/handlers/management/api_key_names.go
 @@ -0,0 +1,118 @@
@@ -124,7 +124,7 @@ index 0000000..fc1520f
 +}
 diff --git a/internal/api/handlers/management/api_key_names_test.go b/internal/api/handlers/management/api_key_names_test.go
 new file mode 100644
-index 0000000..b53f17e
+index 00000000..b53f17ed
 --- /dev/null
 +++ b/internal/api/handlers/management/api_key_names_test.go
 @@ -0,0 +1,60 @@
@@ -189,7 +189,7 @@ index 0000000..b53f17e
 +	request(fmt.Sprintf(`{"names":{"%s":"New"}}`, fingerprint), 500)
 +}
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index 25eb130..bbf1ba3 100644
+index 25eb1301..bbf1ba32 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
 @@ -18,6 +18,8 @@ func (s *Server) registerManagementV8Routes() {

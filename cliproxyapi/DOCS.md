@@ -16,7 +16,7 @@ Port **8080** is the API-only gateway for your tunnel. Port **8317** is the comp
 
 ## Provider setup
 
-For OAuth and dashboard setup, temporarily enable host port 8317 in the app's **Network** settings, restart, and open `http://HOME_ASSISTANT_IP:8317/management.html` from a trusted LAN. Use the management key to sign in, then configure providers or import their OAuth files. See [upstream documentation](https://github.com/router-for-me/CLIProxyAPI) for the individual providers' supported login/import flows. The dashboard is downloaded from the upstream management project on first access. Disable this host mapping after setup when LAN management is no longer needed. Keep it out of Cloudflare Tunnel and router forwarding rules.
+For OAuth and dashboard setup, temporarily enable host port 8317 in the app's **Network** settings, restart, and open `http://HOME_ASSISTANT_IP:8317/management.html` from a trusted LAN. Use the management key to sign in, then configure providers or import their OAuth files. See [upstream documentation](https://github.com/router-for-me/CLIProxyAPI) for the individual providers' supported login/import flows. The app serves a pinned, customized management dashboard bundled with its image; automatic dashboard replacement is disabled. Disable this host mapping after setup when LAN management is no longer needed. Keep it out of Cloudflare Tunnel and router forwarding rules.
 
 Alternatively, place a private `providers.yaml` file in this app's `/addon_configs/<app-identifier>/` folder using a Home Assistant file editor or Samba. It is mounted at `/config/providers.yaml`. Use the current v8 provider layout, for example:
 

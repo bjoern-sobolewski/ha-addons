@@ -1,0 +1,302 @@
+diff --git a/bun.lock b/bun.lock
+index c3efe71..29efbb8 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -9,7 +9,7 @@
+         "@codemirror/merge": "^6.12.2",
+         "@noble/hashes": "^2.4.0",
+         "@uiw/react-codemirror": "^4.25.11",
+-        "axios": "1.18.1",
++        "axios": "1.20.0",
+         "i18next": "^26.3.6",
+         "motion": "^12.42.2",
+         "react": "^19.2.7",
+@@ -40,6 +40,7 @@
+     },
+   },
+   "overrides": {
++    "@codemirror/language": "6.12.4",
+     "form-data": "4.0.6",
+   },
+   "packages": {
+@@ -83,7 +84,7 @@
+ 
+     "@codemirror/lang-yaml": ["@codemirror/lang-yaml@6.1.3", "", { "dependencies": { "@codemirror/autocomplete": "^6.0.0", "@codemirror/language": "^6.0.0", "@codemirror/state": "^6.0.0", "@lezer/common": "^1.2.0", "@lezer/highlight": "^1.2.0", "@lezer/lr": "^1.0.0", "@lezer/yaml": "^1.0.0" } }, "sha512-AZ8DJBuXGVHybpBQhmZtgew5//4hv3tdkXnr3vDmOUMJRuB6vn/uuwtmTOTlqEaQFg3hQSVeA90NmvIQyUV6FQ=="],
+ 
+-    "@codemirror/language": ["@codemirror/language@6.11.3", "", { "dependencies": { "@codemirror/state": "^6.0.0", "@codemirror/view": "^6.23.0", "@lezer/common": "^1.1.0", "@lezer/highlight": "^1.0.0", "@lezer/lr": "^1.0.0", "style-mod": "^4.0.0" } }, "sha512-9HBM2XnwDj7fnu0551HkGdrUrrqmYq/WC5iv6nbY2WdicXdGbhR/gfbZOH73Aqj4351alY1+aoG9rCNfiwS1RA=="],
++    "@codemirror/language": ["@codemirror/language@6.12.4", "", { "dependencies": { "@codemirror/state": "^6.0.0", "@codemirror/view": "^6.23.0", "@lezer/common": "^1.5.0", "@lezer/highlight": "^1.0.0", "@lezer/lr": "^1.0.0", "style-mod": "^4.0.0" } }, "sha512-1q4PaT+o6PbgpkJt4Q8Fv5XJxTy4FUZ4MWETtyiDw3J0Pyr9E2vqcKL+k9wcvjNTIsauxvE7OfmWj3FRPHQ76A=="],
+ 
+     "@codemirror/lint": ["@codemirror/lint@6.9.2", "", { "dependencies": { "@codemirror/state": "^6.0.0", "@codemirror/view": "^6.35.0", "crelt": "^1.0.5" } }, "sha512-sv3DylBiIyi+xKwRCJAAsBZZZWo82shJ/RTMymLabAdtbkV5cSKwWDeCgtUq3v8flTaXS2y1kKkICuRYtUswyQ=="],
+ 
+@@ -261,7 +262,7 @@
+ 
+     "asynckit": ["asynckit@0.4.0", "", {}, ""],
+ 
+-    "axios": ["axios@1.18.1", "", { "dependencies": { "follow-redirects": "^1.16.0", "form-data": "^4.0.5", "https-proxy-agent": "^5.0.1", "proxy-from-env": "^2.1.0" } }, "sha512-3nTvFlvpn9Zu/RkHUqtc7/+al4UpRW5az71ap5zccp6e8RAYEzhMTecX8Dz1wWDYrPpUoB1HAQEGEAEvUr7S9g=="],
++    "axios": ["axios@1.20.0", "", { "dependencies": { "follow-redirects": "^1.16.0", "form-data": "^4.0.6", "https-proxy-agent": "^5.0.1", "proxy-from-env": "^2.1.0" } }, "sha512-r8aOh8j9cGKpgQAqpzrUHnSIc6a59Y3Xf/cv8sy1DrHCkZHzQGEuoq1tARk6qSyDdtQGSDgpb9kFlruzPvrgwg=="],
+ 
+     "balanced-match": ["balanced-match@4.0.4", "", {}, "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA=="],
+ 
+@@ -579,6 +580,8 @@
+ 
+     "@babel/helper-compilation-targets/semver": ["semver@6.3.1", "", { "bin": "bin/semver.js" }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
+ 
++    "@codemirror/language/@lezer/common": ["@lezer/common@1.5.3", "", {}, "sha512-H0iErY4e43LpXbYDyBci5W4v/RwTgGV3YzYOlJPiGZ8RY8w51kVE+xLn1tg3Z6UmSfyETvtsUK3r7YsgDQEI7Q=="],
++
+     "@eslint-community/eslint-utils/eslint-visitor-keys": ["eslint-visitor-keys@3.4.3", "", {}, "sha512-wpc+LXeiyiisxPlEkUzU6svyS1frIO3Mgxj1fdy7Pm8Ygzguax2N3Fa/D/ag1WqbOprdI+uY6wMUl8/a2G+iag=="],
+ 
+     "es-set-tostringtag/hasown": ["hasown@2.0.2", "", { "dependencies": { "function-bind": "^1.1.2" } }, ""],
+diff --git a/package.json b/package.json
+index 8d2cf96..4ff2ad7 100644
+--- a/package.json
++++ b/package.json
+@@ -19,7 +19,7 @@
+     "@codemirror/merge": "^6.12.2",
+     "@noble/hashes": "^2.4.0",
+     "@uiw/react-codemirror": "^4.25.11",
+-    "axios": "1.18.1",
++    "axios": "1.20.0",
+     "i18next": "^26.3.6",
+     "motion": "^12.42.2",
+     "react": "^19.2.7",
+@@ -48,6 +48,7 @@
+     "vite-plugin-singlefile": "^2.3.3"
+   },
+   "overrides": {
+-    "form-data": "4.0.6"
++    "form-data": "4.0.6",
++    "@codemirror/language": "6.12.4"
+   }
+ }
+diff --git a/src/features/authFiles/components/AuthFileQuotaSection.tsx b/src/features/authFiles/components/AuthFileQuotaSection.tsx
+index b33f29e..f6408db 100644
+--- a/src/features/authFiles/components/AuthFileQuotaSection.tsx
++++ b/src/features/authFiles/components/AuthFileQuotaSection.tsx
+@@ -53,7 +53,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+   const adapter = QUOTA_ADAPTERS[quotaType];
+   const cacheKey = getQuotaCacheKey(file);
+ 
+-  const quota = useQuotaStore((state) => {
++  const storedQuota = useQuotaStore((state) => {
+     if (quotaType === 'antigravity')
+       return state.antigravityQuota[cacheKey] as QuotaCardState | undefined;
+     if (quotaType === 'claude') return state.claudeQuota[cacheKey] as QuotaCardState | undefined;
+diff --git a/src/features/quota/trafficQuota.ts b/src/features/quota/trafficQuota.ts
+index 8a1729a..f25336f 100644
+--- a/src/features/quota/trafficQuota.ts
++++ b/src/features/quota/trafficQuota.ts
+@@ -1,4 +1,5 @@
+ import type { TFunction } from 'i18next';
++import { hasClaudeUsageData } from './providers/claude/data';
+ import type {
+   CodexQuotaWindow,
+   ClaudeQuotaWindow,
+@@ -125,9 +126,10 @@ export function mergeTrafficQuota(
+ ): QuotaCardState | undefined {
+   if (provider !== 'codex' && provider !== 'claude') return stored;
+   const native = stored as CodexQuotaState | ClaudeQuotaState | undefined;
+-  const hasAccount = native?.status === 'success';
++  const hasAccount = native?.status === 'success' ||
++    (provider === 'claude' && hasClaudeUsageData(native as ClaudeQuotaState | undefined));
+   const windows: ObservedWindow[] =
+-    (hasAccount ? native.windows : [])?.map((window) => ({
++    (hasAccount ? native?.windows : [])?.map((window) => ({
+       ...window,
+       capturedAt: stored?.capturedAt,
+       source: stored?.source,
+diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
+index e79acef..6a1911f 100644
+--- a/src/i18n/locales/ko.json
++++ b/src/i18n/locales/ko.json
+@@ -433,7 +433,16 @@
+     "quota_refresh_single": "할당량 새로 고침",
+     "quota_refresh_hint": "이 자격 증명의 할당량만 새로 고침합니다",
+     "quota_refresh_success": "\"{{name}}\"의 할당량을 새로 고쳤습니다",
+-    "quota_refresh_failed": "\"{{name}}\"의 할당량 새로 고침 실패: {{message}}"
++    "quota_refresh_failed": "\"{{name}}\"의 할당량 새로 고침 실패: {{message}}",
++    "reauth_explanation": "제공업체의 새로 고침 토큰이 만료되었거나 재사용되었습니다.",
++    "reauth_required": "제공업체의 새로 고침 토큰이 만료되었거나 재사용되었습니다. OAuth 로그인으로 다시 로그인하세요.",
++    "reauth_login": "OAuth 로그인",
++    "account_refresh_button": "계정 데이터 새로 고침",
++    "account_refresh_hint": "할당량을 초기화하지 않고 요금제, 갱신일, 크레딧, 한도 및 초기화 시간을 다시 불러옵니다.",
++    "account_refresh_failed": "계정 데이터 새로 고침 실패: {{message}}",
++    "credential_refresh_button": "인증 정보 새로 고침",
++    "credential_refresh_hint": "계정 또는 할당량 데이터를 다시 불러오지 않고 OAuth 인증 정보를 갱신합니다.",
++    "account_refresh_success": "\"{{name}}\"의 계정 데이터를 새로 고쳤습니다"
+   },
+   "antigravity_subscription": {
+     "plan_unknown": "알 수 없음",
+@@ -2268,5 +2277,20 @@
+     "unavailable": "현재 초기화를 사용할 수 없습니다.",
+     "rate_limited": "요청 속도가 제한되었습니다.",
+     "auth_error": "인증이 거부되었습니다."
++  },
++  "quota_updated": {
++    "updated": "마지막 업데이트",
++    "source": "출처",
++    "provider_query": "제공업체 할당량 조회",
++    "stale": "오래된 관측값"
++  },
++  "quota_traffic": {
++    "show_age": "사용량 새로 고침 아이콘과 경과 시간 표시",
++    "account_missing": "사용량 한도를 확인할 수 있습니다. 계정 데이터를 새로 고쳐 요금제, 크레딧 및 기타 계정 정보를 불러오세요.",
++    "traffic": "API 응답 헤더",
++    "websocket": "WebSocket 이벤트",
++    "scheduled": "예약된 제공업체 조회",
++    "provider": "제공업체 할당량 조회",
++    "custom_window": "{{name}}{{minutes}}분 한도"
+   }
+ }
+diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
+index c28095f..ec2963e 100644
+--- a/src/i18n/locales/vi.json
++++ b/src/i18n/locales/vi.json
+@@ -433,7 +433,16 @@
+     "policy_rules_hint": "Các quy tắc tùy chỉnh được ưu tiên theo thứ tự danh sách. Kế thừa hoặc danh sách trống sẽ sử dụng quy tắc kế thừa; điều này không vô hiệu hóa chúng. Mẫu biểu thức chính quy (Regex) dùng cú pháp của Go.",
+     "policy_retry_invalid": "Nhập một số nguyên an toàn không âm, hoặc chọn Kế thừa.",
+     "policy_aliases_invalid": "Nhập tên model và bí danh không để trống cho mỗi hàng mới hoặc đã chỉnh sửa.",
+-    "policy_rules_invalid": "Hoàn thành mỗi quy tắc đã chỉnh sửa với mã trạng thái dương, một hành động và ít nhất một điều kiện khớp không để trống."
++    "policy_rules_invalid": "Hoàn thành mỗi quy tắc đã chỉnh sửa với mã trạng thái dương, một hành động và ít nhất một điều kiện khớp không để trống.",
++    "reauth_explanation": "Token làm mới của nhà cung cấp đã hết hạn hoặc được sử dụng lại.",
++    "reauth_required": "Token làm mới của nhà cung cấp đã hết hạn hoặc được sử dụng lại. Hãy đăng nhập lại qua OAuth.",
++    "reauth_login": "Đăng nhập OAuth",
++    "account_refresh_button": "Làm mới dữ liệu tài khoản",
++    "account_refresh_hint": "Tải lại gói, ngày gia hạn, tín dụng, giới hạn và thời gian đặt lại mà không đặt lại hạn mức.",
++    "account_refresh_failed": "Không thể làm mới dữ liệu tài khoản: {{message}}",
++    "credential_refresh_button": "Làm mới thông tin xác thực",
++    "credential_refresh_hint": "Gia hạn thông tin xác thực OAuth mà không tải lại dữ liệu tài khoản hoặc hạn mức.",
++    "account_refresh_success": "Đã làm mới dữ liệu tài khoản cho \"{{name}}\""
+   },
+   "antigravity_subscription": {
+     "plan_unknown": "Không rõ",
+@@ -2274,5 +2283,20 @@
+     "unavailable": "Tính năng đặt lại hiện không khả dụng.",
+     "rate_limited": "Yêu cầu bị giới hạn tốc độ.",
+     "auth_error": "Ủy quyền đã bị từ chối."
++  },
++  "quota_updated": {
++    "updated": "Cập nhật lần cuối",
++    "source": "Nguồn",
++    "provider_query": "Truy vấn hạn mức nhà cung cấp",
++    "stale": "Dữ liệu quan sát đã cũ"
++  },
++  "quota_traffic": {
++    "show_age": "Hiển thị biểu tượng làm mới và thời gian dữ liệu sử dụng",
++    "account_missing": "Đã có giới hạn sử dụng. Làm mới dữ liệu tài khoản để tải gói, tín dụng và thông tin tài khoản khác.",
++    "traffic": "Header phản hồi API",
++    "websocket": "Sự kiện WebSocket",
++    "scheduled": "Truy vấn nhà cung cấp theo lịch",
++    "provider": "Truy vấn hạn mức nhà cung cấp",
++    "custom_window": "Giới hạn {{name}}{{minutes}} phút"
+   }
+ }
+diff --git a/tests/claudeOAuthUsage.test.ts b/tests/claudeOAuthUsage.test.ts
+index 492660b..c0b8d18 100644
+--- a/tests/claudeOAuthUsage.test.ts
++++ b/tests/claudeOAuthUsage.test.ts
+@@ -405,15 +405,15 @@ describe('Claude usage snapshot rendering and retention', () => {
+       new URL('../src/features/authFiles/components/AuthFileQuotaSection.tsx', import.meta.url),
+       'utf8'
+     );
+-    expect(source).toContain("const showRefreshQuotaAction = quotaStatus !== 'idle';");
++    expect(source).toContain("const showRefreshQuotaAction = quotaStatus !== 'idle' || hasDisplay;");
+     expect(source).toContain('{showRefreshQuotaAction && (');
+     expect(source).toContain('onClick={() => void refreshQuotaForFile()}');
+-    expect(source).toContain("disabled={!canRefreshQuota || quotaStatus === 'loading'}");
+-    expect(source).toContain("loading={quotaStatus === 'loading'}");
+-    expect(source).toContain("{t('auth_files.quota_refresh_single')}");
+-    expect(source).toContain("if (quota?.status === 'loading' || resettingQuota) return;");
++    expect(source).toContain("disabled={!canRefreshQuota || quotaStatus === 'loading' || isRuntimeOnlyAuthFile(file)}");
++    expect(source).toContain("loading={refreshingQuota || quotaStatus === 'loading'}");
++    expect(source).toContain("{t('auth_files.account_refresh_button')}");
++    expect(source).toContain("if (resettingQuota || pendingRefresh.current) return;");
+     expect(source).toContain(
+-      'const canRefreshQuota = !disableControls && !file.disabled && !resettingQuota;'
++      'const canRefreshQuota = !disableControls && !file.disabled && !resettingQuota && !refreshingQuota;'
+     );
+     expect(source).toContain('{resetQuotaAction}');
+     expect(CLAUDE_CONFIG).not.toHaveProperty('resetQuota');
+diff --git a/tests/nativeQuotaObservation.test.tsx b/tests/nativeQuotaObservation.test.tsx
+index 801b2ee..704e616 100644
+--- a/tests/nativeQuotaObservation.test.tsx
++++ b/tests/nativeQuotaObservation.test.tsx
+@@ -154,7 +154,7 @@ test('inline age keeps native plan, credits, manual-reset expiry and provider wi
+     )
+   );
+   for (const content of [
+-    'Pro 20x',
++    'Pro 200',
+     '12.5',
+     'Manual resets',
+     'Manual reset expiry',
+diff --git a/tests/providerModelOptions.test.ts b/tests/providerModelOptions.test.ts
+index 9c20b39..ae0f78b 100644
+--- a/tests/providerModelOptions.test.ts
++++ b/tests/providerModelOptions.test.ts
+@@ -1,5 +1,4 @@
+ import { describe, expect, test } from 'bun:test';
+-import i18n from '../src/i18n';
+ import { createElement } from 'react';
+ import { renderToStaticMarkup } from 'react-dom/server';
+ import { createInstance } from 'i18next';
+@@ -196,21 +195,21 @@ describe('provider model options', () => {
+ 
+   test('gates fields by provider capability', () => {
+     const vertex = render('vertex');
+-    expect(vertex).toContain(i18n.t('providersPage.modelOptions.displayName'));
+-    expect(vertex).toContain(i18n.t('providersPage.modelOptions.forceMapping'));
+-    expect(vertex).not.toContain(i18n.t('providersPage.modelOptions.maxContextLength'));
+-    expect(vertex).not.toContain(i18n.t('providersPage.modelOptions.isCompat'));
++    expect(vertex).toContain('providersPage.modelOptions.displayName');
++    expect(vertex).toContain('providersPage.modelOptions.forceMapping');
++    expect(vertex).not.toContain('providersPage.modelOptions.maxContextLength');
++    expect(vertex).not.toContain('providersPage.modelOptions.isCompat');
+     for (const brand of ['gemini', 'codex', 'openaiCompatibility'] as const) {
+       const html = render(brand);
+-      expect(html).toContain(i18n.t('providersPage.modelOptions.maxContextLength'));
+-      expect(html).toContain(i18n.t('providersPage.modelOptions.isCompat'));
+-      expect(html.includes(i18n.t('providersPage.modelOptions.supportConfigurationUpdate'))).toBe(
++      expect(html).toContain('providersPage.modelOptions.maxContextLength');
++      expect(html).toContain('providersPage.modelOptions.isCompat');
++      expect(html.includes('providersPage.modelOptions.supportConfigurationUpdate')).toBe(
+         brand === 'codex'
+       );
+-      expect(html.includes(i18n.t('providersPage.modelOptions.inputModalitiesText'))).toBe(
++      expect(html.includes('providersPage.modelOptions.inputModalitiesText')).toBe(
+         brand === 'openaiCompatibility'
+       );
+-      expect(html.includes(i18n.t('providersPage.modelOptions.useMaxCompletionTokens'))).toBe(
++      expect(html.includes('providersPage.modelOptions.useMaxCompletionTokens')).toBe(
+         brand === 'openaiCompatibility'
+       );
+     }
+diff --git a/tests/trafficNativeQuota.test.tsx b/tests/trafficNativeQuota.test.tsx
+index 5a4ae42..a41f883 100644
+--- a/tests/trafficNativeQuota.test.tsx
++++ b/tests/trafficNativeQuota.test.tsx
+@@ -57,3 +57,25 @@ test('Claude usage observations preserve account plan and extra usage',()=>{
+  const incoming={...sample,provider:'claude',window:'claude-7d',headers:{'anthropic-ratelimit-unified-7d-utilization':['0.5'],'anthropic-ratelimit-unified-7d-reset':['2026-10-06T10:00:00Z']}};
+  expect(mergeTrafficQuota('claude',base,[incoming],t)).toMatchObject({planType:'plan_max',extraUsage:base.extraUsage,windows:[{id:'seven-day',usedPercent:50}]});
+ });
++
++
++test('Claude refresh states retain account balances and unrelated windows during newer traffic', () => {
++  const incoming = { ...sample, provider: 'claude', window: 'claude-7d', headers: {
++    'anthropic-ratelimit-unified-7d-utilization': ['0.5'],
++    'anthropic-ratelimit-unified-7d-reset': ['2026-10-06T10:00:00Z'],
++  } };
++  for (const status of ['loading', 'error'] as const) {
++    const stored = { status, capturedAt: at, planType: 'plan_max',
++      extraUsage: { is_enabled: true, monthly_limit: 20000, used_credits: 1200, utilization: 6 },
++      dollarWindows: [], windows: [
++        { id: 'seven-day', label: 'Weekly', usedPercent: 12, resetLabel: '-', periodHours: 168 },
++        { id: 'five-hour', label: 'Short', usedPercent: 22, resetLabel: '-', periodHours: 5 },
++      ] };
++    const merged = mergeTrafficQuota('claude', stored, [incoming], t);
++    expect(merged).toMatchObject({ status: 'success', planType: 'plan_max',
++      extraUsage: stored.extraUsage, windows: [
++        { id: 'seven-day', usedPercent: 50 }, { id: 'five-hour', usedPercent: 22 },
++      ] });
++    expect(stored.windows[0].usedPercent).toBe(12);
++  }
++});

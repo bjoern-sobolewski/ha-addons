@@ -1,16 +1,16 @@
 diff --git a/internal/api/handlers/management/api_tools.go b/internal/api/handlers/management/api_tools.go
-index c030205..ef4a3dd 100644
+index 4db27e79..2438ee7a 100644
 --- a/internal/api/handlers/management/api_tools.go
 +++ b/internal/api/handlers/management/api_tools.go
-@@ -14,6 +14,7 @@ import (
- 	"github.com/gin-gonic/gin"
+@@ -15,6 +15,7 @@ import (
  	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 +	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
  	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
-@@ -33,6 +34,7 @@ type apiCallRequest struct {
+@@ -34,6 +35,7 @@ type apiCallRequest struct {
  	AuthIndexSnake  *string           `json:"auth_index"`
  	AuthIndexCamel  *string           `json:"authIndex"`
  	AuthIndexPascal *string           `json:"AuthIndex"`
@@ -18,7 +18,7 @@ index c030205..ef4a3dd 100644
  	Method          string            `json:"method"`
  	URL             string            `json:"url"`
  	ProxyURL        string            `json:"proxy_url"`
-@@ -232,6 +234,13 @@ func (h *Handler) APICall(c *gin.Context) {
+@@ -233,6 +235,13 @@ func (h *Handler) APICall(c *gin.Context) {
  		return
  	}
  
@@ -34,7 +34,7 @@ index c030205..ef4a3dd 100644
  		Header:     resp.Header,
 diff --git a/internal/api/handlers/management/quota_observations.go b/internal/api/handlers/management/quota_observations.go
 new file mode 100644
-index 0000000..12fdac6
+index 00000000..12fdac6b
 --- /dev/null
 +++ b/internal/api/handlers/management/quota_observations.go
 @@ -0,0 +1,20 @@
@@ -59,7 +59,7 @@ index 0000000..12fdac6
 +	c.JSON(http.StatusOK, gin.H{"items": quotatraffic.Read(allowed)})
 +}
 diff --git a/internal/api/server_management.go b/internal/api/server_management.go
-index 12a2ba5..897b744 100644
+index 1eabc9cd..9ed19b52 100644
 --- a/internal/api/server_management.go
 +++ b/internal/api/server_management.go
 @@ -81,6 +81,7 @@ func (s *Server) registerManagementRoutes() {
@@ -71,7 +71,7 @@ index 12a2ba5..897b744 100644
  		mgmt.POST("/quota/fetch", s.mgmt.FetchCredentialQuota)
  		mgmt.POST("/quota/reset", s.mgmt.ResetCredentialQuota)
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index 7f68dad..25eb130 100644
+index 7f68dad0..25eb1301 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
 @@ -18,6 +18,7 @@ func (s *Server) registerManagementV8Routes() {
@@ -83,7 +83,7 @@ index 7f68dad..25eb130 100644
  	v8.PUT("/config", s.mgmt.ConfigV8)
  	v8.PATCH("/config", s.mgmt.ConfigV8)
 diff --git a/internal/logging/requestmeta.go b/internal/logging/requestmeta.go
-index be20511..e04981e 100644
+index be205112..e04981e5 100644
 --- a/internal/logging/requestmeta.go
 +++ b/internal/logging/requestmeta.go
 @@ -5,11 +5,27 @@ import (
@@ -123,10 +123,10 @@ index be20511..e04981e 100644
  		return
  	}
 diff --git a/internal/managementasset/updater.go b/internal/managementasset/updater.go
-index c466703..559b58c 100644
+index 57aff6b8..107e86fe 100644
 --- a/internal/managementasset/updater.go
 +++ b/internal/managementasset/updater.go
-@@ -59,6 +59,9 @@ func SetCurrentConfig(cfg *config.Config) {
+@@ -60,6 +60,9 @@ func SetCurrentConfig(cfg *config.Config) {
  // StartAutoUpdater launches a background goroutine that periodically ensures the management asset is up to date.
  // It respects the disable-control-panel flag on every iteration and supports hot-reloaded configurations.
  func StartAutoUpdater(ctx context.Context, configFilePath string) {
@@ -136,7 +136,7 @@ index c466703..559b58c 100644
  	configFilePath = strings.TrimSpace(configFilePath)
  	if configFilePath == "" {
  		log.Debug("management asset auto-updater skipped: empty config path")
-@@ -189,6 +192,10 @@ func FilePath(configFilePath string) string {
+@@ -190,6 +193,10 @@ func FilePath(configFilePath string) string {
  // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
  // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
  func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
@@ -149,7 +149,7 @@ index c466703..559b58c 100644
  	}
 diff --git a/internal/quotatraffic/cache.go b/internal/quotatraffic/cache.go
 new file mode 100644
-index 0000000..3fb7123
+index 00000000..3fb71233
 --- /dev/null
 +++ b/internal/quotatraffic/cache.go
 @@ -0,0 +1,215 @@
@@ -370,7 +370,7 @@ index 0000000..3fb7123
 +}
 diff --git a/internal/quotatraffic/cache_test.go b/internal/quotatraffic/cache_test.go
 new file mode 100644
-index 0000000..c1091fe
+index 00000000..c1091fe1
 --- /dev/null
 +++ b/internal/quotatraffic/cache_test.go
 @@ -0,0 +1,77 @@
@@ -452,7 +452,7 @@ index 0000000..c1091fe
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/logging_helpers.go b/internal/runtime/executor/helps/logging_helpers.go
-index e1db297..46fbdb0 100644
+index e1db2978..46fbdb08 100644
 --- a/internal/runtime/executor/helps/logging_helpers.go
 +++ b/internal/runtime/executor/helps/logging_helpers.go
 @@ -403,7 +403,9 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
@@ -467,7 +467,7 @@ index e1db297..46fbdb0 100644
  }
  
 diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
-index 9616a82..38753a9 100644
+index 94953120..3ecb7c05 100644
 --- a/sdk/cliproxy/auth/conductor_execution.go
 +++ b/sdk/cliproxy/auth/conductor_execution.go
 @@ -16,6 +16,7 @@ import (
@@ -562,11 +562,11 @@ index 9616a82..38753a9 100644
  		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 -		execCtx = newUpstreamAttemptContext(execCtx)
 +		execCtx = newUpstreamAttemptContext(execCtx, auth)
- 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
- 		if selection != nil && aliasResult.ForceMapping && responseAlias != "" {
- 			aliasResult.OriginalAlias = responseAlias
+ 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+ 		// Home owns dispatched credential availability; only local selections need state filtering.
+ 		if selection == nil {
 diff --git a/sdk/cliproxy/auth/conductor_home_execution.go b/sdk/cliproxy/auth/conductor_home_execution.go
-index 1b8f233..dee930f 100644
+index 77871d2b..68a680d4 100644
 --- a/sdk/cliproxy/auth/conductor_home_execution.go
 +++ b/sdk/cliproxy/auth/conductor_home_execution.go
 @@ -131,7 +131,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
@@ -578,7 +578,7 @@ index 1b8f233..dee930f 100644
  		if rt := m.roundTripperFor(auth); rt != nil {
  			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
  			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-@@ -169,7 +169,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
+@@ -170,7 +170,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
  			continue
  		}
  		for _, upstreamModel := range models {
@@ -588,10 +588,10 @@ index 1b8f233..dee930f 100644
  			execReq := req
  			execReq.Model = upstreamModel
 diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
-index 1e0137b..fd81c36 100644
+index 9558f813..187d8880 100644
 --- a/sdk/cliproxy/auth/conductor_stream.go
 +++ b/sdk/cliproxy/auth/conductor_stream.go
-@@ -215,7 +215,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+@@ -237,7 +237,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
  	var upstreamErr error
  	didRefreshOnUnauthorized := false
  	for idx, execModel := range execModels {
@@ -600,7 +600,7 @@ index 1e0137b..fd81c36 100644
  		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
  		execReq := req
  		execReq.Model = execModel
-@@ -252,12 +252,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+@@ -275,12 +275,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
  			}
  			if allowRetry && !ephemeralResult {
  				alreadyTried := didRefreshOnUnauthorized
@@ -615,7 +615,7 @@ index 1e0137b..fd81c36 100644
  					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
  					startRetry := time.Now()
  					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
-@@ -328,13 +328,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+@@ -353,13 +353,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
  			}
  			if allowRetry && !ephemeralResult {
  				alreadyTried := didRefreshOnUnauthorized

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.14
+
+- Update CLIProxyAPI to 8.0.28 and the pinned management panel to 1.26.3.
+- Include upstream WebSocket session/reload fixes, late interruption handling, transient HTTP/2 retry fixes, Codex SSE handling and configuration concurrency fixes.
+- Preserve quota capture, shared key names, OAuth diagnostics, outgoing service-tier tracking and the API-only gateway.
+- Update panel Axios to 1.20.0 with its security fixes; preserve retained Claude balances when newer traffic arrives during refresh.
+- Retain the panel's new compact key layout, Claude balances and reset controls, plugin quotas and all six language catalogs.
+
 ## 0.1.13
 
 - Update CLIProxyAPI from 8.0.10 to 8.0.22, including response.interrupt support, active upstream forwarding and HTTP cancellation.

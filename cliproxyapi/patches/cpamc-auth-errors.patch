@@ -1,8 +1,64 @@
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index c2cbb78..ec3b1f0 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -217,6 +217,9 @@
+     "routing_strategy_fill_first": "fill-first (prioritize)"
+   },
+   "auth_files": {
++    "reauth_explanation": "The provider refresh token expired or was reused.",
++    "reauth_required": "The provider refresh token expired or was reused. Sign in again through OAuth Login.",
++    "reauth_login": "OAuth Login",
+     "title": "Auth Files Management",
+     "meta_total": "{{count}} credentials",
+     "meta_active": "{{count}} active",
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index e1c7f9b..2c85c5c 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -216,6 +216,9 @@
+     "routing_strategy_fill_first": "fill-first (приоритет)"
+   },
+   "auth_files": {
++    "reauth_explanation": "Токен обновления провайдера истёк или был использован повторно.",
++    "reauth_required": "Токен обновления провайдера истёк или был использован повторно. Войдите снова через OAuth.",
++    "reauth_login": "Вход OAuth",
+     "title": "Управление файлами авторизации",
+     "meta_total": "{{count}} учётных данных",
+     "meta_active": "{{count}} активно",
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index 70bb845..7f3ff7b 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -217,6 +217,9 @@
+     "routing_strategy_fill_first": "fill-first (优先填充)"
+   },
+   "auth_files": {
++    "reauth_explanation": "提供商刷新令牌已过期或被重复使用。",
++    "reauth_required": "提供商刷新令牌已过期或被重复使用。请通过 OAuth 登录重新授权。",
++    "reauth_login": "OAuth 登录",
+     "title": "认证文件管理",
+     "meta_total": "{{count}} 个凭证",
+     "meta_active": "{{count}} 个启用",
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index 0d9a2fb..b6269bf 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -217,6 +217,9 @@
+     "routing_strategy_fill_first": "fill-first（優先填充）"
+   },
+   "auth_files": {
++    "reauth_explanation": "供應商重新整理權杖已過期或被重複使用。",
++    "reauth_required": "供應商重新整理權杖已過期或被重複使用。請透過 OAuth 登入重新授權。",
++    "reauth_login": "OAuth 登入",
+     "title": "驗證檔案管理",
+     "meta_total": "{{count}} 個憑證",
+     "meta_active": "{{count}} 個啟用",
 diff --git a/src/services/api/authFiles.ts b/src/services/api/authFiles.ts
-index 3186f8a..ce2e4b7 100644
+index 82eeaa7..ed61b1e 100644
 --- a/src/services/api/authFiles.ts
 +++ b/src/services/api/authFiles.ts
-@@ -273,6 +273,9 @@ const normalizeAuthFileEntry = (
+@@ -288,6 +288,9 @@ const normalizeAuthFileEntry = (
  
    return {
      ...entry,
@@ -12,7 +68,7 @@ index 3186f8a..ce2e4b7 100644
      cooldownSnapshot: normalizeAuthFileCooldowns(entry.cooldowns, observedAt, receivedAtMs),
      runtimeOnly: readRuntimeOnlyField(entry),
      authIndex: normalizeRecentRequestAuthIndex(entry['auth_index'] ?? entry.authIndex),
-@@ -490,6 +493,7 @@ export interface AuthFileRefreshResult {
+@@ -508,6 +511,7 @@ export interface AuthFileRefreshResult {
    id: string;
    success: boolean;
    error?: string;
@@ -20,7 +76,7 @@ index 3186f8a..ce2e4b7 100644
  }
  
  export const normalizeAuthFileRefreshResults = (payload: unknown): AuthFileRefreshResult[] => {
-@@ -510,6 +514,12 @@ export const normalizeAuthFileRefreshResults = (payload: unknown): AuthFileRefre
+@@ -528,6 +532,12 @@ export const normalizeAuthFileRefreshResults = (payload: unknown): AuthFileRefre
        id: entry.id,
        success: entry.success,
        ...(!entry.success && typeof entry.error === 'string' ? { error: entry.error } : {}),
@@ -102,10 +158,10 @@ index 236c6de..89afd23 100644
        }
  
 diff --git a/src/types/authFile.ts b/src/types/authFile.ts
-index 3d940ff..d04f111 100644
+index 3e9d3a3..a079edb 100644
 --- a/src/types/authFile.ts
 +++ b/src/types/authFile.ts
-@@ -60,6 +60,7 @@ export interface AuthFileItem {
+@@ -65,6 +65,7 @@ export interface AuthFileItem {
    unavailable?: boolean;
    status?: string;
    statusMessage?: string;
@@ -259,59 +315,3 @@ index 0000000..c686a90
 +    apiClient.setConfig({ apiBase: '', managementKey: '' });
 +  }
 +});
-diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 310d9b4..a9c8606 100644
---- a/src/i18n/locales/en.json
-+++ b/src/i18n/locales/en.json
-@@ -217,6 +217,9 @@
-     "routing_strategy_fill_first": "fill-first (prioritize)"
-   },
-   "auth_files": {
-+    "reauth_explanation": "The provider refresh token expired or was reused.",
-+    "reauth_required": "The provider refresh token expired or was reused. Sign in again through OAuth Login.",
-+    "reauth_login": "OAuth Login",
-     "title": "Auth Files Management",
-     "meta_total": "{{count}} credentials",
-     "meta_active": "{{count}} active",
-diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
-index 088deb8..a0b4ca4 100644
---- a/src/i18n/locales/ru.json
-+++ b/src/i18n/locales/ru.json
-@@ -216,6 +216,9 @@
-     "routing_strategy_fill_first": "fill-first (приоритет)"
-   },
-   "auth_files": {
-+    "reauth_explanation": "Токен обновления провайдера истёк или был использован повторно.",
-+    "reauth_required": "Токен обновления провайдера истёк или был использован повторно. Войдите снова через OAuth.",
-+    "reauth_login": "Вход OAuth",
-     "title": "Управление файлами авторизации",
-     "meta_total": "{{count}} учётных данных",
-     "meta_active": "{{count}} активно",
-diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
-index 0f477b9..22535b5 100644
---- a/src/i18n/locales/zh-CN.json
-+++ b/src/i18n/locales/zh-CN.json
-@@ -217,6 +217,9 @@
-     "routing_strategy_fill_first": "fill-first (优先填充)"
-   },
-   "auth_files": {
-+    "reauth_explanation": "提供商刷新令牌已过期或被重复使用。",
-+    "reauth_required": "提供商刷新令牌已过期或被重复使用。请通过 OAuth 登录重新授权。",
-+    "reauth_login": "OAuth 登录",
-     "title": "认证文件管理",
-     "meta_total": "{{count}} 个凭证",
-     "meta_active": "{{count}} 个启用",
-diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 79dbb7b..89a26e7 100644
---- a/src/i18n/locales/zh-TW.json
-+++ b/src/i18n/locales/zh-TW.json
-@@ -217,6 +217,9 @@
-     "routing_strategy_fill_first": "fill-first（優先填充）"
-   },
-   "auth_files": {
-+    "reauth_explanation": "供應商重新整理權杖已過期或被重複使用。",
-+    "reauth_required": "供應商重新整理權杖已過期或被重複使用。請透過 OAuth 登入重新授權。",
-+    "reauth_login": "OAuth 登入",
-     "title": "驗證檔案管理",
-     "meta_total": "{{count}} 個憑證",
-     "meta_active": "{{count}} 個啟用",

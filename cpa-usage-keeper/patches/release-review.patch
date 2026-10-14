@@ -1,5 +1,5 @@
 diff --git a/internal/api/cpa_api_keys.go b/internal/api/cpa_api_keys.go
-index a5bd811c..5eba071e 100644
+index a5bd811..5eba071 100644
 --- a/internal/api/cpa_api_keys.go
 +++ b/internal/api/cpa_api_keys.go
 @@ -212,7 +212,7 @@ func validateCPAAPIKeyAlias(value string) error {
@@ -12,7 +12,7 @@ index a5bd811c..5eba071e 100644
  		}
  	}
 diff --git a/internal/api/key_quota.go b/internal/api/key_quota.go
-index ff6cc89d..2dde8714 100644
+index ff6cc89..2dde871 100644
 --- a/internal/api/key_quota.go
 +++ b/internal/api/key_quota.go
 @@ -2,6 +2,7 @@ package api
@@ -34,7 +34,7 @@ index ff6cc89d..2dde8714 100644
  					if reset, err := time.Parse(time.RFC3339, safe.ResetAt); err == nil && !reset.After(now) {
 diff --git a/internal/api/read_only_csv_test.go b/internal/api/read_only_csv_test.go
 new file mode 100644
-index 00000000..8d141d2c
+index 0000000..8d141d2
 --- /dev/null
 +++ b/internal/api/read_only_csv_test.go
 @@ -0,0 +1,16 @@
@@ -55,7 +55,7 @@ index 00000000..8d141d2c
 +	}
 +}
 diff --git a/internal/api/read_only_reporting.go b/internal/api/read_only_reporting.go
-index 9b986ca3..cee835cb 100644
+index 9b986ca..cee835c 100644
 --- a/internal/api/read_only_reporting.go
 +++ b/internal/api/read_only_reporting.go
 @@ -69,6 +69,15 @@ func applyReadOnlyKeyFilter(c *gin.Context, filter *servicedto.UsageFilter, labe
@@ -127,7 +127,7 @@ index 9b986ca3..cee835cb 100644
  			writer.Flush()
  			if err == nil {
 diff --git a/internal/app/app.go b/internal/app/app.go
-index dac1033f..509c5718 100644
+index 8cd6a6d..1a47834 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
 @@ -69,6 +69,7 @@ type App struct {
@@ -146,7 +146,7 @@ index dac1033f..509c5718 100644
  	// 单 writer aggregation runner 只维护 rollups/Identity，并在 App.Run 时主动追平。
  	usageAggregationRunner := poller.NewUsageAggregationRunner(db)
  	// syncService 仍然是 metadata 和 usage 处理共享的业务服务入口。
-@@ -353,6 +353,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+@@ -354,6 +354,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
  		MetadataSync:      metadataSyncRunner,
  		QuotaService:      quotaService,
  		QuotaAutoRefresh:  quotaService,
@@ -154,7 +154,7 @@ index dac1033f..509c5718 100644
  		BackupMaintenance: backupMaintenance,
  		RecentUsageCache:  recentUsageCache,
  		PricingCatalog:    pricingCatalog,
-@@ -466,6 +467,16 @@ func (a *App) Run() error {
+@@ -467,6 +468,16 @@ func (a *App) Run() error {
  
  	ctx := a.startBackgroundContext()
  	defer a.stopBackgroundTasks()
@@ -171,7 +171,7 @@ index dac1033f..509c5718 100644
  	if a.RedisIngest != nil {
  		a.startBackgroundTask(func() {
  			if err := a.RedisIngest.Run(ctx); err != nil {
-@@ -527,9 +538,6 @@ func (a *App) Run() error {
+@@ -528,9 +539,6 @@ func (a *App) Run() error {
  			}
  		})
  	}
@@ -182,7 +182,7 @@ index dac1033f..509c5718 100644
  		a.startBackgroundTask(func() {
  			// quota 自动刷新和手动刷新共用队列，但作为独立后台任务跟随 App 生命周期启动和停止。
 diff --git a/internal/app/test/database_file_pool_test.go b/internal/app/test/database_file_pool_test.go
-index 4a8a7841..c02234af 100644
+index 4a8a784..c02234a 100644
 --- a/internal/app/test/database_file_pool_test.go
 +++ b/internal/app/test/database_file_pool_test.go
 @@ -167,7 +167,15 @@ func TestUsageEventExportBypassesOccupiedFileWriter(t *testing.T) {
@@ -203,7 +203,7 @@ index 4a8a7841..c02234af 100644
  	if err := application.DB.Create(&apiKey).Error; err != nil {
 diff --git a/internal/app/test/traffic_lifecycle_test.go b/internal/app/test/traffic_lifecycle_test.go
 new file mode 100644
-index 00000000..e23ca5bb
+index 0000000..e23ca5b
 --- /dev/null
 +++ b/internal/app/test/traffic_lifecycle_test.go
 @@ -0,0 +1,79 @@
@@ -287,7 +287,7 @@ index 00000000..e23ca5bb
 +	return nil
 +}
 diff --git a/internal/auth/read_only_credential.go b/internal/auth/read_only_credential.go
-index cfb84c2d..b9bae147 100644
+index cfb84c2..b9bae14 100644
 --- a/internal/auth/read_only_credential.go
 +++ b/internal/auth/read_only_credential.go
 @@ -65,9 +65,9 @@ func (s *GormSessionStore) syncReadOnlyCredential(fingerprint string, disabled b
@@ -304,7 +304,7 @@ index cfb84c2d..b9bae147 100644
  			if err := tx.Unscoped().Where("role = ?", string(RoleReadOnly)).Delete(&entities.AuthSession{}).Error; err != nil {
  				return err
 diff --git a/internal/auth/test/read_only_credential_test.go b/internal/auth/test/read_only_credential_test.go
-index 4e0692d2..0d4d592f 100644
+index 4e0692d..0d4d592 100644
 --- a/internal/auth/test/read_only_credential_test.go
 +++ b/internal/auth/test/read_only_credential_test.go
 @@ -18,7 +18,9 @@ func TestReadOnlySessionsPersistAndRevokeOnPasswordChange(t *testing.T) {
@@ -339,7 +339,7 @@ index 4e0692d2..0d4d592f 100644
 +	}
 +}
 diff --git a/internal/cpa/api_key_names.go b/internal/cpa/api_key_names.go
-index 8fe3f7ee..b80ad1d4 100644
+index 8fe3f7e..b80ad1d 100644
 --- a/internal/cpa/api_key_names.go
 +++ b/internal/cpa/api_key_names.go
 @@ -5,12 +5,29 @@ import (
@@ -374,7 +374,7 @@ index 8fe3f7ee..b80ad1d4 100644
  }
  
 diff --git a/internal/cpa/quota_observations.go b/internal/cpa/quota_observations.go
-index cd668d05..fb82e9c0 100644
+index cd668d0..fb82e9c 100644
 --- a/internal/cpa/quota_observations.go
 +++ b/internal/cpa/quota_observations.go
 @@ -20,7 +20,10 @@ func (c *Client) FetchQuotaObservations(ctx context.Context) ([]QuotaObservation
@@ -390,7 +390,7 @@ index cd668d05..fb82e9c0 100644
  		return nil, err
  	}
 diff --git a/internal/cpa/test/api_key_names_test.go b/internal/cpa/test/api_key_names_test.go
-index 6c2513e2..25bfc202 100644
+index 6c2513e..25bfc20 100644
 --- a/internal/cpa/test/api_key_names_test.go
 +++ b/internal/cpa/test/api_key_names_test.go
 @@ -56,6 +56,9 @@ func TestSharedKeyNameClientOldServerAndErrors(t *testing.T) {
@@ -424,7 +424,7 @@ index 6c2513e2..25bfc202 100644
 +}
 diff --git a/internal/cpa/test/quota_observations_test.go b/internal/cpa/test/quota_observations_test.go
 new file mode 100644
-index 00000000..ffe18015
+index 0000000..ffe1801
 --- /dev/null
 +++ b/internal/cpa/test/quota_observations_test.go
 @@ -0,0 +1,37 @@
@@ -466,7 +466,7 @@ index 00000000..ffe18015
 +	}
 +}
 diff --git a/internal/quota/header_cache_worker.go b/internal/quota/header_cache_worker.go
-index ddead224..bc0edc4f 100644
+index 1264289..ecdbc4c 100644
 --- a/internal/quota/header_cache_worker.go
 +++ b/internal/quota/header_cache_worker.go
 @@ -179,49 +179,53 @@ func mergePendingUsageHeaderSnapshotPointers(pending map[string]*UsageHeaderSnap
@@ -562,20 +562,7 @@ index ddead224..bc0edc4f 100644
  	if existing == nil {
  		return candidate
  	}
-@@ -235,11 +239,7 @@ func mergePendingUsageHeaderCacheSnapshot(existing *UsageHeaderSnapshot, candida
- 		return existing
- 	}
- 	if strings.EqualFold(strings.TrimSpace(existing.Provider), "claude") {
--		// Claude 两个主窗口同属一次响应，分钟内整组择新；最终 cache 仍按 row key 保留旧行。
--		if usageHeaderSnapshotIsNewer(candidate, existing) {
--			return candidate
--		}
--		return existing
-+		return mergePendingClaudeUsageHeaderCacheSnapshot(existing, candidate)
- 	}
- 	existingUsage := codexUsagePayloadFromProviderOutput(existing.CacheOutput)
- 	candidateUsage := codexUsagePayloadFromProviderOutput(candidate.CacheOutput)
-@@ -261,19 +261,6 @@ func mergePendingUsageHeaderCacheSnapshot(existing *UsageHeaderSnapshot, candida
+@@ -257,19 +261,6 @@ func mergePendingUsageHeaderCacheSnapshot(existing *UsageHeaderSnapshot, candida
  		otherUsage = existingUsage
  	}
  	mergedSnapshot := *baseSnapshot
@@ -595,142 +582,17 @@ index ddead224..bc0edc4f 100644
  	mergedUsage := *baseUsage
  	if strings.TrimSpace(mergedUsage.PlanType) == "" {
  		// 新 Header 未返回套餐时，保留本分钟已观察到的套餐。
-@@ -310,6 +297,109 @@ func mergePendingUsageHeaderCacheSnapshot(existing *UsageHeaderSnapshot, candida
- 	return &mergedSnapshot
- }
- 
-+func claudeUsagePayloadFromProviderOutput(output ProviderOutput) *ClaudeUsagePayload {
-+	switch result := output.Result.(type) {
-+	case ClaudeResult:
-+		return result.Usage
-+	case *ClaudeResult:
-+		if result != nil {
-+			return result.Usage
-+		}
-+	}
-+	return nil
-+}
-+
-+func pendingClaudeWindowObservedAt(snapshot *UsageHeaderSnapshot, key string) time.Time {
-+	if observedAt, exists := snapshot.pendingClaudeObservedAt[key]; exists {
-+		return observedAt
-+	}
-+	return snapshot.ObservedAt
-+}
-+
-+func mergePendingClaudeUsageHeaderCacheSnapshot(existing, candidate *UsageHeaderSnapshot) *UsageHeaderSnapshot {
-+	base := existing
-+	if usageHeaderSnapshotIsNewer(candidate, existing) {
-+		base = candidate
-+	}
-+	existingUsage := claudeUsagePayloadFromProviderOutput(existing.CacheOutput)
-+	candidateUsage := claudeUsagePayloadFromProviderOutput(candidate.CacheOutput)
-+	if existingUsage == nil || candidateUsage == nil {
-+		return base
-+	}
-+	merged := *base
-+	usage := *claudeUsagePayloadFromProviderOutput(base.CacheOutput)
-+	merged.pendingClaudeObservedAt = make(map[string]time.Time, 2)
-+	for _, window := range []struct {
-+		key                 string
-+		existing, candidate *ClaudeUsageWindow
-+		target              **ClaudeUsageWindow
-+	}{
-+		{"five_hour", existingUsage.FiveHour, candidateUsage.FiveHour, &usage.FiveHour},
-+		{"seven_day", existingUsage.SevenDay, candidateUsage.SevenDay, &usage.SevenDay},
-+	} {
-+		existingAt := pendingClaudeWindowObservedAt(existing, window.key)
-+		candidateAt := pendingClaudeWindowObservedAt(candidate, window.key)
-+		switch {
-+		case window.candidate != nil && (window.existing == nil || !usageHeaderObservedAtBefore(candidateAt, existingAt)):
-+			*window.target = window.candidate
-+			merged.pendingClaudeObservedAt[window.key] = candidateAt
-+		case window.existing != nil:
-+			*window.target = window.existing
-+			merged.pendingClaudeObservedAt[window.key] = existingAt
-+		}
-+	}
-+	merged.CacheOutput = ProviderOutput{Provider: base.CacheOutput.Provider, Result: ClaudeResult{Usage: &usage}}
-+	return &merged
-+}
-+
-+func (s *Service) applyPendingClaudeUsageHeaderSnapshot(ctx context.Context, snapshot *UsageHeaderSnapshot, identity entities.UsageIdentity, statsProvider usageWindowStatsProvider) bool {
-+	usage := claudeUsagePayloadFromProviderOutput(snapshot.CacheOutput)
-+	if usage == nil {
-+		return false
-+	}
-+	var windows []*UsageHeaderSnapshot
-+	for _, window := range []struct {
-+		key   string
-+		value *ClaudeUsageWindow
-+	}{
-+		{"five_hour", usage.FiveHour}, {"seven_day", usage.SevenDay},
-+	} {
-+		if window.value == nil {
-+			continue
-+		}
-+		at := pendingClaudeWindowObservedAt(snapshot, window.key)
-+		var windowUsage *ClaudeUsagePayload
-+		if len(windows) > 0 && windows[0].ObservedAt.Equal(at) {
-+			// 相同时间的两个窗口一次应用，避免 completed cache 的同时间保护挡住第二个窗口。
-+			windowUsage = claudeUsagePayloadFromProviderOutput(windows[0].CacheOutput)
-+		} else {
-+			copy := *snapshot
-+			copy.ObservedAt = at
-+			copy.pendingClaudeObservedAt = nil
+@@ -385,6 +376,7 @@ func (s *Service) applyPendingClaudeUsageHeaderSnapshot(ctx context.Context, sna
+ 			copy := *snapshot
+ 			copy.ObservedAt = at
+ 			copy.pendingClaudeObservedAt = nil
 +			copy.cacheRows = nil
-+			windowUsage = &ClaudeUsagePayload{}
-+			copy.CacheOutput = ProviderOutput{Provider: snapshot.CacheOutput.Provider, Result: ClaudeResult{Usage: windowUsage}}
-+			windows = append(windows, &copy)
-+		}
-+		if window.key == "five_hour" {
-+			windowUsage.FiveHour = window.value
-+		} else {
-+			windowUsage.SevenDay = window.value
-+		}
-+	}
-+	// 同一身份 job 内先处理较早窗口；沿用主动刷新保护，并按每个窗口自己的时间计算用量。
-+	sort.SliceStable(windows, func(i, j int) bool {
-+		return usageHeaderObservedAtBefore(windows[i].ObservedAt, windows[j].ObservedAt)
-+	})
-+	applied := false
-+	for _, window := range windows {
-+		if s.applyUsageHeaderSnapshotWithIdentity(ctx, window, identity, statsProvider) {
-+			applied = true
-+		}
-+	}
-+	return applied
-+}
-+
- func pendingUsageHeaderMainObservedAt(snapshot *UsageHeaderSnapshot, usage *CodexUsagePayload) time.Time {
- 	if snapshot == nil || usage == nil || usage.RateLimit == nil {
- 		return time.Time{}
-@@ -669,6 +759,9 @@ func (s *Service) applyUsageHeaderSnapshotWithIdentity(ctx context.Context, snap
- 	if s == nil || snapshot == nil {
- 		return false
- 	}
-+	if strings.EqualFold(strings.TrimSpace(snapshot.Provider), "claude") && len(snapshot.pendingClaudeObservedAt) > 0 {
-+		return s.applyPendingClaudeUsageHeaderSnapshot(ctx, snapshot, identity, statsProvider)
-+	}
- 	// auth_type 在最终 apply 前再标准化一次，防止测试或单条入口绕过前置校验。
- 	authType := strings.ToLower(strings.TrimSpace(snapshot.AuthType))
- 	// auth_index 标准化后必须和传入 identity 对齐。
-diff --git a/internal/quota/header_snapshot.go b/internal/quota/header_snapshot.go
-index 1ba8e40a..26cc848d 100644
---- a/internal/quota/header_snapshot.go
-+++ b/internal/quota/header_snapshot.go
-@@ -48,6 +48,8 @@ type UsageHeaderSnapshot struct {
- 	pendingMainObservedAt time.Time
- 	// pendingAdditionalObservedAt 按 LimitName 记录 Additional 自身的新鲜度，不进入 history 或对外响应。
- 	pendingAdditionalObservedAt map[string]time.Time
-+	// pendingClaudeObservedAt 保留各 Claude 主窗口的观察时间，避免部分 Header 相互覆盖或被刷新为新时间。
-+	pendingClaudeObservedAt map[string]time.Time
- }
- 
- type UsageHeaderSnapshotAppender interface {
+ 			windowUsage = &ClaudeUsagePayload{}
+ 			copy.CacheOutput = ProviderOutput{Provider: snapshot.CacheOutput.Provider, Result: ClaudeResult{Usage: windowUsage}}
+ 			windows = append(windows, &copy)
 diff --git a/internal/quota/test/api_provider_traffic_test.go b/internal/quota/test/api_provider_traffic_test.go
 new file mode 100644
-index 00000000..3a9db065
+index 0000000..3a9db06
 --- /dev/null
 +++ b/internal/quota/test/api_provider_traffic_test.go
 @@ -0,0 +1,57 @@
@@ -792,7 +654,7 @@ index 00000000..3a9db065
 +	}
 +}
 diff --git a/internal/quota/test/internal_access_test.go b/internal/quota/test/internal_access_test.go
-index 84c946f1..43dba838 100644
+index 84c946f..43dba83 100644
 --- a/internal/quota/test/internal_access_test.go
 +++ b/internal/quota/test/internal_access_test.go
 @@ -2,6 +2,7 @@ package test
@@ -812,7 +674,7 @@ index 84c946f1..43dba838 100644
 +func applyTrafficAPIProviderQuota(service *quota.Service, ctx context.Context, snapshot *quota.UsageHeaderSnapshot, identity entities.UsageIdentity) bool
 diff --git a/internal/quota/test/traffic_runner_test.go b/internal/quota/test/traffic_runner_test.go
 new file mode 100644
-index 00000000..a5098c0e
+index 0000000..a5098c0
 --- /dev/null
 +++ b/internal/quota/test/traffic_runner_test.go
 @@ -0,0 +1,48 @@
@@ -865,7 +727,7 @@ index 00000000..a5098c0e
 +	return nil, ctx.Err()
 +}
 diff --git a/internal/quota/traffic_sync.go b/internal/quota/traffic_sync.go
-index bf9682a2..e7da77d6 100644
+index bf9682a..e7da77d 100644
 --- a/internal/quota/traffic_sync.go
 +++ b/internal/quota/traffic_sync.go
 @@ -4,6 +4,9 @@ import (
@@ -1066,7 +928,7 @@ index bf9682a2..e7da77d6 100644
 +}
 diff --git a/internal/quota/traffic_sync_test.go b/internal/quota/traffic_sync_test.go
 new file mode 100644
-index 00000000..81b8845d
+index 0000000..81b8845
 --- /dev/null
 +++ b/internal/quota/traffic_sync_test.go
 @@ -0,0 +1,43 @@
@@ -1114,7 +976,7 @@ index 00000000..81b8845d
 +	}
 +}
 diff --git a/internal/quota/window_capture_test.go b/internal/quota/window_capture_test.go
-index d02067a3..bdaaa673 100644
+index d02067a..bdaaa67 100644
 --- a/internal/quota/window_capture_test.go
 +++ b/internal/quota/window_capture_test.go
 @@ -7,7 +7,7 @@ import (
@@ -1127,7 +989,7 @@ index d02067a3..bdaaa673 100644
  		h := http.Header{}
  		h.Set("X-Codex-"+window+"-Used-Percent", value)
 diff --git a/internal/ranking/local_profile.go b/internal/ranking/local_profile.go
-index 1e97f3dc..4f3bddef 100644
+index 1e97f3d..4f3bdde 100644
 --- a/internal/ranking/local_profile.go
 +++ b/internal/ranking/local_profile.go
 @@ -11,6 +11,7 @@ import (
@@ -1157,7 +1019,7 @@ index 1e97f3dc..4f3bddef 100644
  		}
  		if err := s.nameWriter.UpdateAPIKeyName(ctx, key.APIKey, keyAlias); err != nil {
 diff --git a/internal/repository/cpa_api_key_names.go b/internal/repository/cpa_api_key_names.go
-index c6181929..b5f066f7 100644
+index c618192..b5f066f 100644
 --- a/internal/repository/cpa_api_key_names.go
 +++ b/internal/repository/cpa_api_key_names.go
 @@ -33,7 +33,7 @@ func SyncCPAAPIKeyNames(db *gorm.DB, names map[string]string) error {
@@ -1170,7 +1032,7 @@ index c6181929..b5f066f7 100644
  				}
  			}
 diff --git a/internal/service/cpa_api_keys_service.go b/internal/service/cpa_api_keys_service.go
-index d32c4872..cac7a987 100644
+index d32c487..cac7a98 100644
 --- a/internal/service/cpa_api_keys_service.go
 +++ b/internal/service/cpa_api_keys_service.go
 @@ -61,7 +61,7 @@ func (s *cpaAPIKeyService) UpdateCPAAPIKeyAlias(ctx context.Context, id int64, k
@@ -1183,7 +1045,7 @@ index d32c4872..cac7a987 100644
  			return entities.CPAAPIKey{}, err
  		}
 diff --git a/web/src/components/usage/QuotaFreshness.tsx b/web/src/components/usage/QuotaFreshness.tsx
-index c1e6db14..5dcbd601 100644
+index c1e6db1..5dcbd60 100644
 --- a/web/src/components/usage/QuotaFreshness.tsx
 +++ b/web/src/components/usage/QuotaFreshness.tsx
 @@ -1,20 +1,109 @@
@@ -1316,7 +1178,7 @@ index c1e6db14..5dcbd601 100644
 +  );
  }
 diff --git a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
-index 83c853b6..3a832fc9 100644
+index 83c853b..3a832fc 100644
 --- a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
 @@ -69,7 +69,7 @@ export function AiProviderCredentialsSection({ reportingOnly = false, rows, tota
@@ -1329,13 +1191,13 @@ index 83c853b6..3a832fc9 100644
        {!loading && rows.length === 0 && <div className={styles.credentialEmptyState}>{t('usage_stats.credentials_ai_providers_empty')}</div>}
        {rows.length > 0 && (
 diff --git a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
-index 8cfc342f..62353ff9 100644
+index 733493f..8ed3089 100644
 --- a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
-@@ -1993,12 +1993,12 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
-       <div className={styles.credentialQuotaBarHeader}>
-         <span className={styles.credentialQuotaLabelGroup}>
+@@ -2084,12 +2084,12 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
+         <span className={`${styles.credentialQuotaLabelGroup} ${quota.usageBreakdown?.length ? styles.credentialQuotaLabelWithInfo : ''}`.trim()}>
            <span>{quota.label}</span>
+           {Boolean(quota.usageBreakdown?.length) && <QuotaUsageBreakdownInfo quota={quota} />}
 -          <QuotaFreshness capturedAt={quota.capturedAt} source={quota.source} account={quota.accountLabel ?? "Provider account"} resetAt={quota.resetText} />
          </span>
          {(resetDuration || percentLabel) && (
@@ -1347,10 +1209,10 @@ index 8cfc342f..62353ff9 100644
          )}
        </div>
 diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
-index e132ce27..4dfbf4f0 100644
+index 54f9522..7605b18 100644
 --- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
 +++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
-@@ -210,7 +210,7 @@ export function CredentialDetailDrawer({
+@@ -211,7 +211,7 @@ export function CredentialDetailDrawer({
      try {
        // 详情列表固定从当前凭证最近的原始事件开始，不继承外层页面的查询条件。
        const response = await fetchUsageEvents(undefined, controller.signal, {
@@ -1359,7 +1221,7 @@ index e132ce27..4dfbf4f0 100644
          authType: authTypeFilter,
          pageSize: REQUEST_EVENTS_PAGE_SIZE,
          cursorMode: true,
-@@ -352,7 +352,7 @@ export function CredentialDetailDrawer({
+@@ -353,7 +353,7 @@ export function CredentialDetailDrawer({
      setEventsError('')
      try {
        const response = await fetchUsageEvents(undefined, controller.signal, {
@@ -1370,7 +1232,7 @@ index e132ce27..4dfbf4f0 100644
          cursorMode: true,
 diff --git a/web/src/components/usage/quotaSourceLabel.ts b/web/src/components/usage/quotaSourceLabel.ts
 new file mode 100644
-index 00000000..72fe35f8
+index 0000000..72fe35f
 --- /dev/null
 +++ b/web/src/components/usage/quotaSourceLabel.ts
 @@ -0,0 +1,13 @@
@@ -1388,7 +1250,7 @@ index 00000000..72fe35f8
 +  })[source ?? ""] ?? "Unknown source";
 +
 diff --git a/web/src/pages/KeyQuotaPage.tsx b/web/src/pages/KeyQuotaPage.tsx
-index e29bb65b..a532dbb7 100644
+index e29bb65..a532dbb 100644
 --- a/web/src/pages/KeyQuotaPage.tsx
 +++ b/web/src/pages/KeyQuotaPage.tsx
 @@ -54,10 +54,11 @@ export function QuotaAccounts({accounts}: {accounts: ViewerQuotaAccount[]}) {
@@ -1405,7 +1267,7 @@ index e29bb65b..a532dbb7 100644
          {row.remaining_percent != null && <progress max={100} value={Math.max(0, Math.min(100, row.remaining_percent))} aria-label={`${row.label}: ${t('key_quota.remaining')}`} />}
          {row.limit_reached && <p className={styles.notice}>{t('key_quota.exhausted')}</p>}
 diff --git a/web/src/pages/LoginPage.tsx b/web/src/pages/LoginPage.tsx
-index 164fb0d6..72089a97 100644
+index 164fb0d..72089a9 100644
 --- a/web/src/pages/LoginPage.tsx
 +++ b/web/src/pages/LoginPage.tsx
 @@ -39,7 +39,7 @@ export function LoginPage({ loading = false, adminError = '', apiKeyError = '',

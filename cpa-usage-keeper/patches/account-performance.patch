@@ -87,10 +87,10 @@ index 0000000..1ab3e2f
 +	})
 +}
 diff --git a/internal/api/quota.go b/internal/api/quota.go
-index 004c6d0..3074f99 100644
+index 62ea19c..aaa6e3b 100644
 --- a/internal/api/quota.go
 +++ b/internal/api/quota.go
-@@ -19,6 +19,7 @@ const quotaResetErrorFailed = "quota_reset_failed"
+@@ -20,6 +20,7 @@ const quotaResetErrorFailed = "quota_reset_failed"
  const quotaResetCreditsErrorFailed = "quota_reset_credits_failed"
  
  func registerQuotaRoutes(router gin.IRoutes, provider QuotaProvider) {
@@ -867,18 +867,18 @@ index 0000000..e0b20b9
 +	}
 +}
 diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
-index ac8aec1..51c25a8 100644
+index 6700359..8fcedd8 100644
 --- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
 +++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
-@@ -13,6 +13,7 @@ import { CredentialHealthPanel } from './CredentialHealthPanel'
- import { CredentialPriorityBadge, cacheReadRateTone, credentialToneClassName, formatCredentialNumber, formatCredentialPercent, successRateTone } from './CredentialSectionShell'
+@@ -14,6 +14,7 @@ import { CredentialPriorityBadge, cacheReadRateTone, credentialToneClassName, fo
  import { CredentialSubscriptionBadge } from './CredentialSubscriptionBadge'
+ import { CredentialKimiSiteBadge } from './CredentialKimiSiteBadge'
  import { CredentialRequestEventsList } from './CredentialRequestEventsList'
 +import { PerformancePanel } from './PerformancePanel'
  import { WeeklyQuotaValuePanel } from './WeeklyQuotaValuePanel'
  import { CodexQuotaHistoryPanel } from './CodexQuotaHistoryPanel'
  import { formatCredentialTimestamp, type CredentialDetailSelection } from './credentialViewModels'
-@@ -22,7 +23,7 @@ import credentialStyles from './CredentialSections.module.scss'
+@@ -23,7 +24,7 @@ import credentialStyles from './CredentialSections.module.scss'
  const REQUEST_EVENTS_PAGE_SIZE = 50
  const ERROR_EVENTS_PAGE_SIZE = 50
  
@@ -887,7 +887,7 @@ index ac8aec1..51c25a8 100644
  
  interface CredentialDetailDrawerProps {
    readOnly?: boolean
-@@ -91,6 +92,9 @@ export function CredentialDetailDrawer({
+@@ -92,6 +93,9 @@ export function CredentialDetailDrawer({
  }: CredentialDetailDrawerProps) {
    const { t } = useTranslation()
    const overviewTabId = useId()
@@ -897,7 +897,7 @@ index ac8aec1..51c25a8 100644
    const quotaHistoryTabId = useId()
    const requestsTabId = useId()
    const errorsTabId = useId()
-@@ -147,9 +151,15 @@ export function CredentialDetailDrawer({
+@@ -148,9 +152,15 @@ export function CredentialDetailDrawer({
    }
    const quotaHistoryProvider = selection?.kind === 'auth-file' ? identity?.type?.trim().toLowerCase() : undefined
    const hasQuotaHistory = quotaHistoryProvider === 'codex' || (!readOnly && quotaHistoryProvider === 'claude')
@@ -916,7 +916,7 @@ index ac8aec1..51c25a8 100644
  
    const resetRequestEvents = useCallback(() => {
      firstPageControllerRef.current?.abort()
-@@ -194,8 +204,8 @@ export function CredentialDetailDrawer({
+@@ -195,8 +205,8 @@ export function CredentialDetailDrawer({
  
    useEffect(() => {
      // 同一身份同步后可能切换类型；失去历史能力时立即退出标签。
@@ -927,7 +927,7 @@ index ac8aec1..51c25a8 100644
  
    const loadFirstPage = useCallback(async () => {
      if (!open || activeTab !== 'requests' || !sourceFilter) return
-@@ -307,6 +317,7 @@ export function CredentialDetailDrawer({
+@@ -308,6 +318,7 @@ export function CredentialDetailDrawer({
        const target = {
          overview: overviewTabRef.current,
          'quota-history': quotaHistoryTabRef.current,
@@ -935,7 +935,7 @@ index ac8aec1..51c25a8 100644
          requests: requestsTabRef.current,
          errors: errorsTabRef.current,
        }[tab]
-@@ -315,7 +326,9 @@ export function CredentialDetailDrawer({
+@@ -316,7 +327,9 @@ export function CredentialDetailDrawer({
    }, [onRequestLogClose])
  
    const handleTabKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -946,7 +946,7 @@ index ac8aec1..51c25a8 100644
        ? 'quota-history'
        : event.currentTarget === requestsTabRef.current
          ? 'requests'
-@@ -476,6 +489,7 @@ export function CredentialDetailDrawer({
+@@ -478,6 +491,7 @@ export function CredentialDetailDrawer({
                  {quotaHistoryProvider === 'codex' ? t('weekly_quota.tab', 'Weekly value') : t('usage_stats.credentials_quota_history_tab')}
                </button>
              ) : null}
@@ -954,7 +954,7 @@ index ac8aec1..51c25a8 100644
              <button
                ref={requestsTabRef}
                id={requestsTabId}
-@@ -587,6 +601,10 @@ export function CredentialDetailDrawer({
+@@ -589,6 +603,10 @@ export function CredentialDetailDrawer({
                ? <WeeklyQuotaValuePanel key={sourceFilter} authIndex={sourceFilter} readOnlyAccountId={readOnly ? identityId : undefined} onAuthRequired={onAuthRequired} />
                : <CodexQuotaHistoryPanel key={sourceFilter} authIndex={sourceFilter} onAuthRequired={onAuthRequired} />}
            </section>
@@ -1100,7 +1100,7 @@ index 0000000..ed693f4
 +  </div>
 +}
 diff --git a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
-index 7ec63ed..8b6109d 100644
+index e80a82f..481b4b3 100644
 --- a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
 +++ b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
 @@ -10,11 +10,13 @@ import { CredentialDetailDrawer } from '../CredentialDetailDrawer'
@@ -1126,7 +1126,7 @@ index 7ec63ed..8b6109d 100644
      container = document.createElement('div')
      document.body.appendChild(container)
      root = createRoot(container)
-@@ -274,6 +278,7 @@ describe('CredentialDetailDrawer', () => {
+@@ -297,6 +301,7 @@ describe('CredentialDetailDrawer', () => {
  
      await renderDrawer({ selection: unsupportedAuthFileSelection })
      expect(document.body.querySelector('[data-credential-detail-tab="quota-history"]')).toBeNull()
@@ -1134,7 +1134,7 @@ index 7ec63ed..8b6109d 100644
      expect(document.body.querySelector('[data-credential-detail-tab="overview"]')?.getAttribute('aria-selected')).toBe('true')
    })
  
-@@ -310,7 +315,13 @@ describe('CredentialDetailDrawer', () => {
+@@ -333,7 +338,13 @@ describe('CredentialDetailDrawer', () => {
      await act(async () => {
        quotaTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
      })
@@ -1233,10 +1233,10 @@ index 0000000..bd7e1f2
 +  expect(element.querySelector('[role="alert"]')).toBeNull()
 +})
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index c3fba5c..589df84 100644
+index 8671c96..2951d3b 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
-@@ -1110,3 +1110,14 @@ export async function fetchReadOnlyReport<T>(path: string, params = new URLSearc
+@@ -1118,3 +1118,14 @@ export async function fetchReadOnlyReport<T>(path: string, params = new URLSearc
   const response=await apiFetch(apiPath('/read-only/'+path)+'?'+params.toString(),{signal,cache:'no-store'});
   if(!response.ok) await parseApiError(response,'Unable to load reporting data');return response.json();
  }
@@ -1283,10 +1283,10 @@ index b5262a7..1d9e1d6 100644
 +  expect(fetchMock.mock.calls[1][1]).toMatchObject({ signal, credentials: 'include' });
 +});
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
-index 36cc6df..7f6d951 100644
+index a9533b2..2ab364c 100644
 --- a/web/src/lib/types.ts
 +++ b/web/src/lib/types.ts
-@@ -979,3 +979,8 @@ export interface WeeklyTrendPoint {
+@@ -1012,3 +1012,8 @@ export interface WeeklyTrendPoint {
   speed_requests: number; speed_tps: number | null; ttft_requests: number; mean_ttft_ms: number | null;
   sample_intervals: number; sample_requests: number; percentage_points: number; full_allowance_usd: number | null;
  }

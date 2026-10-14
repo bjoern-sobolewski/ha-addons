@@ -101,7 +101,7 @@ index 978b791..a52cdef 100644
  		event.ExecutorType,
  		event.Result,
 diff --git a/internal/benchmark/capacity/dataset.go b/internal/benchmark/capacity/dataset.go
-index d269d81..d2e9d87 100644
+index 3daccfa..3517a1e 100644
 --- a/internal/benchmark/capacity/dataset.go
 +++ b/internal/benchmark/capacity/dataset.go
 @@ -107,6 +107,7 @@ type generatedEvent struct {
@@ -115,7 +115,7 @@ index d269d81..d2e9d87 100644
 @@ -522,7 +523,7 @@ func eventInsertArgs(event generatedEvent) []any {
  	return []any{
  		event.ID, event.EventKey, event.APIGroupKey, event.Provider, event.Endpoint, event.AuthType, event.RequestID,
- 		"", "",
+ 		nil, nil, "", "", nil, nil, nil,
 -		nil, nil, nil, event.Model, event.ModelAlias, "", event.ReasoningEffort, event.ServiceTier, event.ResponseServiceTier,
 +		nil, nil, nil, event.Model, event.ModelAlias, "", event.ReasoningEffort, event.ServiceTier, event.UpstreamServiceTier, event.ResponseServiceTier,
  		event.ExecutorType, timestamp, event.Source, event.AuthIndex, event.Failed, event.StatusCode, true, event.Stream, event.LatencyMS, event.TTFTMS,
@@ -157,10 +157,10 @@ index 0620526..19faccf 100644
  
  // UsageAggregationCheckpoint 用一张表保存三个独立 cursor，避免同构 checkpoint 表继续增长。
 diff --git a/internal/entities/usage_event.go b/internal/entities/usage_event.go
-index e54db8d..281a616 100644
+index fc4da6d..3fb5754 100644
 --- a/internal/entities/usage_event.go
 +++ b/internal/entities/usage_event.go
-@@ -21,6 +21,7 @@ type UsageEvent struct {
+@@ -26,6 +26,7 @@ type UsageEvent struct {
  	ResponseModel       string    `gorm:"column:response_model;not null;default:''"`
  	ReasoningEffort     string    `gorm:"column:reasoning_effort;not null;default:''"`
  	ServiceTier         string    `gorm:"column:service_tier;not null;default:''"`
@@ -169,19 +169,19 @@ index e54db8d..281a616 100644
  	ExecutorType        string    `gorm:"column:executor_type;not null;default:''"`
  	Timestamp           time.Time `gorm:"serializer:storageTime;index:idx_usage_events_timestamp_id,sort:desc,priority:1;index:idx_usage_events_auth_index_timestamp_id,priority:2;index:idx_usage_events_api_group_key_timestamp,priority:2"`
 diff --git a/internal/entities/usage_event_archive.go b/internal/entities/usage_event_archive.go
-index fb98be6..d38f5cd 100644
+index 69a3f48..42bf0bb 100644
 --- a/internal/entities/usage_event_archive.go
 +++ b/internal/entities/usage_event_archive.go
 @@ -3,7 +3,7 @@ package entities
  import "time"
  
  // UsageEventStorageColumns 是 hot/archive 原始事件复制使用的完整持久化列契约。
--const UsageEventStorageColumns = "id, event_key, api_group_key, provider, endpoint, auth_type, request_id, session_id, parent_session_id, client_ip, x_forwarded_for, user_agent, model, model_alias, response_model, reasoning_effort, service_tier, response_service_tier, executor_type, timestamp, source, auth_index, failed, status_code, generate, stream, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, created_at"
-+const UsageEventStorageColumns = "id, event_key, api_group_key, provider, endpoint, auth_type, request_id, session_id, parent_session_id, client_ip, x_forwarded_for, user_agent, model, model_alias, response_model, reasoning_effort, service_tier, upstream_service_tier, response_service_tier, executor_type, timestamp, source, auth_index, failed, status_code, generate, stream, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, created_at"
+-const UsageEventStorageColumns = "id, event_key, api_group_key, provider, endpoint, auth_type, request_id, execution_id, trace_id, session_id, parent_session_id, node_kind, is_fork, is_compaction, client_ip, x_forwarded_for, user_agent, model, model_alias, response_model, reasoning_effort, service_tier, response_service_tier, executor_type, timestamp, source, auth_index, failed, status_code, generate, stream, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, created_at"
++const UsageEventStorageColumns = "id, event_key, api_group_key, provider, endpoint, auth_type, request_id, execution_id, trace_id, session_id, parent_session_id, node_kind, is_fork, is_compaction, client_ip, x_forwarded_for, user_agent, model, model_alias, response_model, reasoning_effort, service_tier, upstream_service_tier, response_service_tier, executor_type, timestamp, source, auth_index, failed, status_code, generate, stream, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, created_at"
  
- // UsageEventArchive 永久保存已经离开 hot usage_events 的原始事件。
+ // UsageEventArchive 保存已经离开 hot usage_events 的原始事件，默认永久保留，可配置清理期限。
  // 字段必须与 UsageEvent 的持久化列保持一致，但 archive 不承担在线查询，因此不复制二级索引。
-@@ -25,6 +25,7 @@ type UsageEventArchive struct {
+@@ -30,6 +30,7 @@ type UsageEventArchive struct {
  	ResponseModel       string    `gorm:"column:response_model;not null;default:''"`
  	ReasoningEffort     string    `gorm:"column:reasoning_effort;not null;default:''"`
  	ServiceTier         string    `gorm:"column:service_tier;not null;default:''"`
@@ -497,19 +497,19 @@ index 0000000..0a1970e
 +	return nil
 +}
 diff --git a/internal/repository/migration/migration.go b/internal/repository/migration/migration.go
-index 22c55d3..61c681c 100644
+index 7df554a..035dcd2 100644
 --- a/internal/repository/migration/migration.go
 +++ b/internal/repository/migration/migration.go
-@@ -252,6 +252,7 @@ func orderedMigrations() []databaseMigration {
+@@ -254,6 +254,7 @@ func orderedMigrations() []databaseMigration {
  		{version: migrationAddUsageEventStreamStatusCode, run: addUsageEventStreamStatusCodeMigration},
  		{version: migrationNormalizeUsageEventParentSessionNull, run: normalizeUsageEventParentSessionNullMigration},
  		{version: migrationLimitLatencySamplePoints, run: limitLatencySamplePointsMigration, destructive: true},
 +		{version: "20261005_usage_upstream_service_tier", run: addUsageUpstreamServiceTierMigration},
+ 		{version: migrationAddUsageEventTraceMetadata, run: addUsageEventTraceMetadataMigration},
  	}
  }
- 
 diff --git a/internal/repository/migration/test/migration_test.go b/internal/repository/migration/test/migration_test.go
-index 651131d..7d5fd17 100644
+index 96206ae..fd8d456 100644
 --- a/internal/repository/migration/test/migration_test.go
 +++ b/internal/repository/migration/test/migration_test.go
 @@ -94,6 +94,7 @@ func TestOrderedMigrationsPreservesExecutionOrder(t *testing.T) {
@@ -517,9 +517,9 @@ index 651131d..7d5fd17 100644
  		"20260922_normalize_usage_event_parent_session_null",
  		"20260925_limit_latency_sample_points",
 +		"20261005_usage_upstream_service_tier",
+ 		"20261008_usage_event_trace_metadata",
  	}
  	assertStringSlicesEqual(t, want, got)
- }
 diff --git a/internal/repository/migration/test/upstream_service_tier_test.go b/internal/repository/migration/test/upstream_service_tier_test.go
 new file mode 100644
 index 0000000..6dfccb2
@@ -1176,7 +1176,7 @@ index 2b424b0..c5389e4 100644
  	ClientIP            *string
  	XForwardedFor       *string
 diff --git a/internal/service/redis_usage.go b/internal/service/redis_usage.go
-index 781558d..68f7e60 100644
+index 65853dd..c5de5bf 100644
 --- a/internal/service/redis_usage.go
 +++ b/internal/service/redis_usage.go
 @@ -55,6 +55,7 @@ type queuedUsageDetail struct {
@@ -1187,7 +1187,7 @@ index 781558d..68f7e60 100644
  	ResponseServiceTier string          `json:"response_service_tier"`
  	ExecutorType        string          `json:"executor_type"`
  	Endpoint            string          `json:"endpoint"`
-@@ -151,6 +152,7 @@ func (d queuedUsageDetail) toUsageEvent(fetchedAt time.Time) entities.UsageEvent
+@@ -161,6 +162,7 @@ func (d queuedUsageDetail) toUsageEvent(fetchedAt time.Time) entities.UsageEvent
  		ResponseModel:       strings.TrimSpace(d.ResponseModel),
  		ReasoningEffort:     strings.TrimSpace(d.ReasoningEffort),
  		ServiceTier:         strings.TrimSpace(d.ServiceTier),
@@ -1250,10 +1250,10 @@ index 5a854ab..220cec2 100644
  			ClientIP:            row.ClientIP,
  			XForwardedFor:       row.XForwardedFor,
 diff --git a/web/src/components/usage/RequestEventsDetailsCard.tsx b/web/src/components/usage/RequestEventsDetailsCard.tsx
-index 48170ba..5ad4daf 100644
+index b31ef6d..7054f41 100644
 --- a/web/src/components/usage/RequestEventsDetailsCard.tsx
 +++ b/web/src/components/usage/RequestEventsDetailsCard.tsx
-@@ -128,7 +128,9 @@ type RequestEventRow = {
+@@ -166,7 +166,9 @@ type RequestEventRow = {
    reasoningEffort: string;
    speedMode: string;
    speedModeRaw: string;
@@ -1264,7 +1264,7 @@ index 48170ba..5ad4daf 100644
    responseSpeedModeRaw: string;
    requestType: string;
    endpoint: string;
-@@ -442,13 +444,16 @@ const buildSpeedModeTooltipLines = (
+@@ -480,13 +482,16 @@ const buildSpeedModeTooltipLines = (
    row: RequestEventRow,
    t: (key: string, options?: Record<string, string>) => string,
  ): string[] => [
@@ -1285,7 +1285,7 @@ index 48170ba..5ad4daf 100644
  ];
  
  const formatRequestEventMetricTooltipLine = (
-@@ -646,7 +651,11 @@ export function RequestEventsDetailsCard({
+@@ -684,7 +689,11 @@ export function RequestEventsDetailsCard({
        const speedModeRaw = String(event.service_tier ?? '').trim() || '-';
        const responseSpeedModeRaw = String(event.response_service_tier ?? '').trim() || '-';
        const speedMode = formatSpeedMode(speedModeRaw, t);
@@ -1298,7 +1298,7 @@ index 48170ba..5ad4daf 100644
        const endpointFields = parseRequestEndpoint(event.endpoint);
        const timestampLabels = formatRequestEventTimestamp(timestamp);
        const inputTokens = Math.max(toNumber(event.tokens?.input_tokens), 0);
-@@ -687,7 +696,9 @@ export function RequestEventsDetailsCard({
+@@ -725,7 +734,9 @@ export function RequestEventsDetailsCard({
          reasoningEffort,
          speedMode,
          speedModeRaw,
@@ -1309,7 +1309,7 @@ index 48170ba..5ad4daf 100644
          responseSpeedModeRaw,
          requestType: endpointFields.requestType,
          endpoint: endpointFields.endpoint,
-@@ -975,7 +986,7 @@ export function RequestEventsDetailsCard({
+@@ -1014,7 +1025,7 @@ export function RequestEventsDetailsCard({
                onFocus={(event) => handleRequestEventsTooltipFocus(tooltipLines, event.currentTarget)}
                onBlur={(event) => handleRequestEventsTooltipBlur(event.currentTarget)}
              >
@@ -1437,10 +1437,10 @@ index 5149363..fcaa71d 100644
    });
  });
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index 28a955e..2c1bc2a 100644
+index 6624f88..f8407ed 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
-@@ -241,6 +241,11 @@ const resources = {
+@@ -242,6 +242,11 @@ const resources = {
          user_agent: 'User Agent',
          speed_mode: 'Speed Mode',
          response_speed_mode: 'Response Speed Mode',
@@ -1452,7 +1452,7 @@ index 28a955e..2c1bc2a 100644
          speed_mode_auto: 'Auto',
          speed_mode_standard: 'Standard',
          speed_mode_fast: 'Fast',
-@@ -744,7 +749,7 @@ const resources = {
+@@ -771,7 +776,7 @@ const resources = {
          model_price_rules_help_label: 'How pricing rules work',
          model_price_rules_help: 'When a field equals the configured value, its multiplier applies. All matching rules multiply together.',
          model_price_rules_help_examples: 'Examples:',
@@ -1461,7 +1461,7 @@ index 28a955e..2c1bc2a 100644
          model_price_rules_help_reasoning_effort: 'reasoning_effort = xhigh, then set a multiplier.',
          model_price_rules_loading: 'Loading rules...',
          model_price_rules_load_failed: 'Unable to load pricing rules.',
-@@ -1189,6 +1194,11 @@ const resources = {
+@@ -1217,6 +1222,11 @@ const resources = {
          user_agent: '用户代理',
          speed_mode: '速度模式',
          response_speed_mode: '响应速度模式',
@@ -1473,7 +1473,7 @@ index 28a955e..2c1bc2a 100644
          speed_mode_auto: '自动',
          speed_mode_standard: '标准',
          speed_mode_fast: '快速',
-@@ -1692,7 +1702,7 @@ const resources = {
+@@ -1746,7 +1756,7 @@ const resources = {
          model_price_rules_help_label: '价格规则说明',
          model_price_rules_help: '字段等于设定值时应用对应倍率；同时命中的规则会连续相乘。',
          model_price_rules_help_examples: '示例：',
@@ -1482,7 +1482,7 @@ index 28a955e..2c1bc2a 100644
          model_price_rules_help_reasoning_effort: 'reasoning_effort = xhigh，再设置倍率。',
          model_price_rules_loading: '正在加载规则…',
          model_price_rules_load_failed: '无法加载价格规则。',
-@@ -2137,6 +2147,11 @@ const resources = {
+@@ -2192,6 +2202,11 @@ const resources = {
          user_agent: '使用者代理',
          speed_mode: '速度模式',
          response_speed_mode: '回應速度模式',
@@ -1494,7 +1494,7 @@ index 28a955e..2c1bc2a 100644
          speed_mode_auto: '自動',
          speed_mode_standard: '標準',
          speed_mode_fast: '快速',
-@@ -2640,7 +2655,7 @@ const resources = {
+@@ -2721,7 +2736,7 @@ const resources = {
          model_price_rules_help_label: '價格規則說明',
          model_price_rules_help: '欄位等於設定值時套用對應倍率；同時符合的規則會連續相乘。',
          model_price_rules_help_examples: '範例：',
@@ -1504,7 +1504,7 @@ index 28a955e..2c1bc2a 100644
          model_price_rules_loading: '正在載入規則…',
          model_price_rules_load_failed: '無法載入價格規則。',
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
-index e48201e..4f3baaf 100644
+index 46c9541..cad444f 100644
 --- a/web/src/lib/types.ts
 +++ b/web/src/lib/types.ts
 @@ -277,6 +277,7 @@ export interface UsageEvent {

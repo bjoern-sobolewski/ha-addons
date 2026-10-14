@@ -1543,7 +1543,7 @@ index 0000000..fa45dca
 +	}
 +}
 diff --git a/internal/app/app.go b/internal/app/app.go
-index 6ab9413..3cf51e2 100644
+index 6375a54..38e1906 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
 @@ -200,10 +200,12 @@ func NewWithConfig(cfg config.Config) (*App, error) {
@@ -1562,7 +1562,7 @@ index 6ab9413..3cf51e2 100644
  	// 单 writer aggregation runner 只维护 rollups/Identity，并在 App.Run 时主动追平。
  	usageAggregationRunner := poller.NewUsageAggregationRunner(db)
  	// syncService 仍然是 metadata 和 usage 处理共享的业务服务入口。
-@@ -322,6 +324,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
+@@ -323,6 +325,7 @@ func NewWithConfig(cfg config.Config) (*App, error) {
  	authConfig := api.AuthConfig{
  		Enabled:                         cfg.AuthEnabled,
  		LoginPassword:                   cfg.LoginPassword,
@@ -1606,10 +1606,10 @@ index 252cbc5..8739f7e 100644
  	return m.CreateAPIKeyViewerWithSource(cpaAPIKeyID, SessionSourceStandard)
  }
 diff --git a/internal/config/config.go b/internal/config/config.go
-index 82d318e..c0856e9 100644
+index 3f5b249..4cc244b 100644
 --- a/internal/config/config.go
 +++ b/internal/config/config.go
-@@ -101,7 +101,8 @@ type Config struct {
+@@ -104,7 +104,8 @@ type Config struct {
  	// AuthEnabled 控制是否启用登录保护。
  	AuthEnabled bool
  	// LoginPassword 是启用登录保护时使用的登录密码。
@@ -1619,7 +1619,7 @@ index 82d318e..c0856e9 100644
  	// AuthSessionTTL 是登录 session 有效时长。
  	AuthSessionTTL time.Duration
  }
-@@ -294,6 +295,7 @@ func Load(options LoadOptions) (*Config, error) {
+@@ -306,6 +307,7 @@ func Load(options LoadOptions) (*Config, error) {
  		LogRetentionDays:                logRetentionDays,
  		AuthEnabled:                     authEnabled,
  		LoginPassword:                   strings.TrimSpace(os.Getenv("LOGIN_PASSWORD")),
@@ -1627,7 +1627,7 @@ index 82d318e..c0856e9 100644
  		AuthSessionTTL:                  authSessionTTL,
  	}
  	if appHost := strings.TrimSpace(options.AppHost); appHost != "" {
-@@ -316,6 +318,9 @@ func Load(options LoadOptions) (*Config, error) {
+@@ -328,6 +330,9 @@ func Load(options LoadOptions) (*Config, error) {
  			return nil, fmt.Errorf("LOGIN_PASSWORD must not use the public example value %q", publicLoginPasswordPlaceholder)
  		}
  	}
@@ -1722,7 +1722,7 @@ index 0000000..cd668d0
 +	return result.Items, nil
 +}
 diff --git a/internal/quota/header_cache_worker.go b/internal/quota/header_cache_worker.go
-index decb0fe..ddead22 100644
+index 77fd357..1264289 100644
 --- a/internal/quota/header_cache_worker.go
 +++ b/internal/quota/header_cache_worker.go
 @@ -179,7 +179,49 @@ func mergePendingUsageHeaderSnapshotPointers(pending map[string]*UsageHeaderSnap
@@ -1776,7 +1776,7 @@ index decb0fe..ddead22 100644
  	if existing == nil {
  		return candidate
  	}
-@@ -219,6 +261,19 @@ func mergePendingUsageHeaderCacheSnapshot(existing *UsageHeaderSnapshot, candida
+@@ -215,6 +257,19 @@ func mergePendingUsageHeaderCacheSnapshot(existing *UsageHeaderSnapshot, candida
  		otherUsage = existingUsage
  	}
  	mergedSnapshot := *baseSnapshot
@@ -1796,7 +1796,7 @@ index decb0fe..ddead22 100644
  	mergedUsage := *baseUsage
  	if strings.TrimSpace(mergedUsage.PlanType) == "" {
  		// 新 Header 未返回套餐时，保留本分钟已观察到的套餐。
-@@ -634,6 +689,17 @@ func (s *Service) applyUsageHeaderSnapshotWithIdentity(ctx context.Context, snap
+@@ -735,6 +790,17 @@ func (s *Service) applyUsageHeaderSnapshotWithIdentity(ctx context.Context, snap
  		Quota:        NormalizeQuotaRows(output),
  		Subscription: NormalizeSubscription(output),
  	}
@@ -1814,7 +1814,7 @@ index decb0fe..ddead22 100644
  	// 没有可展示 quota row 时不写空 cache，避免覆盖已有有效结果。
  	if len(response.Quota) == 0 {
  		return false
-@@ -709,9 +775,7 @@ func (s *Service) shouldProcessUsageHeaderQuotaSnapshot(authIndex string, identi
+@@ -810,9 +876,7 @@ func (s *Service) shouldProcessUsageHeaderQuotaSnapshot(authIndex string, identi
  		return false
  	}
  	// 已有 completed cache 时间不早于当前 header 时，跳过旧 snapshot。
@@ -1825,7 +1825,7 @@ index decb0fe..ddead22 100644
  	// 已有 cache 更旧或失败时，允许当前 header snapshot 修复/更新 cache。
  	return true
  }
-@@ -731,13 +795,35 @@ func (s *Service) mergeUsageHeaderQuotaCache(authIndex string, response CheckRes
+@@ -832,13 +896,35 @@ func (s *Service) mergeUsageHeaderQuotaCache(authIndex string, response CheckRes
  			return false
  		}
  		// completed cache 可能在前置检查后更新，二次检查避免旧 header 回写。
@@ -1864,7 +1864,7 @@ index decb0fe..ddead22 100644
  			}
  			// Header 无 management api-call，同一 provider 才保留最近主动刷新响应，包括失败任务。
  			upstreamResponses = cloneUpstreamResponses(existing.UpstreamResponses)
-@@ -843,6 +929,8 @@ func mergeUsageHeaderQuotaRows(existing []QuotaRow, header []QuotaRow) []QuotaRo
+@@ -948,6 +1034,8 @@ func mergeUsageHeaderQuotaRows(existing []QuotaRow, header []QuotaRow) []QuotaRo
  func mergeUsageHeaderQuotaRow(existing QuotaRow, header QuotaRow) QuotaRow {
  	// 以旧 row 为基底，保留 header 没有携带的人工/官方完整字段。
  	merged := existing
@@ -1874,7 +1874,7 @@ index decb0fe..ddead22 100644
  	if strings.TrimSpace(header.Key) != "" {
  		merged.Key = header.Key
 diff --git a/internal/quota/header_snapshot.go b/internal/quota/header_snapshot.go
-index e9f3df8..1ba8e40 100644
+index a651a25..26cc848 100644
 --- a/internal/quota/header_snapshot.go
 +++ b/internal/quota/header_snapshot.go
 @@ -11,6 +11,7 @@ import (
@@ -1900,7 +1900,7 @@ index e9f3df8..1ba8e40 100644
  	// AuthType 是标准化身份来源；Header 快照只接受 oauth。
  	AuthType string
  	// AuthIndex 是 CPA Auth File 稳定账号键，供 cache 身份匹配和历史回溯使用。
-@@ -59,13 +67,22 @@ func BuildUsageHeaderSnapshot(input UsageHeaderSnapshotInput) (*UsageHeaderSnaps
+@@ -61,13 +69,22 @@ func BuildUsageHeaderSnapshot(input UsageHeaderSnapshotInput) (*UsageHeaderSnaps
  		return nil, false
  	}
  	// 协议仅由已归一化的身份字段决定；未知 provider 不推测 Header 命名空间。
@@ -1951,7 +1951,7 @@ index 91cb798..87ba6f3 100644
  	// raw 响应与当前 quota 同生命周期；同 auth_index 的下一次刷新会整体覆盖任务记录。
  	task.UpstreamResponses = cloneUpstreamResponses(upstreamResponses)
 diff --git a/internal/quota/service.go b/internal/quota/service.go
-index 82615fa..30eec52 100644
+index 2a6b3c5..4dc3f9b 100644
 --- a/internal/quota/service.go
 +++ b/internal/quota/service.go
 @@ -9,6 +9,7 @@ import (
@@ -1962,7 +1962,7 @@ index 82615fa..30eec52 100644
  	"cpa-usage-keeper/internal/entities"
  	"cpa-usage-keeper/internal/pricing"
  	"cpa-usage-keeper/internal/repository"
-@@ -139,7 +140,8 @@ func NewServiceWithOptions(db *gorm.DB, caller ManagementClient, options Service
+@@ -140,7 +141,8 @@ func NewServiceWithOptions(db *gorm.DB, caller ManagementClient, options Service
  	if options.QuotaUpstreamResponsesEnabled {
  		caller = upstreamResponseRecordingCaller{ManagementClient: caller}
  	}
@@ -1972,7 +1972,7 @@ index 82615fa..30eec52 100644
  }
  
  func NewServiceWithRegistry(db *gorm.DB, registry ProviderRegistry, pricingCatalog *pricing.Catalog) *Service {
-@@ -310,6 +312,7 @@ func (s *Service) checkWithUpstreamResponses(ctx context.Context, request CheckR
+@@ -311,6 +313,7 @@ func (s *Service) checkWithUpstreamResponses(ctx context.Context, request CheckR
  }
  
  func (s *Service) check(ctx context.Context, request CheckRequest, beforeSubscriptionDone func(CheckResponse) CheckResponse) (CheckResponse, bool, error) {
@@ -2103,7 +2103,7 @@ index 0000000..bf9682a
 +	}
 +}
 diff --git a/internal/quota/types.go b/internal/quota/types.go
-index be755dd..fb7cf27 100644
+index 0c8115c..0cb58f8 100644
 --- a/internal/quota/types.go
 +++ b/internal/quota/types.go
 @@ -2,6 +2,7 @@ package quota
@@ -2114,53 +2114,15 @@ index be755dd..fb7cf27 100644
  
  	"cpa-usage-keeper/internal/cpa/dto/apicall"
  	"cpa-usage-keeper/internal/entities"
-@@ -58,25 +59,27 @@ type SubscriptionInfo struct {
+@@ -64,6 +65,8 @@ type QuotaUsageBreakdown struct {
  }
  
  type QuotaRow struct {
--	Key               string       `json:"key"`
--	Label             string       `json:"label,omitempty"`
--	Scope             string       `json:"scope,omitempty"`
--	Metric            string       `json:"metric,omitempty"`
--	GroupKey          string       `json:"groupKey,omitempty"`
--	GroupLabel        string       `json:"groupLabel,omitempty"`
--	GroupDescription  string       `json:"groupDescription,omitempty"`
--	Used              *float64     `json:"used,omitempty"`
--	Limit             *float64     `json:"limit,omitempty"`
--	Remaining         *float64     `json:"remaining,omitempty"`
--	UsedPercent       *float64     `json:"usedPercent,omitempty"`
--	RemainingFraction *float64     `json:"remainingFraction,omitempty"`
--	Allowed           *bool        `json:"allowed,omitempty"`
--	LimitReached      *bool        `json:"limitReached,omitempty"`
--	Window            *QuotaWindow `json:"window,omitempty"`
--	ResetAt           string       `json:"resetAt,omitempty"`
--	ResetAfterSeconds *int64       `json:"resetAfterSeconds,omitempty"`
--	WindowUsageTokens *int64       `json:"window_usage_tokens,omitempty"`
--	WindowUsageCost   *float64     `json:"window_usage_cost,omitempty"`
-+	CapturedAt        time.Time     `json:"captured_at,omitempty"`
-+	Source            RefreshSource `json:"source,omitempty"`
-+	Key               string        `json:"key"`
-+	Label             string        `json:"label,omitempty"`
-+	Scope             string        `json:"scope,omitempty"`
-+	Metric            string        `json:"metric,omitempty"`
-+	GroupKey          string        `json:"groupKey,omitempty"`
-+	GroupLabel        string        `json:"groupLabel,omitempty"`
-+	GroupDescription  string        `json:"groupDescription,omitempty"`
-+	Used              *float64      `json:"used,omitempty"`
-+	Limit             *float64      `json:"limit,omitempty"`
-+	Remaining         *float64      `json:"remaining,omitempty"`
-+	UsedPercent       *float64      `json:"usedPercent,omitempty"`
-+	RemainingFraction *float64      `json:"remainingFraction,omitempty"`
-+	Allowed           *bool         `json:"allowed,omitempty"`
-+	LimitReached      *bool         `json:"limitReached,omitempty"`
-+	Window            *QuotaWindow  `json:"window,omitempty"`
-+	ResetAt           string        `json:"resetAt,omitempty"`
-+	ResetAfterSeconds *int64        `json:"resetAfterSeconds,omitempty"`
-+	WindowUsageTokens *int64        `json:"window_usage_tokens,omitempty"`
-+	WindowUsageCost   *float64      `json:"window_usage_cost,omitempty"`
- }
- 
- type AntigravityQuotaBucket struct {
++	CapturedAt time.Time `json:"captured_at,omitempty"`
++	Source RefreshSource `json:"source,omitempty"`
+ 	UsageBreakdown    []QuotaUsageBreakdown `json:"usageBreakdown,omitempty"`
+ 	Key               string                `json:"key"`
+ 	Label             string                `json:"label,omitempty"`
 diff --git a/internal/quota/window_capture_test.go b/internal/quota/window_capture_test.go
 new file mode 100644
 index 0000000..d02067a
@@ -2222,10 +2184,10 @@ index 5e54d7a..2b424b0 100644
  
  // UsageEventsPage 是 usage events 列表的服务层结果。
 diff --git a/internal/service/redis_usage.go b/internal/service/redis_usage.go
-index 5fe5be9..781558d 100644
+index 4becd90..65853dd 100644
 --- a/internal/service/redis_usage.go
 +++ b/internal/service/redis_usage.go
-@@ -182,11 +182,19 @@ func (d queuedUsageDetail) toUsageHeaderSnapshot(event entities.UsageEvent) *quo
+@@ -192,11 +192,19 @@ func (d queuedUsageDetail) toUsageHeaderSnapshot(event entities.UsageEvent) *quo
  	if !ok {
  		return nil
  	}
@@ -2438,7 +2400,7 @@ index 9410018..5a854ab 100644
  		return err
  	}
 diff --git a/web/src/App.tsx b/web/src/App.tsx
-index 814f442..b79440e 100644
+index 583346c..3ef2f1b 100644
 --- a/web/src/App.tsx
 +++ b/web/src/App.tsx
 @@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
@@ -2495,7 +2457,7 @@ index 814f442..b79440e 100644
      if (!session.authenticated) {
        clearSession();
        return;
-@@ -133,6 +139,19 @@ function App() {
+@@ -136,6 +142,19 @@ function App() {
      }
    }, [clearSession, isEmbeddedInCPAMC, loadSession, t]);
  
@@ -2515,7 +2477,7 @@ index 814f442..b79440e 100644
    const handleAPIKeyLogin = useCallback(async (apiKey: string) => {
      setSubmitting(true);
      setAPIKeyLoginError('');
-@@ -172,7 +191,9 @@ function App() {
+@@ -175,7 +194,9 @@ function App() {
    if (authState === 'checking') {
      page = <div className="app-checking" aria-busy="true" />;
    } else if (authState === 'unauthenticated') {
@@ -2649,18 +2611,18 @@ index 0000000..72e40c5
 + return accounts.length ? <details open><summary>API provider quota</summary><QuotaAccounts accounts={accounts}/></details> : null;
 +}
 diff --git a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
-index 580f222..8cfc342 100644
+index 3b74a55..733493f 100644
 --- a/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/AuthFileCredentialsSection.tsx
-@@ -10,6 +10,7 @@ import { IconChartLine, IconGaugeReset, IconRefreshCw, IconSearch, IconSettings,
+@@ -11,6 +11,7 @@ import { PortalTooltip, usePortalTooltip } from '@/components/ui/PortalTooltip'
  import quotaCostIcon from '@/assets/icons/quota-cost.svg'
  import quotaTokenIcon from '@/assets/icons/quota-token.svg'
  import styles from './CredentialSections.module.scss'
 +import { QuotaFreshness } from '../QuotaFreshness'
  import { formatCredentialTimestamp, type AuthFileCredentialRow, type DisplayQuota } from './credentialViewModels'
- import { deleteAuthFiles, fetchQuotaAutoRefreshSettings, fetchUsageQuotaResetCredits, setAuthFilesDisabled, updateQuotaAutoRefreshSettings, type UsageIdentityPageSort } from '@/lib/api'
- import type { QuotaAutoRefreshScheduleUnit, QuotaAutoRefreshSettings, UsageQuotaInspectionResult, UsageQuotaInspectionResultStatus, UsageQuotaInspectionStatusResponse, UsageQuotaResetCreditsResponse } from '@/lib/types'
-@@ -93,6 +94,7 @@ const AUTO_REFRESH_SCHEDULE_UNITS: QuotaAutoRefreshScheduleUnit[] = ['minute', '
+ import { deleteAuthFiles, fetchClaudeResetGrants, fetchQuotaAutoRefreshSettings, fetchUsageQuotaResetCredits, setAuthFilesDisabled, updateQuotaAutoRefreshSettings, type UsageIdentityPageSort } from '@/lib/api'
+ import type { ClaudeResetGrantsResponse, QuotaAutoRefreshScheduleUnit, QuotaAutoRefreshSettings, UsageQuotaInspectionResult, UsageQuotaInspectionResultStatus, UsageQuotaInspectionStatusResponse, UsageQuotaResetCreditsResponse, UsageQuotaResetResponse } from '@/lib/types'
+@@ -97,6 +98,7 @@ const AUTO_REFRESH_SCHEDULE_UNITS: QuotaAutoRefreshScheduleUnit[] = ['minute', '
  const AUTO_REFRESH_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7] as const
  
  interface AuthFileCredentialsSectionProps {
@@ -2668,7 +2630,7 @@ index 580f222..8cfc342 100644
    rows: AuthFileCredentialRow[]
    timeZone?: string
    total: number
-@@ -128,7 +130,7 @@ interface AuthFileCredentialsSectionProps {
+@@ -132,7 +134,7 @@ interface AuthFileCredentialsSectionProps {
    onAfterInvalidAccountAction?: () => Promise<void>
  }
  
@@ -2677,7 +2639,7 @@ index 580f222..8cfc342 100644
    const { t } = useTranslation()
    const [inspectionOpen, setInspectionOpen] = useState(false)
    const [quotaUsageMode, setQuotaUsageMode] = useState<QuotaUsageMode>('current')
-@@ -216,7 +218,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+@@ -220,7 +222,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
              <AuthFileDisplayModeSwitch mode={displayMode} onChange={setDisplayMode} />
            </div>
          )}
@@ -2686,7 +2648,7 @@ index 580f222..8cfc342 100644
            <div className={styles.credentialSectionActionButtons}>
              <MainActionButton
                type="button"
-@@ -275,7 +277,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+@@ -282,7 +284,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
                    displayName={row.displayName}
                    disabled={row.identity.disabled}
                    pending={statusPendingIdentityIds?.has(row.identity.id || row.identity.identity) ?? false}
@@ -2695,7 +2657,7 @@ index 580f222..8cfc342 100644
                    onToggle={(disabled) => onToggleStatus?.(row.identity.id || row.identity.identity, row.identity.identity, disabled)}
                  />
                ) : (
-@@ -339,12 +341,12 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+@@ -347,12 +349,12 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
                  <CredentialPriorityEditor
                    priority={row.identity.priority}
                    displayName={row.displayName}
@@ -2710,7 +2672,7 @@ index 580f222..8cfc342 100644
              metricsTitle={row.identity.stats_reset_at ? t('usage_stats.credentials_stats_since', { time: formatCredentialTimestamp(row.identity.stats_reset_at) ?? row.identity.stats_reset_at }) : undefined}
              metrics={(
                <>
-@@ -360,7 +362,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+@@ -368,7 +370,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
              ) : (
                <div className={styles.credentialQuotaSideWithAction}>
                  <AuthFileQuotaPanel row={row} quotaUsageMode={quotaUsageMode} timeZone={timeZone} />
@@ -2719,7 +2681,7 @@ index 580f222..8cfc342 100644
                    {/* reset 按钮只在官方缓存给出可用次数时展示；refresh 始终保留在右侧列居中位置。 */}
                    {resetCredits > 0 && (
                      <QuotaResetAction
-@@ -381,7 +383,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+@@ -391,7 +393,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
                    >
                      {rowRefreshing ? <LoadingSpinner size={13} /> : <IconRefreshCw size={13} />}
                    </button>
@@ -2728,7 +2690,7 @@ index 580f222..8cfc342 100644
                </div>
              )}
            />
-@@ -427,7 +429,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+@@ -437,7 +439,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
              document.body,
            )
          : null}
@@ -2737,7 +2699,7 @@ index 580f222..8cfc342 100644
          open={inspectionOpen}
          status={quotaInspectionStatus}
          loading={quotaInspectionLoading}
-@@ -437,7 +439,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
+@@ -447,7 +449,7 @@ export function AuthFileCredentialsSection({ rows, timeZone, total, page, totalP
          onStart={onStartInspection}
          onRefreshStatus={onRefreshInspectionStatus}
          onAfterInvalidAccountAction={onAfterInvalidAccountAction}
@@ -2746,19 +2708,19 @@ index 580f222..8cfc342 100644
      </>
    )
  }
-@@ -1991,6 +1993,7 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
-       <div className={styles.credentialQuotaBarHeader}>
-         <span className={styles.credentialQuotaLabelGroup}>
+@@ -2082,6 +2084,7 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
+         <span className={`${styles.credentialQuotaLabelGroup} ${quota.usageBreakdown?.length ? styles.credentialQuotaLabelWithInfo : ''}`.trim()}>
            <span>{quota.label}</span>
+           {Boolean(quota.usageBreakdown?.length) && <QuotaUsageBreakdownInfo quota={quota} />}
 +          <QuotaFreshness capturedAt={quota.capturedAt} source={quota.source} account={quota.accountLabel ?? "Provider account"} resetAt={quota.resetText} />
          </span>
          {(resetDuration || percentLabel) && (
            <span className={styles.credentialQuotaValueGroup}>
 diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
-index 43b49c7..e132ce2 100644
+index d5c4b65..54f9522 100644
 --- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
 +++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
-@@ -24,6 +24,7 @@ const ERROR_EVENTS_PAGE_SIZE = 50
+@@ -25,6 +25,7 @@ const ERROR_EVENTS_PAGE_SIZE = 50
  type CredentialDetailTab = 'overview' | 'quota-history' | 'requests' | 'errors'
  
  interface CredentialDetailDrawerProps {
@@ -2766,7 +2728,7 @@ index 43b49c7..e132ce2 100644
    open: boolean
    selection: CredentialDetailSelection | null
    timeZone?: string
-@@ -71,6 +72,7 @@ function appendCredentialErrorEvents(
+@@ -72,6 +73,7 @@ function appendCredentialErrorEvents(
  }
  
  export function CredentialDetailDrawer({
@@ -2774,7 +2736,7 @@ index 43b49c7..e132ce2 100644
    open,
    selection,
    timeZone,
-@@ -143,10 +145,10 @@ export function CredentialDetailDrawer({
+@@ -144,10 +146,10 @@ export function CredentialDetailDrawer({
      }
    }
    const quotaHistoryProvider = selection?.kind === 'auth-file' ? identity?.type?.trim().toLowerCase() : undefined
@@ -2787,7 +2749,7 @@ index 43b49c7..e132ce2 100644
  
    const resetRequestEvents = useCallback(() => {
      firstPageControllerRef.current?.abort()
-@@ -208,6 +210,7 @@ export function CredentialDetailDrawer({
+@@ -209,6 +211,7 @@ export function CredentialDetailDrawer({
      try {
        // 详情列表固定从当前凭证最近的原始事件开始，不继承外层页面的查询条件。
        const response = await fetchUsageEvents(undefined, controller.signal, {
@@ -2795,7 +2757,7 @@ index 43b49c7..e132ce2 100644
          authType: authTypeFilter,
          pageSize: REQUEST_EVENTS_PAGE_SIZE,
          cursorMode: true,
-@@ -231,7 +234,7 @@ export function CredentialDetailDrawer({
+@@ -232,7 +235,7 @@ export function CredentialDetailDrawer({
          setEventsLoading(false)
        }
      }
@@ -2804,7 +2766,7 @@ index 43b49c7..e132ce2 100644
  
    useEffect(() => {
      if (!open || activeTab !== 'requests') return
-@@ -349,6 +352,7 @@ export function CredentialDetailDrawer({
+@@ -350,6 +353,7 @@ export function CredentialDetailDrawer({
      setEventsError('')
      try {
        const response = await fetchUsageEvents(undefined, controller.signal, {
@@ -2812,7 +2774,7 @@ index 43b49c7..e132ce2 100644
          authType: authTypeFilter,
          pageSize: REQUEST_EVENTS_PAGE_SIZE,
          cursorMode: true,
-@@ -373,7 +377,7 @@ export function CredentialDetailDrawer({
+@@ -374,7 +378,7 @@ export function CredentialDetailDrawer({
          setEventsLoadingMore(false)
        }
      }
@@ -2821,7 +2783,7 @@ index 43b49c7..e132ce2 100644
  
    const loadMoreErrorEvents = useCallback(async () => {
      const cursor = errorEventsNextCursor?.trim()
-@@ -422,7 +426,7 @@ export function CredentialDetailDrawer({
+@@ -424,7 +428,7 @@ export function CredentialDetailDrawer({
          {selection.kind === 'auth-file' && selection.row.subscriptionBadge
            ? <CredentialSubscriptionBadge model={selection.row.subscriptionBadge} />
            : null}
@@ -2830,7 +2792,7 @@ index 43b49c7..e132ce2 100644
          <span className={identity.disabled || identity.is_deleted ? styles.statusDisabled : styles.statusEnabled}>
            {identity.is_deleted
              ? t('usage_stats.deleted')
-@@ -486,7 +490,7 @@ export function CredentialDetailDrawer({
+@@ -488,7 +492,7 @@ export function CredentialDetailDrawer({
              >
                {t('usage_stats.credentials_detail_requests_tab')}
              </button>
@@ -2839,7 +2801,7 @@ index 43b49c7..e132ce2 100644
                ref={errorsTabRef}
                id={errorsTabId}
                type="button"
-@@ -500,7 +504,7 @@ export function CredentialDetailDrawer({
+@@ -502,7 +506,7 @@ export function CredentialDetailDrawer({
                onKeyDown={handleTabKeyDown}
              >
                {t('usage_stats.credentials_detail_errors_tab')}
@@ -2849,20 +2811,20 @@ index 43b49c7..e132ce2 100644
            {((activeTab === 'requests' && eventsError && events.length === 0 && !eventsLoading)
              || (activeTab === 'errors' && errorEventsError && errorEvents.length === 0 && !errorEventsLoading)) ? (
 diff --git a/web/src/components/usage/credentials/credentialViewModels.ts b/web/src/components/usage/credentials/credentialViewModels.ts
-index 5c5e0a2..0757349 100644
+index a84b339..572edad 100644
 --- a/web/src/components/usage/credentials/credentialViewModels.ts
 +++ b/web/src/components/usage/credentials/credentialViewModels.ts
-@@ -23,6 +23,9 @@ export interface QuotaBillingUsageDisplay {
- }
+@@ -24,6 +24,9 @@ export interface QuotaBillingUsageDisplay {
  
  export interface DisplayQuota {
+   usageBreakdown?: UsageQuotaRow['usageBreakdown']
 + accountLabel?:string
 + capturedAt?: string
 + source?: string
    key: string
    label: string
    scope?: string
-@@ -157,7 +160,8 @@ export function buildAuthFileCredentialRows(
+@@ -159,7 +162,8 @@ export function buildAuthFileCredentialRows(
      const quotaResponse = quotas.get(identity.identity)
      const quota = quotaResponse?.quota ?? []
      const state = quotaStates.get(identity.identity)
@@ -2872,16 +2834,16 @@ index 5c5e0a2..0757349 100644
      const subscriptionBadge = resolveCredentialSubscriptionBadge(quotaResponse?.subscription ?? identity.subscription)
  
      return {
-@@ -216,6 +220,7 @@ function toDisplayQuota(row: UsageQuotaRow): DisplayQuota | undefined {
-   }
+@@ -220,6 +224,7 @@ function toDisplayQuota(row: UsageQuotaRow): DisplayQuota | undefined {
  
    return {
+     usageBreakdown: row.usageBreakdown,
 +    capturedAt:row.captured_at, source:row.source,
      key: row.key,
      label,
      scope: row.scope,
 diff --git a/web/src/components/usage/credentials/useQuotaCache.ts b/web/src/components/usage/credentials/useQuotaCache.ts
-index d5771cd..6e373f6 100644
+index 69024f0..2e86c5d 100644
 --- a/web/src/components/usage/credentials/useQuotaCache.ts
 +++ b/web/src/components/usage/credentials/useQuotaCache.ts
 @@ -3,7 +3,8 @@ import { ApiError, fetchUsageQuotaCache } from '@/lib/api'
@@ -2894,7 +2856,7 @@ index d5771cd..6e373f6 100644
  
  export const buildQuotaCacheAuthIndexesKey = (authIndexes: string[]) => JSON.stringify(authIndexes)
  
-@@ -35,7 +36,7 @@ export function useQuotaCache({ enabled, authIndexes, onAuthRequired }: UseQuota
+@@ -70,7 +71,7 @@ export function useQuotaCache({ enabled, authIndexes, onAuthRequired }: UseQuota
        return
      }
  
@@ -2903,11 +2865,10 @@ index d5771cd..6e373f6 100644
      if (stableAuthIndexes.length === 0) {
        requestControllerRef.current = null
        return
-@@ -105,10 +106,9 @@ export function useQuotaCache({ enabled, authIndexes, onAuthRequired }: UseQuota
-       requestControllerRef.current = null
+@@ -122,9 +123,9 @@ export function useQuotaCache({ enabled, authIndexes, onAuthRequired }: UseQuota
+     if (!enabled) {
        return
      }
--    void refreshQuotaCache()
 -    const intervalID = window.setInterval(refreshQuotaCache, QUOTA_CACHE_REFRESH_INTERVAL_MS)
 +    const stop = startQuotaPolling(async (signal) => {signal.addEventListener("abort",()=>requestControllerRef.current?.abort(),{once:true});await refreshQuotaCache()}, QUOTA_CACHE_REFRESH_INTERVAL_MS)
      return () => {
@@ -3087,7 +3048,7 @@ index b98f418..1e5c4ca 100644
    '/ranking/status',
    { signal },
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index a8c1332..53702f3 100644
+index 7bdb3b7..14b7967 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -20,6 +20,7 @@ const getInitialLanguage = (): SupportedLanguage => {
@@ -3098,7 +3059,7 @@ index a8c1332..53702f3 100644
        common: {
          loading: 'Loading...',
          save: 'Save',
-@@ -961,6 +962,7 @@ const resources = {
+@@ -988,6 +989,7 @@ const resources = {
    },
    zh: {
      translation: {
@@ -3106,7 +3067,7 @@ index a8c1332..53702f3 100644
        common: {
          loading: '加载中...',
          save: '保存',
-@@ -1902,6 +1904,7 @@ const resources = {
+@@ -1956,6 +1958,7 @@ const resources = {
    },
    'zh-TW': {
      translation: {
@@ -3115,7 +3076,7 @@ index a8c1332..53702f3 100644
          loading: '載入中...',
          save: '儲存',
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index bf62a55..2e06ae2 100644
+index a80680b..3088cca 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
 @@ -3,13 +3,18 @@ import { isCPAMCEmbed } from '@/embed/cpamcEmbed'
@@ -3293,7 +3254,7 @@ index bf62a55..2e06ae2 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to export usage events: ${response.status}`)
    }
-@@ -1056,3 +1095,14 @@ export async function deletePricing(model: string): Promise<void> {
+@@ -1064,3 +1103,14 @@ export async function deletePricing(model: string): Promise<void> {
      await parseApiError(response, `Failed to delete pricing: ${response.status}`)
    }
  }
@@ -3361,7 +3322,7 @@ index 0000000..16dd65b
 + });
 +});
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
-index 3bfbfbb..e48201e 100644
+index 5061d80..46c9541 100644
 --- a/web/src/lib/types.ts
 +++ b/web/src/lib/types.ts
 @@ -1,4 +1,4 @@
@@ -3384,10 +3345,10 @@ index 3bfbfbb..e48201e 100644
  export type AuthManagedSessionSource = 'standard' | 'embed'
  
  export interface AuthManagedSessionItem {
-@@ -479,6 +480,7 @@ export interface UsageQuotaWindow {
- }
+@@ -480,6 +481,7 @@ export interface UsageQuotaWindow {
  
  export interface UsageQuotaRow {
+   usageBreakdown?: { product: string; usedPercent?: number }[]
 + captured_at?: string; source?: string;
    key: string
    label?: string

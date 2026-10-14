@@ -489,7 +489,7 @@ index 75110c7..0b531ab 100644
  
              {children}
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index 40b005a..95a33e4 100644
+index 26b345c..ff2aaba 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -21,6 +21,7 @@ const resources = {
@@ -500,7 +500,7 @@ index 40b005a..95a33e4 100644
        common: {
          loading: 'Loading...',
          save: 'Save',
-@@ -966,6 +967,7 @@ const resources = {
+@@ -993,6 +994,7 @@ const resources = {
    zh: {
      translation: {
        read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
@@ -508,7 +508,7 @@ index 40b005a..95a33e4 100644
        common: {
          loading: '加载中...',
          save: '保存',
-@@ -1911,6 +1913,7 @@ const resources = {
+@@ -1965,6 +1967,7 @@ const resources = {
    'zh-TW': {
      translation: {
        read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
@@ -547,10 +547,10 @@ index 9d60e3a..92e16ce 100644
        onAuthRequired={onAuthRequired}
      >
 diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
-index dc8ce0c..9564a0e 100644
+index f940a0f..c8c5f41 100644
 --- a/web/src/pages/UsagePage.tsx
 +++ b/web/src/pages/UsagePage.tsx
-@@ -54,6 +54,7 @@ import type { Theme } from '@/types';
+@@ -55,6 +55,7 @@ import type { Theme } from '@/types';
  import { BrandLink } from '@/components/BrandLink';
  import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
  import { DashboardToolbar } from '@/components/dashboard/DashboardToolbar';
@@ -558,7 +558,7 @@ index dc8ce0c..9564a0e 100644
  import { cpamcEmbedSearch, isCPAMCEmbed } from '@/embed/cpamcEmbed';
  import { RankingPage } from '@/features/ranking/RankingPage';
  import { RankingScopeSwitch } from '@/features/ranking/components/RankingScopeSwitch';
-@@ -1866,11 +1867,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -1883,11 +1884,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
      }
    }, [onAuthRequired, showTopNotice, t]);
  
@@ -571,7 +571,7 @@ index dc8ce0c..9564a0e 100644
  
  	  useHeaderRefresh(refreshActiveTab);
  
-@@ -2199,6 +2196,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2216,6 +2213,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                          </>
                        )}
                      </MainActionButton>
@@ -579,7 +579,7 @@ index dc8ce0c..9564a0e 100644
                    </div>
                  </div>
                </div>
-@@ -2223,6 +2221,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2240,6 +2238,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                ] : showRankingScopeControl ? [<RankingScopeSwitch key="ranking-scope" value={rankingScope} onChange={handleRankingScopeChange} />] : []}
                onRefresh={() => void handleManualRefresh().catch(() => {})}
                refreshing={manualRefreshLoading}

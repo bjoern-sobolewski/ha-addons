@@ -1,6 +1,21 @@
+diff --git a/internal/auth/codex/openai_auth.go b/internal/auth/codex/openai_auth.go
+index bf72fd63..6fd572f1 100644
+--- a/internal/auth/codex/openai_auth.go
++++ b/internal/auth/codex/openai_auth.go
+@@ -347,7 +347,7 @@ func isNonRetryableRefreshErr(err error) bool {
+ 	if err == nil {
+ 		return false
+ 	}
+-	return refreshdiagnostic.Reason(err) != ""
++	return refreshdiagnostic.Reason(err) != "" || strings.Contains(strings.ToLower(err.Error()), "invalid_grant")
+ }
+ 
+ // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
+diff --git a/internal/refreshdiagnostic/error.go b/internal/refreshdiagnostic/error.go
+index c1b7350b..a32e845a 100644
 --- a/internal/refreshdiagnostic/error.go
 +++ b/internal/refreshdiagnostic/error.go
-@@ -11,11 +11,15 @@
+@@ -11,11 +11,15 @@ const Code = "provider_reauthentication_required"
  const Message = "The provider refresh token is no longer usable. Sign in again through OAuth Login."
  
  type Error struct {
@@ -18,7 +33,7 @@
  	if e.Reason != "" {
  		return fmt.Sprintf("token refresh failed with status %d: %s; %s", e.Status, e.Reason, Message)
  	}
-@@ -43,7 +47,11 @@
+@@ -43,7 +47,11 @@ func FromResponse(status int, body []byte) error {
  			if json.Unmarshal(response.Error, &nested) == nil {
  				code = nested.Code
  			}
@@ -30,9 +45,11 @@
  		if IsReason(code) {
  			result.Reason = code
  		}
+diff --git a/internal/refreshdiagnostic/error_test.go b/internal/refreshdiagnostic/error_test.go
+index f89bef56..a6f8d024 100644
 --- a/internal/refreshdiagnostic/error_test.go
 +++ b/internal/refreshdiagnostic/error_test.go
-@@ -26,3 +26,12 @@
+@@ -26,3 +26,12 @@ func TestSafeRefreshDiagnostics(t *testing.T) {
  		}
  	}
  }
@@ -45,14 +62,3 @@
 +		}
 +	}
 +}
---- a/internal/auth/codex/openai_auth.go
-+++ b/internal/auth/codex/openai_auth.go
-@@ -343,7 +343,7 @@
- 	if err == nil {
- 		return false
- 	}
--	return refreshdiagnostic.Reason(err) != ""
-+	return refreshdiagnostic.Reason(err) != "" || strings.Contains(strings.ToLower(err.Error()), "invalid_grant")
- }
- 
- // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.

@@ -57,7 +57,7 @@ For the HA Cloudflared app's hostname-only **Additional Hosts**, instead enable 
 
 If an existing WAF rule requires a Bearer header for the entire API hostname, narrow that rule to API paths or exclude the exact `viewer_base_path` and paths starting with `viewer_base_path + "/"`; browsers log in with a POSTed key and then an HttpOnly session cookie. Remove any exception for the old prefix when changing it. Keep API header protection in place and verify anonymous quota requests remain 401. Use HTTPS for remote access. Do not route the hostname directly to the full Keeper listener. Routing `/v1/` through Keeper makes that API hostname depend on Keeper being up; restoring its original CPA API gateway service bypasses this extra hop if Keeper is unavailable.
 
-This HA build applies a reviewed local patch to upstream Keeper 1.15.9 at commit `3f1b29aa5b0b5284b75ec53573b5146cd50fea1b`, builds its embedded frontend and binary, and retains the upstream runtime and `/data` database layout.
+This HA build applies a reviewed local patch to upstream Keeper 1.15.11 at commit `71a41cc2d1cce8d75b42473adf31f2616ad8085e`, builds its embedded frontend and binary, and retains the upstream runtime and `/data` database layout.
 
 ## Automatic quota freshness
 

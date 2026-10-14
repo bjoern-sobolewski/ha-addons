@@ -1,8 +1,8 @@
 diff --git a/internal/redisqueue/plugin.go b/internal/redisqueue/plugin.go
-index 10ecf27..9ca810d 100644
+index b06eae70..d8afa28d 100644
 --- a/internal/redisqueue/plugin.go
 +++ b/internal/redisqueue/plugin.go
-@@ -153,6 +153,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
+@@ -167,6 +167,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
  		IsCompaction:        clientRequestMetadata.IsCompaction,
  		ReasoningEffort:     reasoningEffort,
  		ServiceTier:         serviceTier,
@@ -10,7 +10,7 @@ index 10ecf27..9ca810d 100644
  		ResponseServiceTier: responseServiceTier,
  		ResponseModel:       responseModel,
  	})
-@@ -183,6 +184,7 @@ type queuedUsageDetail struct {
+@@ -199,6 +200,7 @@ type queuedUsageDetail struct {
  	IsCompaction        bool                     `json:"is_compaction,omitempty"`
  	ReasoningEffort     string                   `json:"reasoning_effort"`
  	ServiceTier         string                   `json:"service_tier"`
@@ -19,10 +19,10 @@ index 10ecf27..9ca810d 100644
  	ResponseModel       string                   `json:"response_model,omitempty"`
  }
 diff --git a/internal/runtime/executor/codex_executor_execute.go b/internal/runtime/executor/codex_executor_execute.go
-index f5afac2..97a1373 100644
+index 1cb4da22..b5aaf1cb 100644
 --- a/internal/runtime/executor/codex_executor_execute.go
 +++ b/internal/runtime/executor/codex_executor_execute.go
-@@ -104,6 +104,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
+@@ -113,6 +113,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
  	})
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClient(httpClient)
@@ -30,7 +30,7 @@ index f5afac2..97a1373 100644
  	httpResp, err := httpClient.Do(httpReq)
  	if err != nil {
  		helps.RecordAPIResponseError(ctx, e.cfg, err)
-@@ -276,6 +277,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
+@@ -294,6 +295,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
  	})
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClient(httpClient)
@@ -39,10 +39,10 @@ index f5afac2..97a1373 100644
  	if err != nil {
  		helps.RecordAPIResponseError(ctx, e.cfg, err)
 diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
-index 7c9fef2..2c76227 100644
+index f468586c..bbc50269 100644
 --- a/internal/runtime/executor/codex_executor_stream.go
 +++ b/internal/runtime/executor/codex_executor_stream.go
-@@ -113,6 +113,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+@@ -121,6 +121,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
  
  	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
  	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
@@ -52,7 +52,7 @@ index 7c9fef2..2c76227 100644
  		helps.RecordAPIResponseError(ctx, e.cfg, err)
 diff --git a/internal/runtime/executor/codex_nonstream_usage_test.go b/internal/runtime/executor/codex_nonstream_usage_test.go
 new file mode 100644
-index 0000000..04f093e
+index 00000000..04f093e0
 --- /dev/null
 +++ b/internal/runtime/executor/codex_nonstream_usage_test.go
 @@ -0,0 +1,53 @@
@@ -110,7 +110,7 @@ index 0000000..04f093e
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
-index 32bcd07..ebf13e3 100644
+index 32bcd071..ebf13e3a 100644
 --- a/internal/runtime/executor/codex_websockets_duplex.go
 +++ b/internal/runtime/executor/codex_websockets_duplex.go
 @@ -421,6 +421,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
@@ -140,10 +140,10 @@ index 32bcd07..ebf13e3 100644
  					responseActive = false
  					automaticActive = false
 diff --git a/internal/runtime/executor/codex_websockets_execute.go b/internal/runtime/executor/codex_websockets_execute.go
-index 6b6e193..72c73de 100644
+index eed3dc0e..361d0647 100644
 --- a/internal/runtime/executor/codex_websockets_execute.go
 +++ b/internal/runtime/executor/codex_websockets_execute.go
-@@ -195,6 +195,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+@@ -210,6 +210,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
  	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
  
  	cliproxyexecutor.MarkUpstreamAttempt(ctx)
@@ -151,7 +151,7 @@ index 6b6e193..72c73de 100644
  	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
  		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
  		if sess != nil && !isEphemeralSession {
-@@ -243,6 +244,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+@@ -258,6 +259,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
  				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
  				reporter.StartResponseTTFT()
  				cliproxyexecutor.MarkUpstreamAttempt(ctx)
@@ -160,7 +160,7 @@ index 6b6e193..72c73de 100644
  					wsReqBody = wsReqBodyRetry
  				} else {
 diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
-index 3c92424..a0e427e 100644
+index 99514f39..508b4a7d 100644
 --- a/internal/runtime/executor/codex_websockets_stream.go
 +++ b/internal/runtime/executor/codex_websockets_stream.go
 @@ -153,6 +153,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
@@ -181,7 +181,7 @@ index 3c92424..a0e427e 100644
  				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
 diff --git a/internal/runtime/executor/helps/upstream_service_tier.go b/internal/runtime/executor/helps/upstream_service_tier.go
 new file mode 100644
-index 0000000..6349494
+index 00000000..63494940
 --- /dev/null
 +++ b/internal/runtime/executor/helps/upstream_service_tier.go
 @@ -0,0 +1,36 @@
@@ -223,7 +223,7 @@ index 0000000..6349494
 +}
 diff --git a/internal/runtime/executor/helps/upstream_service_tier_test.go b/internal/runtime/executor/helps/upstream_service_tier_test.go
 new file mode 100644
-index 0000000..ef78f24
+index 00000000..ef78f243
 --- /dev/null
 +++ b/internal/runtime/executor/helps/upstream_service_tier_test.go
 @@ -0,0 +1,28 @@
@@ -256,10 +256,10 @@ index 0000000..ef78f24
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/usage_helpers.go b/internal/runtime/executor/helps/usage_helpers.go
-index 5774964..05b9d10 100644
+index 8348d6e7..6a9195ff 100644
 --- a/internal/runtime/executor/helps/usage_helpers.go
 +++ b/internal/runtime/executor/helps/usage_helpers.go
-@@ -44,6 +44,8 @@ type UsageReporter struct {
+@@ -46,6 +46,8 @@ type UsageReporter struct {
  	source              string
  	reasoning           string
  	serviceTier         string
@@ -268,7 +268,7 @@ index 5774964..05b9d10 100644
  	generate            bool
  	stream              bool
  	requestedAt         time.Time
-@@ -627,6 +629,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
+@@ -656,6 +658,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
  		AuthType:            r.authType,
  		ReasoningEffort:     r.reasoning,
  		ServiceTier:         r.serviceTier,
@@ -277,10 +277,10 @@ index 5774964..05b9d10 100644
  		ResponseModel:       responseModel,
  		Generate:            usage.GenerateFlag(r.generate),
 diff --git a/sdk/cliproxy/usage/manager.go b/sdk/cliproxy/usage/manager.go
-index 859dda3..cecfe16 100644
+index 2e46ee6a..0126d3c1 100644
 --- a/sdk/cliproxy/usage/manager.go
 +++ b/sdk/cliproxy/usage/manager.go
-@@ -46,6 +46,8 @@ type Record struct {
+@@ -51,6 +51,8 @@ type Record struct {
  	ReasoningEffort string
  	// ServiceTier stores the client-requested service tier.
  	ServiceTier string

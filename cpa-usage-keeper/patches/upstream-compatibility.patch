@@ -1,0 +1,56 @@
+diff --git a/internal/quota/types.go b/internal/quota/types.go
+index 0cb58f8..fe404e4 100644
+--- a/internal/quota/types.go
++++ b/internal/quota/types.go
+@@ -65,8 +65,8 @@ type QuotaUsageBreakdown struct {
+ }
+ 
+ type QuotaRow struct {
+-	CapturedAt time.Time `json:"captured_at,omitempty"`
+-	Source RefreshSource `json:"source,omitempty"`
++	CapturedAt        time.Time             `json:"captured_at,omitempty"`
++	Source            RefreshSource         `json:"source,omitempty"`
+ 	UsageBreakdown    []QuotaUsageBreakdown `json:"usageBreakdown,omitempty"`
+ 	Key               string                `json:"key"`
+ 	Label             string                `json:"label,omitempty"`
+diff --git a/internal/repository/migration/migration.go b/internal/repository/migration/migration.go
+index 9e2bba6..41e502c 100644
+--- a/internal/repository/migration/migration.go
++++ b/internal/repository/migration/migration.go
+@@ -255,8 +255,8 @@ func orderedMigrations() []databaseMigration {
+ 		{version: migrationNormalizeUsageEventParentSessionNull, run: normalizeUsageEventParentSessionNullMigration},
+ 		{version: migrationLimitLatencySamplePoints, run: limitLatencySamplePointsMigration, destructive: true},
+ 		{version: "20261005_usage_upstream_service_tier", run: addUsageUpstreamServiceTierMigration},
+-		{version: migrationAddUsageEventTraceMetadata, run: addUsageEventTraceMetadataMigration},
+ 		{version: "20261007_weekly_quota_archive_index", run: addWeeklyQuotaArchiveIndex},
++		{version: migrationAddUsageEventTraceMetadata, run: addUsageEventTraceMetadataMigration},
+ 	}
+ }
+ 
+diff --git a/internal/repository/migration/test/migration_test.go b/internal/repository/migration/test/migration_test.go
+index e989f57..842b439 100644
+--- a/internal/repository/migration/test/migration_test.go
++++ b/internal/repository/migration/test/migration_test.go
+@@ -95,8 +95,8 @@ func TestOrderedMigrationsPreservesExecutionOrder(t *testing.T) {
+ 		"20260922_normalize_usage_event_parent_session_null",
+ 		"20260925_limit_latency_sample_points",
+ 		"20261005_usage_upstream_service_tier",
+-		"20261008_usage_event_trace_metadata",
+ 		"20261007_weekly_quota_archive_index",
++		"20261008_usage_event_trace_metadata",
+ 	}
+ 	assertStringSlicesEqual(t, want, got)
+ }
+diff --git a/web/src/components/usage/test/RequestEventsDetailsCardCompactColumns.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCardCompactColumns.test.tsx
+index 527af85..6e4b425 100644
+--- a/web/src/components/usage/test/RequestEventsDetailsCardCompactColumns.test.tsx
++++ b/web/src/components/usage/test/RequestEventsDetailsCardCompactColumns.test.tsx
+@@ -89,7 +89,7 @@ describe('RequestEventsDetailsCard compact columns', () => {
+     expect(cells[2]).not.toContain('openai')
+     expect(cells[3]).toBe('gpt-5.6keeper-gpt')
+     expect(cells[4]).toBe('high')
+-    expect(cells[5]).toBe('Fast / Flex')
++    expect(cells[5]).toBe('Fast (client)')
+     expect(cells[7]).toBe('SSE/messages')
+     expect(cells[8]).toBe('120msTTFT 45ms')
+     expect(cells[9]).toBe('30.0 t/s')

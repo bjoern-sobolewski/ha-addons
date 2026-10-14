@@ -1,5 +1,5 @@
 diff --git a/internal/api/handlers/management/auth_files.go b/internal/api/handlers/management/auth_files.go
-index 0a4ed74..fb6a66d 100644
+index 86878e9b..6d51004d 100644
 --- a/internal/api/handlers/management/auth_files.go
 +++ b/internal/api/handlers/management/auth_files.go
 @@ -4,6 +4,7 @@ import (
@@ -10,7 +10,7 @@ index 0a4ed74..fb6a66d 100644
  	"os"
  	"path/filepath"
  	"sort"
-@@ -667,6 +668,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
+@@ -676,6 +677,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
  		"source":         "memory",
  		"size":           int64(0),
  	}
@@ -23,7 +23,7 @@ index 0a4ed74..fb6a66d 100644
  	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
 diff --git a/internal/api/handlers/management/auth_files_diagnostic_test.go b/internal/api/handlers/management/auth_files_diagnostic_test.go
 new file mode 100644
-index 0000000..ff3202c
+index 00000000..ff3202c7
 --- /dev/null
 +++ b/internal/api/handlers/management/auth_files_diagnostic_test.go
 @@ -0,0 +1,52 @@
@@ -80,7 +80,7 @@ index 0000000..ff3202c
 +	}
 +}
 diff --git a/internal/api/handlers/management/auth_files_refresh.go b/internal/api/handlers/management/auth_files_refresh.go
-index 7955ff1..e00bf62 100644
+index c144379c..3d6bb0ec 100644
 --- a/internal/api/handlers/management/auth_files_refresh.go
 +++ b/internal/api/handlers/management/auth_files_refresh.go
 @@ -2,6 +2,7 @@ package management
@@ -91,7 +91,7 @@ index 7955ff1..e00bf62 100644
  	"io"
  	"net/http"
  	"strings"
-@@ -63,6 +64,10 @@ func (h *Handler) RefreshAuthFiles(c *gin.Context) {
+@@ -64,6 +65,10 @@ func (h *Handler) RefreshAuthFiles(c *gin.Context) {
  
  	refreshed, err := h.authManager.ForceRefreshAuth(ctx, targetAuth.ID)
  	if err != nil {
@@ -103,7 +103,7 @@ index 7955ff1..e00bf62 100644
  			"error": err.Error(),
  		})
 diff --git a/internal/auth/codex/openai_auth.go b/internal/auth/codex/openai_auth.go
-index f676116..ce7c50d 100644
+index bc9ce24a..bf72fd63 100644
 --- a/internal/auth/codex/openai_auth.go
 +++ b/internal/auth/codex/openai_auth.go
 @@ -8,6 +8,7 @@ import (
@@ -114,7 +114,7 @@ index f676116..ce7c50d 100644
  	"io"
  	"net/http"
  	"net/url"
-@@ -245,7 +246,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
+@@ -249,7 +250,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
  	}
  
  	if resp.StatusCode != http.StatusOK {
@@ -123,7 +123,7 @@ index f676116..ce7c50d 100644
  	}
  
  	var tokenResp struct {
-@@ -328,7 +329,6 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
+@@ -332,7 +333,6 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
  			return tokenData, nil
  		}
  		if isNonRetryableRefreshErr(err) {
@@ -131,7 +131,7 @@ index f676116..ce7c50d 100644
  			return nil, err
  		}
  
-@@ -343,8 +343,7 @@ func isNonRetryableRefreshErr(err error) bool {
+@@ -347,8 +347,7 @@ func isNonRetryableRefreshErr(err error) bool {
  	if err == nil {
  		return false
  	}
@@ -142,7 +142,7 @@ index f676116..ce7c50d 100644
  
  // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
 diff --git a/internal/auth/codex/openai_auth_test.go b/internal/auth/codex/openai_auth_test.go
-index b0c8667..64c92e2 100644
+index b0c86678..64c92e2e 100644
 --- a/internal/auth/codex/openai_auth_test.go
 +++ b/internal/auth/codex/openai_auth_test.go
 @@ -67,6 +67,18 @@ func resetCodexRefreshGroupForTest() {
@@ -166,7 +166,7 @@ index b0c8667..64c92e2 100644
  	auth := &CodexAuth{
 diff --git a/internal/refreshdiagnostic/error.go b/internal/refreshdiagnostic/error.go
 new file mode 100644
-index 0000000..c1b7350
+index 00000000..c1b7350b
 --- /dev/null
 +++ b/internal/refreshdiagnostic/error.go
 @@ -0,0 +1,60 @@
@@ -232,7 +232,7 @@ index 0000000..c1b7350
 +}
 diff --git a/internal/refreshdiagnostic/error_test.go b/internal/refreshdiagnostic/error_test.go
 new file mode 100644
-index 0000000..f89bef5
+index 00000000..f89bef56
 --- /dev/null
 +++ b/internal/refreshdiagnostic/error_test.go
 @@ -0,0 +1,28 @@
@@ -265,7 +265,7 @@ index 0000000..f89bef5
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/conductor_cooldown.go b/sdk/cliproxy/auth/conductor_cooldown.go
-index 4a97aa5..5350f7f 100644
+index 96e11d73..84b171df 100644
 --- a/sdk/cliproxy/auth/conductor_cooldown.go
 +++ b/sdk/cliproxy/auth/conductor_cooldown.go
 @@ -5,6 +5,7 @@ import (
@@ -276,7 +276,7 @@ index 4a97aa5..5350f7f 100644
  	"io"
  	"net"
  	"net/http"
-@@ -1746,7 +1747,7 @@ func isUnauthorizedError(err error) bool {
+@@ -1753,7 +1754,7 @@ func isUnauthorizedError(err error) bool {
  	if err == nil {
  		return false
  	}
@@ -285,7 +285,7 @@ index 4a97aa5..5350f7f 100644
  		return true
  	}
  	raw := strings.ToLower(err.Error())
-@@ -1758,7 +1759,7 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
+@@ -1765,7 +1766,7 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
  		return false
  	}
  	if auth.Unavailable && auth.Status == StatusError && auth.NextRefreshAfter.IsZero() && auth.NextRetryAfter.IsZero() &&
@@ -294,7 +294,7 @@ index 4a97aa5..5350f7f 100644
  		return true
  	}
  	return false
-@@ -1802,6 +1803,11 @@ func refreshErrorFromError(err error) *Error {
+@@ -1809,6 +1810,11 @@ func refreshErrorFromError(err error) *Error {
  		authErr.Code = "unauthorized"
  		authErr.Retryable = false
  	}
@@ -307,7 +307,7 @@ index 4a97aa5..5350f7f 100644
  }
  
 diff --git a/sdk/cliproxy/auth/conductor_refresh.go b/sdk/cliproxy/auth/conductor_refresh.go
-index 69b11c6..ccc63a2 100644
+index feb47d88..f5643057 100644
 --- a/sdk/cliproxy/auth/conductor_refresh.go
 +++ b/sdk/cliproxy/auth/conductor_refresh.go
 @@ -2,9 +2,11 @@ package auth
@@ -322,7 +322,7 @@ index 69b11c6..ccc63a2 100644
  	"net/http"
  	"strconv"
  	"strings"
-@@ -382,7 +384,9 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
+@@ -392,7 +394,9 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
  }
  
  type authRefreshLock struct {
@@ -332,8 +332,8 @@ index 69b11c6..ccc63a2 100644
 +	diagnosticEpoch  uint64
  }
  
- func authAccessToken(auth *Auth) string {
-@@ -688,6 +692,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+ func authOuterAccessToken(auth *Auth) string {
+@@ -741,6 +745,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
  	}
  	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
  	if err != nil {
@@ -341,7 +341,7 @@ index 69b11c6..ccc63a2 100644
  		unauthorized := isUnauthorizedError(err)
  		invalidGrant := isInvalidGrantError(err)
  		shouldReschedule := false
-@@ -703,6 +708,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+@@ -756,6 +761,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
  				m.mu.Unlock()
  				return nil, err
  			}
@@ -354,7 +354,7 @@ index 69b11c6..ccc63a2 100644
  			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
  			if wasTerminalUnauthorized {
  				current.Generation++
-@@ -715,6 +726,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+@@ -768,6 +779,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
  					current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
  					current.StatusMessage = "unauthorized (refresh token invalid)"
  				}
@@ -365,7 +365,7 @@ index 69b11c6..ccc63a2 100644
  				m.auths[id] = current
  				if m.scheduler != nil {
  					m.scheduler.upsertAuth(current.Clone())
-@@ -790,13 +805,21 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+@@ -843,13 +858,21 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
  				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && nextRetry.After(exp) {
  					nextRetry = exp
  				}
@@ -388,7 +388,7 @@ index 69b11c6..ccc63a2 100644
  			m.auths[id] = current
  			if m.scheduler != nil {
  				m.scheduler.upsertAuth(current.Clone())
-@@ -844,6 +867,13 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+@@ -897,6 +920,13 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
  	if saved == nil {
  		return nil, fmt.Errorf("auth %s not found", id)
  	}
@@ -402,7 +402,7 @@ index 69b11c6..ccc63a2 100644
  	targetAuth := saved
  	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
  	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))
-@@ -883,9 +913,12 @@ func (m *Manager) refreshWorkers() int {
+@@ -936,9 +966,12 @@ func (m *Manager) refreshWorkers() int {
  
  // ForceRefreshResult records the outcome of a forced refresh for one credential.
  type ForceRefreshResult struct {
@@ -418,7 +418,7 @@ index 69b11c6..ccc63a2 100644
  }
  
  // ForceRefreshAll triggers an immediate refresh for all credentials that have refresh tokens or custom refresh evaluators.
-@@ -948,6 +981,12 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
+@@ -1001,6 +1034,12 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
  				res := ForceRefreshResult{ID: job.authID, Success: err == nil}
  				if err != nil {
  					res.Error = err.Error()
@@ -433,7 +433,7 @@ index 69b11c6..ccc63a2 100644
  			}
 diff --git a/sdk/cliproxy/auth/refresh_diagnostic_test.go b/sdk/cliproxy/auth/refresh_diagnostic_test.go
 new file mode 100644
-index 0000000..9498be0
+index 00000000..9498be06
 --- /dev/null
 +++ b/sdk/cliproxy/auth/refresh_diagnostic_test.go
 @@ -0,0 +1,79 @@

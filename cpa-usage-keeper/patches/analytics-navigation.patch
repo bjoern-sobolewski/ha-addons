@@ -27,7 +27,7 @@ index 2725ee0..2cd6129 100644
  
  // ModelPriceSetting 是模型价格配置实体，用于按模型计算成本。
 diff --git a/internal/pricing/resolver.go b/internal/pricing/resolver.go
-index 6dfa53c..94d7aea 100644
+index 6dfa53c..bdb35e8 100644
 --- a/internal/pricing/resolver.go
 +++ b/internal/pricing/resolver.go
 @@ -1,6 +1,9 @@
@@ -40,12 +40,13 @@ index 6dfa53c..94d7aea 100644
  	"cpa-usage-keeper/internal/helper"
  )
  
-@@ -47,6 +50,12 @@ func (r Resolver) Calculate(subject CostSubject) CostResult {
+@@ -47,6 +50,13 @@ func (r Resolver) Calculate(subject CostSubject) CostResult {
  		}
  	}
  
++	endpoint := strings.TrimSpace(subject.Dimensions.Endpoint)
 +	if model.pricing.PricingStyle == entities.ModelPricingStyleOpenAIImageGeneration &&
-+		(strings.TrimSpace(subject.Dimensions.Endpoint) != "/v1/images/generations" || subject.Tokens.CacheReadTokens != 0 || subject.Tokens.CacheCreationTokens != 0) {
++		((endpoint != "/v1/images/generations" && endpoint != "POST /v1/images/generations") || subject.Tokens.CacheReadTokens != 0 || subject.Tokens.CacheCreationTokens != 0) {
 +		// This endpoint has text input and image output. Other routes can contain
 +		// image input; aggregate tokens cannot establish its different input cost.
 +		return CostResult{Available: !helper.UsageTokenInputRequiresPricing(subject.Tokens), PricingStyle: model.pricing.PricingStyle, MatchedModel: matchedModel, MatchedBy: matchedBy, RuleMultiplier: 1}
@@ -69,10 +70,10 @@ index 5f94827..a372268 100644
  		rule, compiledRuleValue, err := compileRule(config.Rules[index])
  		if err != nil {
 diff --git a/internal/pricing/test/resolver_test.go b/internal/pricing/test/resolver_test.go
-index 89f11a4..0b3eabc 100644
+index 89f11a4..5419248 100644
 --- a/internal/pricing/test/resolver_test.go
 +++ b/internal/pricing/test/resolver_test.go
-@@ -44,6 +44,36 @@ func TestResolverPreservesMissingPriceAvailabilityContract(t *testing.T) {
+@@ -44,6 +44,41 @@ func TestResolverPreservesMissingPriceAvailabilityContract(t *testing.T) {
  	}
  }
  
@@ -90,6 +91,11 @@ index 89f11a4..0b3eabc 100644
 +		available bool
 +	}{
 +		{"/v1/images/generations", 0, true},
++		{"POST /v1/images/generations", 0, true},
++		{" POST /v1/images/generations ", 0, true},
++		{"GET /v1/images/generations", 0, false},
++		{"POST /v1/images/edits", 0, false},
++		{"POST /v1/images/generations/extra", 0, false},
 +		{"/v1/images/edits", 0, false},
 +		{"/v1/responses", 0, false},
 +		{"", 0, false},
@@ -141,7 +147,7 @@ index 1b81373..7266c7c 100644
  }
  
 diff --git a/internal/repository/test/weekly_quota_value_test.go b/internal/repository/test/weekly_quota_value_test.go
-index 02d07c9..c966ea6 100644
+index 02d07c9..538732c 100644
 --- a/internal/repository/test/weekly_quota_value_test.go
 +++ b/internal/repository/test/weekly_quota_value_test.go
 @@ -6,11 +6,64 @@ import (
@@ -168,7 +174,7 @@ index 02d07c9..c966ea6 100644
 +	resolver := newUsageCostResolverForTest(t, db)
 +	generation := usageEventForQuotaEfficiency("image-generation", "oauth", "images-account", now.Add(-20*time.Minute), 24)
 +	generation.Model = "gpt-image-2"
-+	generation.Endpoint = "/v1/images/generations"
++	generation.Endpoint = "POST /v1/images/generations"
 +	generation.OutputTokens = 915
 +	generation.TotalTokens = 939
 +	seedCodexQuotaEfficiencyUsage(t, db, generation)
@@ -182,7 +188,7 @@ index 02d07c9..c966ea6 100644
 +	}
 +	edit := generation
 +	edit.EventKey = "image-edit"
-+	edit.Endpoint = "/v1/images/edits"
++	edit.Endpoint = "POST /v1/images/edits"
 +	seedCodexQuotaEfficiencyUsage(t, db, edit)
 +	partial, err := repository.BuildCodexQuotaEfficiencyHistory(context.Background(), db, query, resolver)
 +	if err != nil {

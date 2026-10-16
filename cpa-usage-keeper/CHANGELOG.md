@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.34
+
+- Recognize CPA's `POST /v1/images/generations` endpoint format when pricing text-to-image requests, including historical weekly values. Keep edits and unsupported methods unpriced.
+
 ## 0.1.33
 
 - Add text-to-image generation pricing using text input and image output rates. Keep image edits, unknown endpoints and unsupported cache usage unpriced when modality details are missing.

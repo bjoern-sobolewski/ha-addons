@@ -205,7 +205,8 @@ not measured visible-text decode throughput. Missing timings are not reconstruct
 For GPT Image 2, choose **OpenAI text-to-image generation** in Model Pricing
 Settings. Input is text tokens and output is image tokens. Configure rates from
 the provider's Standard pricing table; no price is enabled automatically.
-This style prices only `/v1/images/generations`. Image edits, unknown endpoints
+This style prices only `/v1/images/generations`, including CPA's recorded
+`POST /v1/images/generations` format. Image edits, unknown endpoints
 and unsupported cached-token usage stay unavailable because the retained token
 counts do not distinguish text and image input. Reports preserve endpoint
 groups, including archived weekly history, and retain known generation value

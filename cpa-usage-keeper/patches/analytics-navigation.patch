@@ -13,6 +13,102 @@ index 7fb9f29..3621193 100644
  		t.Fatalf("bad forwarding: %d %+v", response.Code, provider.request)
  	}
  	for _, query := range []string{"days=1", "days=bad", "metric=bad", "mode=bad", "context=bad"} {
+diff --git a/internal/entities/model_price_setting.go b/internal/entities/model_price_setting.go
+index 2725ee0..2cd6129 100644
+--- a/internal/entities/model_price_setting.go
++++ b/internal/entities/model_price_setting.go
+@@ -5,6 +5,8 @@ import "time"
+ const (
+ 	ModelPricingStyleOpenAI = "openai"
+ 	ModelPricingStyleClaude = "claude"
++	// Text-only Images API generation; edits require modality token details.
++	ModelPricingStyleOpenAIImageGeneration = "openai_image_generation"
+ )
+ 
+ // ModelPriceSetting 是模型价格配置实体，用于按模型计算成本。
+diff --git a/internal/pricing/resolver.go b/internal/pricing/resolver.go
+index 6dfa53c..94d7aea 100644
+--- a/internal/pricing/resolver.go
++++ b/internal/pricing/resolver.go
+@@ -1,6 +1,9 @@
+ package pricing
+ 
+ import (
++	"strings"
++
++	"cpa-usage-keeper/internal/entities"
+ 	"cpa-usage-keeper/internal/helper"
+ )
+ 
+@@ -47,6 +50,12 @@ func (r Resolver) Calculate(subject CostSubject) CostResult {
+ 		}
+ 	}
+ 
++	if model.pricing.PricingStyle == entities.ModelPricingStyleOpenAIImageGeneration &&
++		(strings.TrimSpace(subject.Dimensions.Endpoint) != "/v1/images/generations" || subject.Tokens.CacheReadTokens != 0 || subject.Tokens.CacheCreationTokens != 0) {
++		// This endpoint has text input and image output. Other routes can contain
++		// image input; aggregate tokens cannot establish its different input cost.
++		return CostResult{Available: !helper.UsageTokenInputRequiresPricing(subject.Tokens), PricingStyle: model.pricing.PricingStyle, MatchedModel: matchedModel, MatchedBy: matchedBy, RuleMultiplier: 1}
++	}
+ 	breakdown := helper.CalculateUsageTokenCostBreakdown(subject.Tokens, model.pricing)
+ 	ruleMultiplier := 1.0
+ 	if model.pricing.PriceMultiplier == nil || *model.pricing.PriceMultiplier != 0 {
+diff --git a/internal/pricing/snapshot.go b/internal/pricing/snapshot.go
+index 5f94827..a372268 100644
+--- a/internal/pricing/snapshot.go
++++ b/internal/pricing/snapshot.go
+@@ -79,6 +79,10 @@ func compileModelConfig(config ModelConfig) (compiledModel, ModelConfig, ActiveF
+ 	compiledRules := make([]compiledRule, 0, len(config.Rules))
+ 	seen := make(map[ruleIdentity]struct{}, len(config.Rules))
+ 	var activeFields ActiveFields
++	if pricing.PricingStyle == entities.ModelPricingStyleOpenAIImageGeneration {
++		// Keep generation and edit tokens separate in every aggregate report.
++		activeFields = activeFields.with(RuleFieldEndpoint)
++	}
+ 	for index := range config.Rules {
+ 		rule, compiledRuleValue, err := compileRule(config.Rules[index])
+ 		if err != nil {
+diff --git a/internal/pricing/test/resolver_test.go b/internal/pricing/test/resolver_test.go
+index 89f11a4..0b3eabc 100644
+--- a/internal/pricing/test/resolver_test.go
++++ b/internal/pricing/test/resolver_test.go
+@@ -44,6 +44,36 @@ func TestResolverPreservesMissingPriceAvailabilityContract(t *testing.T) {
+ 	}
+ }
+ 
++func TestImageGenerationPricingRejectsAmbiguousModality(t *testing.T) {
++	resolver := compileResolver(t, pricing.ModelConfig{Pricing: entities.ModelPriceSetting{
++		Model: "gpt-image-2", PricingStyle: entities.ModelPricingStyleOpenAIImageGeneration,
++		PromptPricePer1M: 5, CompletionPricePer1M: 30,
++	}})
++	if !resolver.ActiveFields().Has(pricing.RuleFieldEndpoint) {
++		t.Fatal("image pricing must preserve endpoint groups in reports")
++	}
++	for _, tc := range []struct {
++		endpoint  string
++		cache     int64
++		available bool
++	}{
++		{"/v1/images/generations", 0, true},
++		{"/v1/images/edits", 0, false},
++		{"/v1/responses", 0, false},
++		{"", 0, false},
++		{"/v1/images/generations", 1, false},
++	} {
++		result := resolver.Calculate(pricing.NewCostSubject(pricing.UsageDimensions{Model: "gpt-image-2", Endpoint: tc.endpoint}, helper.UsageTokenCostInput{InputTokens: 24, OutputTokens: 915, CacheReadTokens: tc.cache}))
++		want := 0.0
++		if tc.available {
++			want = 0.02757
++		}
++		if result.Available != tc.available || math.Abs(result.Cost.TotalCostUSD-want) > 1e-12 {
++			t.Fatalf("endpoint=%q cache=%d: got %+v, want available=%v cost=%v", tc.endpoint, tc.cache, result, tc.available, want)
++		}
++	}
++}
++
+ func TestResolverWithoutRulesMatchesLegacyHelperForEveryTokenSegmentAndModelMultiplier(t *testing.T) {
+ 	t.Parallel()
+ 
 diff --git a/internal/repository/account_performance.go b/internal/repository/account_performance.go
 index 2f46711..2e7bc6a 100644
 --- a/internal/repository/account_performance.go
@@ -28,6 +124,188 @@ index 2f46711..2e7bc6a 100644
  	}
  	if !oneOf(q.Metric, "latency", "ttft", "tps", "phase") {
  		return fmt.Errorf("invalid metric")
+diff --git a/internal/repository/pricing.go b/internal/repository/pricing.go
+index 1b81373..7266c7c 100644
+--- a/internal/repository/pricing.go
++++ b/internal/repository/pricing.go
+@@ -132,8 +132,10 @@ func normalizeModelPricingStyle(style string) (string, error) {
+ 		return entities.ModelPricingStyleOpenAI, nil
+ 	case entities.ModelPricingStyleClaude:
+ 		return entities.ModelPricingStyleClaude, nil
++	case entities.ModelPricingStyleOpenAIImageGeneration:
++		return entities.ModelPricingStyleOpenAIImageGeneration, nil
+ 	default:
+-		return "", fmt.Errorf("pricing_style must be openai or claude")
++		return "", fmt.Errorf("pricing_style must be openai, claude or openai_image_generation")
+ 	}
+ }
+ 
+diff --git a/internal/repository/test/weekly_quota_value_test.go b/internal/repository/test/weekly_quota_value_test.go
+index 02d07c9..c966ea6 100644
+--- a/internal/repository/test/weekly_quota_value_test.go
++++ b/internal/repository/test/weekly_quota_value_test.go
+@@ -6,11 +6,64 @@ import (
+ 	"cpa-usage-keeper/internal/pricing"
+ 	"cpa-usage-keeper/internal/repository"
+ 	dto "cpa-usage-keeper/internal/repository/dto"
++	"math"
+ 	"reflect"
+ 	"testing"
+ 	"time"
+ )
+ 
++func TestWeeklyImageGenerationValueRemainsCorrectWithUnpricedEditsAndArchive(t *testing.T) {
++	db := openTestDatabase(t)
++	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
++	seedCodexQuotaEfficiencyRoleCycle(t, db, "images-account", entities.CodexQuotaWindowRolePrimary, now.Add(-24*time.Hour), now.Add(6*24*time.Hour), []codexQuotaEfficiencySegmentSeed{
++		{remaining: 90, first: now.Add(-30 * time.Minute), last: now.Add(-30 * time.Minute)},
++		{remaining: 89, first: now.Add(-10 * time.Minute), last: now.Add(-10 * time.Minute)},
++	})
++	_, err := repository.UpsertModelPriceSetting(db, dto.ModelPriceSettingInput{Model: "gpt-image-2", PricingStyle: entities.ModelPricingStyleOpenAIImageGeneration, PromptPricePer1M: 5, CompletionPricePer1M: 30})
++	if err != nil {
++		t.Fatal(err)
++	}
++	resolver := newUsageCostResolverForTest(t, db)
++	generation := usageEventForQuotaEfficiency("image-generation", "oauth", "images-account", now.Add(-20*time.Minute), 24)
++	generation.Model = "gpt-image-2"
++	generation.Endpoint = "/v1/images/generations"
++	generation.OutputTokens = 915
++	generation.TotalTokens = 939
++	seedCodexQuotaEfficiencyUsage(t, db, generation)
++	query := dto.CodexQuotaEfficiencyQuery{AuthIndex: "images-account", Now: now, RangeStart: now.Add(-7 * 24 * time.Hour), WeeklyOnly: true}
++	complete, err := repository.BuildCodexQuotaEfficiencyHistory(context.Background(), db, query, resolver)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(complete.Cycles) != 1 || !complete.Cycles[0].Usage.CostAvailable || math.Abs(complete.Cycles[0].Usage.TotalCostUSD-0.02757) > 1e-12 {
++		t.Fatalf("wrong generation cost: %+v", complete)
++	}
++	edit := generation
++	edit.EventKey = "image-edit"
++	edit.Endpoint = "/v1/images/edits"
++	seedCodexQuotaEfficiencyUsage(t, db, edit)
++	partial, err := repository.BuildCodexQuotaEfficiencyHistory(context.Background(), db, query, resolver)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if partial.Cycles[0].Usage.CostAvailable || math.Abs(partial.Cycles[0].Usage.TotalCostUSD-0.02757) > 1e-12 || partial.Cycles[0].Usage.Requests != 2 {
++		t.Fatalf("ambiguous edit hid known generation cost or was priced: %+v", partial.Cycles[0])
++	}
++	if err := db.Exec("INSERT INTO usage_events_archive (" + entities.UsageEventStorageColumns + ") SELECT " + entities.UsageEventStorageColumns + " FROM usage_events").Error; err != nil {
++		t.Fatal(err)
++	}
++	if err := db.Exec("DELETE FROM usage_events").Error; err != nil {
++		t.Fatal(err)
++	}
++	archived, err := repository.BuildCodexQuotaEfficiencyHistory(context.Background(), db, query, resolver)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !reflect.DeepEqual(partial, archived) {
++		t.Fatal("image pricing changed after archive")
++	}
++}
++
+ func TestWeeklyQuotaValueArchiveModeAndWindowIsolation(t *testing.T) {
+ 	db := openTestDatabase(t)
+ 	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+diff --git a/internal/service/pricing_service.go b/internal/service/pricing_service.go
+index 908a878..490e118 100644
+--- a/internal/service/pricing_service.go
++++ b/internal/service/pricing_service.go
+@@ -128,8 +128,8 @@ func normalizePricingInput(input servicedto.UpdatePricingInput) (repodto.ModelPr
+ 	if pricingStyle == "" {
+ 		pricingStyle = entities.ModelPricingStyleOpenAI
+ 	}
+-	if pricingStyle != entities.ModelPricingStyleOpenAI && pricingStyle != entities.ModelPricingStyleClaude {
+-		return repodto.ModelPriceSettingInput{}, fmt.Errorf("%w: pricing_style must be openai or claude", ErrInvalidPricingInput)
++	if pricingStyle != entities.ModelPricingStyleOpenAI && pricingStyle != entities.ModelPricingStyleClaude && pricingStyle != entities.ModelPricingStyleOpenAIImageGeneration {
++		return repodto.ModelPriceSettingInput{}, fmt.Errorf("%w: pricing_style must be openai, claude or openai_image_generation", ErrInvalidPricingInput)
+ 	}
+ 	if input.PromptPricePer1M < 0 || input.CompletionPricePer1M < 0 || input.CacheReadPricePer1M < 0 || input.CacheWritePricePer1M < 0 {
+ 		return repodto.ModelPriceSettingInput{}, fmt.Errorf("%w: prices must be non-negative", ErrInvalidPricingInput)
+diff --git a/internal/service/test/pricing_service_test.go b/internal/service/test/pricing_service_test.go
+index 6e743e8..e5ccc45 100644
+--- a/internal/service/test/pricing_service_test.go
++++ b/internal/service/test/pricing_service_test.go
+@@ -79,6 +79,19 @@ func TestPricingServicePreservesOpenAICacheReadAndWritePrices(t *testing.T) {
+ 	}
+ }
+ 
++func TestPricingServiceAcceptsGuardedImageGenerationPrice(t *testing.T) {
++	db := openUsageServiceTestDatabase(t)
++	provider := service.NewPricingService(db, emptyPricingCatalogForTest())
++	_, err := provider.UpdatePricing(context.Background(), servicedto.UpdatePricingInput{Model: "gpt-image-2", PricingStyle: entities.ModelPricingStyleOpenAIImageGeneration, PromptPricePer1M: 5, CompletionPricePer1M: 30})
++	if err != nil {
++		t.Fatal(err)
++	}
++	stored, err := repository.ListModelPriceSettings(db)
++	if err != nil || len(stored) != 1 || stored[0].PricingStyle != entities.ModelPricingStyleOpenAIImageGeneration {
++		t.Fatalf("image style lost: %+v, %v", stored, err)
++	}
++}
++
+ func TestPricingServiceDefaultsAndPreservesPriceMultiplier(t *testing.T) {
+ 	for _, tc := range []struct {
+ 		name  string
+diff --git a/web/src/components/usage/PriceSettingsCard.tsx b/web/src/components/usage/PriceSettingsCard.tsx
+index 084a507..3a648bc 100644
+--- a/web/src/components/usage/PriceSettingsCard.tsx
++++ b/web/src/components/usage/PriceSettingsCard.tsx
+@@ -270,7 +270,7 @@ export function PriceSettingsCard({
+                     <Select
+                       value={pricingStyle}
+                       options={styleOptions}
+-                      onChange={(value) => setPricingStyle(value === 'claude' ? 'claude' : 'openai')}
++                      onChange={(value) => setPricingStyle(value === 'openai_image_generation' ? value : value === 'claude' ? 'claude' : 'openai')}
+                       disabled={priceSaving}
+                       className={styles.usagePillControl}
+                     />
+@@ -342,6 +342,7 @@ export function PriceSettingsCard({
+                 </div>
+               </div>
+ 
++              {pricingStyle === 'openai_image_generation' && <p className={styles.hint}>Input is text tokens; output is image tokens. Prices apply only to text-to-image generation. Edits, uncaptured endpoints and unsupported cache usage remain unpriced.</p>}
+               <div className={styles.pricesList}>
+                 <h4 className={styles.pricesTitle}>{t('usage_stats.saved_prices')}</h4>
+                 {sortedModelPrices.length > 0 ? (
+@@ -352,7 +353,7 @@ export function PriceSettingsCard({
+                           <span className={styles.priceModel}>{formatDisplayName(model)}</span>
+                           <div className={styles.priceMeta}>
+                             <span>
+-                              {t('usage_stats.model_price_style')}: {t(price.style === 'claude' ? 'usage_stats.model_price_style_claude' : 'usage_stats.model_price_style_openai')}
++                              {t('usage_stats.model_price_style')}: {price.style === 'openai_image_generation' ? 'OpenAI text-to-image generation (edits unpriced)' : t(price.style === 'claude' ? 'usage_stats.model_price_style_claude' : 'usage_stats.model_price_style_openai')}
+                             </span>
+                             <span>
+                               {t('usage_stats.model_price_prompt')}: ${price.prompt.toFixed(4)}/1M
+@@ -422,12 +423,13 @@ export function PriceSettingsCard({
+         width={420}
+       >
+         <div className={styles.editModalBody}>
++          {editStyle === 'openai_image_generation' && <p className={styles.hint}>Input is text tokens; output is image tokens. Edits, uncaptured endpoints and unsupported cache usage remain unpriced.</p>}
+           <div className={styles.formField}>
+             <label>{t('usage_stats.model_price_style')}</label>
+             <Select
+               value={editStyle}
+               options={styleOptions}
+-              onChange={(value) => setEditStyle(value === 'claude' ? 'claude' : 'openai')}
++              onChange={(value) => setEditStyle(value === 'openai_image_generation' ? value : value === 'claude' ? 'claude' : 'openai')}
+               disabled={editSaving}
+               className={styles.usagePillControl}
+             />
+diff --git a/web/src/components/usage/RequestEventsDetailsCard.tsx b/web/src/components/usage/RequestEventsDetailsCard.tsx
+index 7054f41..ede4d2c 100644
+--- a/web/src/components/usage/RequestEventsDetailsCard.tsx
++++ b/web/src/components/usage/RequestEventsDetailsCard.tsx
+@@ -716,7 +716,7 @@ export function RequestEventsDetailsCard({
+         ? t('usage_stats.credentials_detail_pricing_style_claude')
+         : event.pricing_style === 'openai'
+           ? t('usage_stats.credentials_detail_pricing_style_openai')
+-          : '-';
++          : event.pricing_style === 'openai_image_generation' ? 'OpenAI text-to-image generation' : '-';
+ 
+       return {
+         event,
 diff --git a/web/src/components/usage/credentials/AnalyticsModelPicker.tsx b/web/src/components/usage/credentials/AnalyticsModelPicker.tsx
 new file mode 100644
 index 0000000..328f762
@@ -100,6 +378,19 @@ index 8fcedd8..34b78fa 100644
              <button
                ref={requestsTabRef}
                id={requestsTabId}
+diff --git a/web/src/components/usage/credentials/CredentialRequestEventsList.tsx b/web/src/components/usage/credentials/CredentialRequestEventsList.tsx
+index a1414ee..819f4fe 100644
+--- a/web/src/components/usage/credentials/CredentialRequestEventsList.tsx
++++ b/web/src/components/usage/credentials/CredentialRequestEventsList.tsx
+@@ -465,7 +465,7 @@ const buildRow = (
+     ? t('usage_stats.credentials_detail_pricing_style_claude')
+     : event.pricing_style === 'openai'
+       ? t('usage_stats.credentials_detail_pricing_style_openai')
+-      : '-'
++      : event.pricing_style === 'openai_image_generation' ? 'OpenAI text-to-image generation' : '-'
+   const timestampLabels = formatTimestamp(timestamp)
+ 
+   return {
 diff --git a/web/src/components/usage/credentials/PerformancePanel.tsx b/web/src/components/usage/credentials/PerformancePanel.tsx
 index ed693f4..510ccad 100644
 --- a/web/src/components/usage/credentials/PerformancePanel.tsx
@@ -635,6 +926,53 @@ index 418b610..30df422 100644
 +  return { points, intervals: intervals.length, cost, costAvailable: priced,
 +    costPerPoint: points > 0 && Number.isFinite(cost) && (priced || cost > 0) ? cost / points : null }
  }
+diff --git a/web/src/components/usage/hooks/usePricingData.ts b/web/src/components/usage/hooks/usePricingData.ts
+index 01f33c5..5f43bd9 100644
+--- a/web/src/components/usage/hooks/usePricingData.ts
++++ b/web/src/components/usage/hooks/usePricingData.ts
+@@ -24,7 +24,7 @@ export interface UsePricingDataReturn {
+ }
+ 
+ const normalizePricingStyle = (style: PricingStyle | string | undefined): PricingStyle =>
+-  style === 'claude' ? 'claude' : 'openai';
++  style === 'openai_image_generation' ? style : style === 'claude' ? 'claude' : 'openai';
+ 
+ export const pricingToModelPrice = (entry: PricingEntry): ModelPrice => ({
+   style: normalizePricingStyle(entry.pricing_style),
+diff --git a/web/src/components/usage/pricing/PriceSyncPanel.tsx b/web/src/components/usage/pricing/PriceSyncPanel.tsx
+index 5fb1ae8..d4bdbfa 100644
+--- a/web/src/components/usage/pricing/PriceSyncPanel.tsx
++++ b/web/src/components/usage/pricing/PriceSyncPanel.tsx
+@@ -251,7 +251,7 @@ export function PriceSyncPanel({ modelPrices, onSyncPreview, onSyncPricesChange,
+                             <Select
+                               value={draft.style}
+                               options={styleOptions}
+-                              onChange={(value) => handleUpdateSyncDraft(index, { style: value === 'claude' ? 'claude' : 'openai' })}
++                              onChange={(value) => handleUpdateSyncDraft(index, { style: value === 'openai_image_generation' ? value : value === 'claude' ? 'claude' : 'openai' })}
+                               disabled={syncApplying}
+                               className={styles.usagePillControl}
+                             />
+diff --git a/web/src/components/usage/pricing/pricingDrafts.ts b/web/src/components/usage/pricing/pricingDrafts.ts
+index b3e956c..34f9707 100644
+--- a/web/src/components/usage/pricing/pricingDrafts.ts
++++ b/web/src/components/usage/pricing/pricingDrafts.ts
+@@ -30,6 +30,7 @@ export const formatDisplayName = (value: string): string => {
+ export const pricingStyleOptions = (t: (key: string) => string): SelectOption[] => [
+   { value: 'openai', label: t('usage_stats.model_price_style_openai') },
+   { value: 'claude', label: t('usage_stats.model_price_style_claude') },
++  { value: 'openai_image_generation', label: 'OpenAI text-to-image generation' },
+ ];
+ 
+ export interface PricingSyncDraft {
+@@ -78,7 +79,7 @@ export const priceToInputValue = (value: number | undefined): string => (
+ );
+ 
+ const normalizePricingStyle = (style: PricingStyle | string | undefined): PricingStyle => (
+-  style === 'claude' ? 'claude' : 'openai'
++  style === 'openai_image_generation' ? style : style === 'claude' ? 'claude' : 'openai'
+ );
+ 
+ export const syncMatchToDraft = (match: PricingSyncMatch, existingPrice?: ModelPrice): PricingSyncDraft => ({
 diff --git a/web/src/components/usage/test/PerformancePanel.test.tsx b/web/src/components/usage/test/PerformancePanel.test.tsx
 index bd7e1f2..31f0fd6 100644
 --- a/web/src/components/usage/test/PerformancePanel.test.tsx
@@ -697,6 +1035,18 @@ index bd7e1f2..31f0fd6 100644
 +  await change('Response speed over time', 'phase')
 +  expect(mocks.fetch.mock.lastCall?.[1].metric).toBe('phase')
 +})
+diff --git a/web/src/components/usage/test/PriceSettingsCard.test.tsx b/web/src/components/usage/test/PriceSettingsCard.test.tsx
+index ff98163..c204fc8 100644
+--- a/web/src/components/usage/test/PriceSettingsCard.test.tsx
++++ b/web/src/components/usage/test/PriceSettingsCard.test.tsx
+@@ -30,6 +30,7 @@ describe('PriceSettingsCard', () => {
+   it.each([
+     { model: 'claude-sonnet', style: 'claude' as const, cacheRead: 0.3, cacheWrite: 3.75, label: 'Claude' },
+     { model: 'gpt-5.6-terra', style: 'openai' as const, cacheRead: 0.25, cacheWrite: 3.125, label: 'OpenAI' },
++    { model: 'gpt-image-2', style: 'openai_image_generation' as const, cacheRead: 0, cacheWrite: 0, label: 'OpenAI text-to-image generation (edits unpriced)' },
+   ])('renders $style cache read and write prices', ({ model, style, cacheRead, cacheWrite, label }) => {
+     const html = renderToStaticMarkup(
+       <PriceSettingsCard
 diff --git a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
 index 5a32ffc..066f990 100644
 --- a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
@@ -875,7 +1225,7 @@ index 162f954..f9061ac 100644
 + expect(buildWeeklyTrendChartData(points,'phase',[],'normal',mode=>mode,'en').datasets).toEqual([])
  })
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
-index 0a97dc3..616015c 100644
+index 0a97dc3..214a6eb 100644
 --- a/web/src/lib/types.ts
 +++ b/web/src/lib/types.ts
 @@ -598,6 +598,7 @@ export interface CodexQuotaHistoryWindow {
@@ -886,3 +1236,12 @@ index 0a97dc3..616015c 100644
    requests: number
    successful_requests: number
    failed_requests: number
+@@ -874,7 +875,7 @@ export interface CpaApiKeyOptionsResponse {
+   options: CpaApiKeyOption[]
+ }
+ 
+-export type PricingStyle = 'openai' | 'claude'
++export type PricingStyle = 'openai' | 'claude' | 'openai_image_generation'
+ 
+ export interface ModelPrice {
+ 	style: PricingStyle

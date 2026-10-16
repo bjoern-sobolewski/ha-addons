@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.33
+
+- Add text-to-image generation pricing using text input and image output rates. Keep image edits, unknown endpoints and unsupported cache usage unpriced when modality details are missing.
+- Preserve endpoint separation in reports and archived weekly values so unsupported image requests cannot be priced as text-only generations.
+
 ## 0.1.32
 
 - Keep priced weekly API value and value per percentage point visible as explicit lower bounds when other usage lacks pricing, and identify affected models.

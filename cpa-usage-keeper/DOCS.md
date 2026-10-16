@@ -199,3 +199,18 @@ reasoning. End-to-end TPS includes all request time. Approximate phase TPS is
 output / (request time − recorded first-token time), limited to streaming
 requests with at least 32 output tokens and 250 ms after first token. It is
 not measured visible-text decode throughput. Missing timings are not reconstructed.
+
+### Text-to-image pricing
+
+For GPT Image 2, choose **OpenAI text-to-image generation** in Model Pricing
+Settings. Input is text tokens and output is image tokens. Configure rates from
+the provider's Standard pricing table; no price is enabled automatically.
+This style prices only `/v1/images/generations`. Image edits, unknown endpoints
+and unsupported cached-token usage stay unavailable because the retained token
+counts do not distinguish text and image input. Reports preserve endpoint
+groups, including archived weekly history, and retain known generation value
+as a lower bound when other image usage cannot be priced.
+
+Internal model labels without a verified API rate, such as `codex-auto-review`,
+must remain unpriced unless an explicit valuation policy is configured. A free
+subscription feature alone does not establish its API-equivalent token price.

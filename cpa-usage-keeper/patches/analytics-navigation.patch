@@ -353,6 +353,35 @@ index 0000000..328f762
 +    </div>
 +  </details>
 +}
+diff --git a/web/src/components/usage/credentials/CodexQuotaHistoryPanel.tsx b/web/src/components/usage/credentials/CodexQuotaHistoryPanel.tsx
+index 7f9cde4..5615bbd 100644
+--- a/web/src/components/usage/credentials/CodexQuotaHistoryPanel.tsx
++++ b/web/src/components/usage/credentials/CodexQuotaHistoryPanel.tsx
+@@ -16,6 +16,7 @@ import { useThemeStore } from '@/stores'
+ import { formatCompactNumber, formatUsd } from '@/utils/usage'
+ import { buildUsageChartTooltipStyle, getUsageChartTheme, toUsageChartGradientFill, USAGE_CHART_REQUESTS_LINE_COLOR, type UsageChartGradientColor } from '@/utils/usage/chartConfig'
+ import { quotaRemainingStatus } from './credentialViewModels'
++import { formatWeeklyDateTime } from './weeklyDateTime'
+ import styles from './CodexQuotaHistoryPanel.module.scss'
+ 
+ type QuotaEfficiencyChartType = 'bar' | 'line'
+@@ -162,7 +163,7 @@ export function CodexQuotaHistoryPanel({ authIndex, onAuthRequired, weeklyOnly =
+     setDeleteError('')
+   }
+ 
+-  const locale = i18n?.resolvedLanguage || i18n?.language
++  const locale = weeklyOnly ? undefined : i18n?.resolvedLanguage || i18n?.language
+   // 当前周期身份完全由后端 status 决定；前端不使用浏览器时间重算周期状态。
+   const currentCycle = history?.cycles.find((cycle) => cycle.status === 'current') ?? null
+   const cycleSummaries = useMemo(() => new Map(
+@@ -949,6 +950,7 @@ function formatWindowDuration(seconds: number): string {
+ }
+ 
+ function formatDateTime(value: string, locale?: string): string {
++  if (!locale) return formatWeeklyDateTime(value)
+   const date = new Date(value)
+   if (!Number.isFinite(date.getTime())) return value || '—'
+   // API 时间已经使用项目 TZ；把原墙上时间映射到 UTC 仅供 Intl 本地化排版，避免浏览器再次换区。
 diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
 index 8fcedd8..34b78fa 100644
 --- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
@@ -676,19 +705,27 @@ index e153098..8c5eeef 100644
 +.modelOptions { max-height: 260px; overflow-y: auto; }
 +.modelOptions .modelOption { display: flex; flex-direction: row; align-items: center; gap: 8px; padding: 8px 4px; cursor: pointer; color: var(--text-primary); small { margin-left: auto; color: var(--text-secondary); } input { margin: 0; } }
 diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
-index 551262b..9411846 100644
+index 551262b..6767a4d 100644
 --- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
 +++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
-@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/Button'
+@@ -6,7 +6,8 @@ import { Button } from '@/components/ui/Button'
  import { CodexQuotaHistoryPanel } from './CodexQuotaHistoryPanel'
  import { WeeklyTrendCharts } from './WeeklyTrendCharts'
  import { weeklyCycleRows } from './weeklyCycleRows'
 -import { weeklyCycleValue } from './weeklyCycleValue'
 +import { weeklyCycleValue, unpricedWeeklyModels } from './weeklyCycleValue'
++import { formatWeeklyDateTime as date } from './weeklyDateTime'
  import styles from './WeeklyQuotaValuePanel.module.scss'
  
  export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequired }: {
-@@ -40,6 +40,8 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+@@ -34,12 +35,14 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+     return () => controller.abort()
+   }, [authIndex, readOnlyAccountId, role, requestKey, onAuthRequired])
+   const money = (value: number | null | undefined) => value == null ? '—' : new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value)
+-  const date = (value: string | null | undefined) => value ? new Date(value).toLocaleString(i18n.language) : '—'
++  const percent = (value: number | null) => value == null || !Number.isFinite(value) ? '—' : `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value)} %`
+   const report = history?.weekly_value
+   const cycleRows = history ? weeklyCycleRows(history) : []
    const cycleViewKey = JSON.stringify([authIndex, readOnlyAccountId, role])
    const showAllCycles = expandedCyclesFor === cycleViewKey
    const visibleCycles = showAllCycles ? cycleRows : cycleRows.slice(0, 5)
@@ -697,14 +734,15 @@ index 551262b..9411846 100644
    const modeName = (mode: string) => mode === 'fast' ? t('weekly_quota.fast', 'Fast requested') : mode === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
    return <div className={styles.panel} data-weekly-quota-value="true">
      <div className={styles.toolbar}>
-@@ -56,11 +58,17 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+@@ -56,14 +59,19 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
        </select>
      </label>}
      {history && !history.cycles.length && <p>{t('weekly_quota.empty', 'No weekly quota observations yet. History will appear after weekly quota is captured.')}</p>}
 +      {report?.timeline && <WeeklyTrendCharts key={cycleViewKey} points={report.timeline} />}
      {!!history?.cycles.length && <>
        <h4>{t('weekly_quota.cycle_value_title', 'Weekly cycle value per percentage point')}</h4>
-       <p className={styles.note}>{t('weekly_quota.cycle_rate_note', 'API value / 1% is the recorded value between observed quota drops divided by the percentage points consumed in those same intervals, averaged across all models and modes. Total API value includes all cycle requests, including archived requests and usage outside observed drops. Remaining is the last observed value; a passed reset time alone does not confirm a rollover.')}</p>
+-      <p className={styles.note}>{t('weekly_quota.cycle_rate_note', 'API value / 1% is the recorded value between observed quota drops divided by the percentage points consumed in those same intervals, averaged across all models and modes. Total API value includes all cycle requests, including archived requests and usage outside observed drops. Remaining is the last observed value; a passed reset time alone does not confirm a rollover.')}</p>
++      <p className={styles.note}>{t('weekly_quota.compact_cycle_rate_note', 'The value column shows API value per observed 1%, total API value, then quota used in the window at the last observation. Total value includes all cycle requests, including archived requests and usage outside observed drops. Observed quota used counts only recorded drops. Remaining is the last observed value; a passed reset time alone does not confirm a rollover.')}</p>
 +      {cycleRows.some(({ cycle }) => !cycle.usage.cost_available) && <p className={styles.note} role="note">
 +        {t('weekly_quota.partial_pricing_note', '≥ marks a lower bound from the priced portion only. Unpriced usage is excluded from dollars, but all observed quota drops stay in the rate denominator. Missing prices or token details must be supplied before the full value can be calculated.')}
 +        {unpricedModels.length > 0 && <> {t('weekly_quota.affected_models', 'Affected models: {{models}}.', { models: unpricedModels.join(', ') })}</>}
@@ -714,26 +752,30 @@ index 551262b..9411846 100644
 +          <th>{t('analytics.remaining_at_reset', 'Remaining at reset / latest')}</th>
            <th>{t('weekly_quota.cycle_rate', 'API value / 1%')}</th>
            <th>{t('weekly_quota.observed_used', 'Observed quota used')}</th>
-           <th>{t('weekly_quota.total_value', 'Total API value')}</th>
+-          <th>{t('weekly_quota.total_value', 'Total API value')}</th>
+           <th>{t('weekly_quota.reset', 'Reset / rollover')}</th>
+           <th>{t('weekly_quota.coverage', 'Observation coverage')}</th>
+         </tr></thead>
 @@ -72,13 +80,17 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
            const shortened = cycle.effective_ended_at !== cycle.reset_at
            const value = weeklyCycleValue(cycle)
            return <tr key={cycle.id}>
 -            <td><strong className={styles.cycleRate}>{value.costPerPoint != null ? money(value.costPerPoint) : value.points > 0 ? t('weekly_quota.unpriced', 'Pricing incomplete') : t('weekly_quota.no_drop', 'No observed drop')}</strong>
 -              {value.costPerPoint != null && <small>{t('weekly_quota.sampled_value', '{{value}} in observed drops', { value: money(value.cost) })}</small>}</td>
-+            <td><strong>{cycle.last_remaining_percent == null ? '—' : `${cycle.last_remaining_percent}%`}</strong><small>{date(cycle.last_observed_at)}</small></td>
-+            <td><strong className={styles.cycleRate}>{value.costPerPoint != null ? partialValue(value.costPerPoint, value.costAvailable) : value.points > 0 ? '—' : t('weekly_quota.no_drop', 'No observed drop')}</strong>
-+              {value.costPerPoint != null && <small>{t('weekly_quota.sampled_value', '{{value}} in observed drops', { value: partialValue(value.cost, value.costAvailable) })}</small>}
-+              {!value.costAvailable && <small>{t('weekly_quota.priced_portion', 'Priced portion only')}</small>}</td>
-+
-             <td><strong>{value.points} {t('weekly_quota.points', 'percentage points')}</strong><small>{value.intervals} {t('weekly_quota.intervals', 'intervals')}</small></td>
+-            <td><strong>{value.points} {t('weekly_quota.points', 'percentage points')}</strong><small>{value.intervals} {t('weekly_quota.intervals', 'intervals')}</small></td>
 -            <td><strong>{cycle.usage.cost_available ? money(cycle.usage.total_cost_usd) : t('weekly_quota.unpriced', 'Pricing incomplete')}</strong><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small></td>
-+            <td><strong>{partialValue(cycle.usage.total_cost_usd, cycle.usage.cost_available)}</strong><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small>
-+              {!cycle.usage.cost_available && <small>{t('weekly_quota.priced_portion', 'Priced portion only')}{unpricedWeeklyModels(cycle.usage).length > 0 && <> · {t('weekly_quota.unpriced_models', 'Unpriced: {{models}}', { models: unpricedWeeklyModels(cycle.usage).join(', ') })}</>}</small>}</td>
++            <td><strong>{percent(cycle.last_remaining_percent)}</strong><small>{date(cycle.last_observed_at)}</small></td>
++            <td><strong className={styles.cycleRate}>{value.costPerPoint != null ? partialValue(value.costPerPoint, value.costAvailable) : '—'}</strong>
++              <small aria-label={t('weekly_quota.total_value', 'Total API value')}>{partialValue(cycle.usage.total_cost_usd, cycle.usage.cost_available)}</small>
++              <small aria-label={t('weekly_quota.window_used', 'Used in window (last observed)')}>{percent(cycle.last_remaining_percent == null ? null : 100 - cycle.last_remaining_percent)}</small></td>
++            <td><strong>{percent(value.points)}</strong><small>{value.intervals} {t('weekly_quota.intervals', 'intervals')}</small><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small></td>
              <td><strong>{date(shortened && !current ? cycle.effective_ended_at : cycle.reset_at)}</strong><small>{current ? t('weekly_quota.scheduled', 'Scheduled') : reset?.rollover_observed_at ? t('weekly_quota.observed', 'Rollover observed') : shortened ? t('weekly_quota.changed', 'Window changed') : t('weekly_quota.unconfirmed', 'Awaiting rollover observation')}</small>
                {reset?.rollover_observed_at && <small>{date(reset.rollover_observed_at)}</small>}</td>
 -            <td><small><strong>{t('weekly_quota.remaining', 'Last remaining')}: {cycle.last_remaining_percent == null ? '—' : `${cycle.last_remaining_percent}%`}</strong></small><small>{date(cycle.last_observed_at)}</small>
 +            <td>
++              {value.costPerPoint != null && <small>{t('weekly_quota.sampled_value', '{{value}} in observed drops', { value: partialValue(value.cost, value.costAvailable) })}</small>}
++              {value.points === 0 && <small>{t('weekly_quota.no_drop', 'No observed drop')}</small>}
++              {(!value.costAvailable || !cycle.usage.cost_available) && <small>{t('weekly_quota.priced_portion', 'Priced portion only')}{unpricedWeeklyModels(cycle.usage).length > 0 && <> · {t('weekly_quota.unpriced_models', 'Unpriced: {{models}}', { models: unpricedWeeklyModels(cycle.usage).join(', ') })}</>}</small>}
                {reset && <small>{t('weekly_quota.age', '{{minutes}} min before {{boundary}}', { minutes: Math.round(reset.last_observation_age_seconds / 60), boundary: current ? t('weekly_quota.report_time', 'report time') : t('weekly_quota.cycle_end', 'cycle end') })}</small>}
                <small>{t('weekly_quota.first', 'First observed')}: {date(cycle.first_observed_at)}</small>
                {combinedUpdates > 0 && <small>{t('weekly_quota.combined', '{{count}} reset-time updates combined while quota stayed at 100%', { count: combinedUpdates })}</small>}
@@ -756,15 +798,16 @@ index 551262b..9411846 100644
            <td>{group.ready ? money(group.cost_per_point) : t('weekly_quota.insufficient', 'Insufficient data')}{group.ready && <small>{t('weekly_quota.observed_range', 'Observed range')}: {money(group.min_cost_per_point)} – {money(group.max_cost_per_point)}</small>}</td>
            <td>{group.ready ? money(group.full_allowance_usd) : '—'}</td>
 diff --git a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
-index e95476c..663c9cc 100644
+index e95476c..42550b6 100644
 --- a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
 +++ b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
-@@ -6,16 +6,18 @@ import '@/lib/chartjs'
+@@ -6,16 +6,19 @@ import '@/lib/chartjs'
  import type { WeeklyTrendPoint } from '@/lib/types'
  import { useThemeStore } from '@/stores'
  import { buildUsageChartTooltipStyle, getUsageChartTheme, USAGE_CHART_COMPOSITION_COLORS } from '@/utils/usage/chartConfig'
 +import { AnalyticsModelPicker } from './AnalyticsModelPicker'
 +import { rankAnalyticsModels, selectedAnalyticsModels, type ModelSelection } from './analyticsModels'
++import { weeklyDateLocale } from './weeklyDateTime'
  import styles from './WeeklyQuotaValuePanel.module.scss'
  
  export type TrendMetric = 'delivered' | 'allowance' | 'speed' | 'phase' | 'ttft'
@@ -772,7 +815,7 @@ index e95476c..663c9cc 100644
  const groupKey = (point: Pick<WeeklyTrendPoint, 'model' | 'mode'>) => JSON.stringify([point.model, point.mode])
  
 -export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: TrendMetric, model: string, mode: string, label: (mode: string) => string, locale: string): ChartData<'line', Array<number | null>, string> {
-+export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: TrendMetric, model: string | string[], mode: string, label: (mode: string) => string, locale: string): ChartData<'line', Array<number | null>, string> {
++export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: TrendMetric, model: string | string[], mode: string, label: (mode: string) => string, locale?: string | string[]): ChartData<'line', Array<number | null>, string> {
    const days = [...new Set(points.map(point => point.day))].sort()
    const models = [...new Set(points.map(point => point.model))].sort()
 -  const selected = points.filter(point => (!model || point.model === model) && (!mode || point.mode === mode))
@@ -780,7 +823,7 @@ index e95476c..663c9cc 100644
    const groups = [...new Map(selected.map(point => [groupKey(point), point])).values()]
    const lookup = new Map(selected.map(point => [JSON.stringify([point.day, point.model, point.mode]), point]))
    return { labels: days.map(day => new Date(day).toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' })), datasets: groups.map(group => ({
-@@ -39,16 +41,14 @@ export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: Tr
+@@ -39,18 +42,16 @@ export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: Tr
  export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
    const { t, i18n } = useTranslation()
    const isDark = useThemeStore(state => state.resolvedTheme) === 'dark'
@@ -799,9 +842,12 @@ index e95476c..663c9cc 100644
 -  const selected = points.filter(point => (!model || model === point.model) && (!mode || mode === point.mode))
 +  const selected = points.filter(point => model.includes(point.model) && (!mode || mode === point.mode))
    const renderChart = (metric: TrendMetric, title: string, unit: string) => {
-     const data = buildWeeklyTrendChartData(points, metric, model, mode, modeLabel, i18n.language)
+-    const data = buildWeeklyTrendChartData(points, metric, model, mode, modeLabel, i18n.language)
++    const data = buildWeeklyTrendChartData(points, metric, model, mode, modeLabel, weeklyDateLocale())
      const hasData = data.datasets.some(dataset => dataset.data.some(value => value != null))
-@@ -78,15 +78,11 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
+     const options: ChartOptions<'line'> = {
+       responsive: true, maintainAspectRatio: false, animation: false,
+@@ -78,15 +79,11 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
      return hasData ? <div className={styles.chart} data-weekly-trend={metric}><Chart type="line" data={data} options={options} role="img" aria-label={title} /></div>
        : <p role="status" className={styles.note}>{metric === 'allowance' ? t('weekly_trends.no_estimates', 'Not enough qualifying quota samples for this selection yet.') : metric === 'delivered' ? t('weekly_trends.no_value', 'No fully priced recorded values for this selection yet.') : t('weekly_trends.no_speed', 'Not enough valid timing samples for this selection yet.')}</p>
    }
@@ -820,7 +866,7 @@ index e95476c..663c9cc 100644
      </div>
      <p className={styles.note}>{t('weekly_trends.days', 'Daily UTC buckets across the reporting period; today is partial. Each line is one model and requested mode. Solid: Normal · Dashed: Fast requested · Dotted: Mode not captured.')}</p>
      <label className={styles.metric}>{t('weekly_trends.value', 'Subscription value over time')} <select aria-label={t('weekly_trends.value_metric', 'Value metric')} value={valueMetric} onChange={event => setValueMetric(event.target.value as TrendMetric)}>
-@@ -95,15 +91,5 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
+@@ -95,15 +92,5 @@ export function WeeklyTrendCharts({ points }: { points: WeeklyTrendPoint[] }) {
      {renderChart(valueMetric, t('weekly_trends.value', 'Subscription value over time'), 'USD')}
      {valueMetric === 'allowance' && <p className={styles.note}>{t('weekly_trends.estimate_note', 'Each estimate uses qualifying samples from the trailing seven UTC days, with the same 5-point, 3-interval and 20-request minimums as the table. Missing estimates are gaps; changes can reflect workload and caching.')}</p>}
      {valueMetric === 'delivered' && selected.some(point => !point.cost_available) && <p className={styles.note}>{t('weekly_trends.missing_prices', 'Days with incomplete pricing are gaps, rather than zero-dollar values.')}</p>}
@@ -932,6 +978,26 @@ index 418b610..30df422 100644
 +  return { points, intervals: intervals.length, cost, costAvailable: priced,
 +    costPerPoint: points > 0 && Number.isFinite(cost) && (priced || cost > 0) ? cost / points : null }
  }
+diff --git a/web/src/components/usage/credentials/weeklyDateTime.ts b/web/src/components/usage/credentials/weeklyDateTime.ts
+new file mode 100644
+index 0000000..9f3e926
+--- /dev/null
++++ b/web/src/components/usage/credentials/weeklyDateTime.ts
+@@ -0,0 +1,14 @@
++// Date preferences follow the browser, independently of the dashboard language.
++export function weeklyDateLocale(): string[] | undefined {
++  if (typeof navigator === 'undefined') return undefined
++  return navigator.languages?.length ? [...navigator.languages] : navigator.language ? [navigator.language] : undefined
++}
++
++export function formatWeeklyDateTime(value: string | null | undefined): string {
++  if (!value) return '—'
++  const date = new Date(value)
++  if (!Number.isFinite(date.getTime())) return value
++  return new Intl.DateTimeFormat(weeklyDateLocale(), {
++    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
++  }).format(date)
++}
 diff --git a/web/src/components/usage/hooks/usePricingData.ts b/web/src/components/usage/hooks/usePricingData.ts
 index 01f33c5..5f43bd9 100644
 --- a/web/src/components/usage/hooks/usePricingData.ts
@@ -1054,9 +1120,25 @@ index ff98163..c204fc8 100644
      const html = renderToStaticMarkup(
        <PriceSettingsCard
 diff --git a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
-index 5a32ffc..066f990 100644
+index 5a32ffc..de569de 100644
 --- a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
 +++ b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
+@@ -29,13 +29,13 @@ beforeEach(async () => {
+   vi.clearAllMocks()
+   element = document.createElement('div'); document.body.append(element); root = createRoot(element)
+ })
+-afterEach(async () => { await act(async () => root.unmount()); element.remove() })
++afterEach(async () => { await act(async () => root.unmount()); element.remove(); vi.restoreAllMocks() })
+ 
+ it('shows observed remaining, unconfirmed rollover and weighted estimates in the read-only report', async () => {
+   api.fetchCodexQuotaHistory.mockResolvedValue(fixture())
+   await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account:opaque" readOnlyAccountId="3" />))
+   expect(api.fetchCodexQuotaHistory).toHaveBeenCalledWith('account:opaque', { weeklyOnly: true, readOnlyAccountId: '3', windowRole: undefined }, expect.any(AbortSignal))
+-  expect(element.textContent).toContain('17%')
++  expect(element.textContent).toContain('17 %')
+   expect(element.textContent).toContain('Awaiting rollover observation')
+   expect(element.textContent).toContain('10 min before cycle end')
+   expect(element.textContent).toContain('$150.00')
 @@ -50,7 +50,8 @@ it('does not display missing prices or sparse estimates as zero or a full allowa
    response.weekly_value!.modes[0] = { ...response.weekly_value!.modes[0], ready: false, cost_per_point: null, full_allowance_usd: null, min_cost_per_point: null, max_cost_per_point: null }
    api.fetchCodexQuotaHistory.mockResolvedValue(response)
@@ -1067,29 +1149,31 @@ index 5a32ffc..066f990 100644
    expect(element.textContent).toContain('Insufficient data')
    expect(element.textContent).not.toContain('$150.00')
  })
-@@ -151,35 +152,82 @@ function observedCycleFixture(): CodexQuotaHistoryResponse {
+@@ -149,37 +150,87 @@ function observedCycleFixture(): CodexQuotaHistoryResponse {
+   return response
+ }
  
- it('leads with weighted value per observed point and keeps total delivered value separate for partial cycles', async () => {
+-it('leads with weighted value per observed point and keeps total delivered value separate for partial cycles', async () => {
++it('stacks observed value, total value and window usage while keeping observed coverage separate', async () => {
    const response = observedCycleFixture()
 -  expect(weeklyCycleValue(response.cycles[0])).toEqual({ points: 4, intervals: 2, cost: 9, costPerPoint: 2.25 })
 +  expect(weeklyCycleValue(response.cycles[0])).toEqual({ points: 4, intervals: 2, cost: 9, costPerPoint: 2.25, costAvailable: true })
    api.fetchCodexQuotaHistory.mockResolvedValue(response)
    await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" readOnlyAccountId="3" />))
 -  expect([...element.querySelectorAll('table:first-of-type th')].slice(0, 5).map(cell => cell.textContent)).toEqual(['API value / 1%', 'Observed quota used', 'Total API value', 'Reset / rollover', 'Observation coverage'])
-+  expect([...element.querySelectorAll('table:first-of-type th')].slice(0, 6).map(cell => cell.textContent)).toEqual(['Remaining at reset / latest', 'API value / 1%', 'Observed quota used', 'Total API value', 'Reset / rollover', 'Observation coverage'])
++  expect([...element.querySelectorAll('table:first-of-type th')].slice(0, 5).map(cell => cell.textContent)).toEqual(['Remaining at reset / latest', 'API value / 1%', 'Observed quota used', 'Reset / rollover', 'Observation coverage'])
    const cells = element.querySelector('table tbody tr')!.querySelectorAll('td')
 -  expect(cells[0].textContent).toContain('$2.25')
 -  expect(cells[0].textContent).toContain('$9.00 in observed drops')
 -  expect(cells[1].textContent).toContain('4 percentage points')
 -  expect(cells[2].textContent).toContain('$12.00')
 -  expect(cells[4].textContent).toContain('Last remaining: 77%')
--  expect(cells[4].textContent).toContain('Observation began after the cycle started')
 +  expect(cells[1].textContent).toContain('$2.25')
-+  expect(cells[1].textContent).toContain('$9.00 in observed drops')
-+  expect(cells[2].textContent).toContain('4 percentage points')
-+  expect(cells[3].textContent).toContain('$12.00')
-+  expect(cells[0].textContent).toContain('77%')
-+  expect(cells[5].textContent).toContain('Observation began after the cycle started')
++  expect([...cells[1].children].map(line => line.textContent)).toEqual(['$2.25', '$12.00', '23 %'])
++  expect([...cells[2].children].map(line => line.textContent)).toEqual(['4 %', '2 intervals', '42 requests'])
++  expect(cells[4].textContent).toContain('$9.00 in observed drops')
++  expect(cells[0].textContent).toContain('77 %')
+   expect(cells[4].textContent).toContain('Observation began after the cycle started')
  })
  
 -it('keeps complete observed rates when total pricing is incomplete, but hides rates with missing interval prices', () => {
@@ -1104,6 +1188,7 @@ index 5a32ffc..066f990 100644
    expect(weeklyCycleValue(cycle).points).toBe(4)
  })
  
+-it('does not infer used quota from last remaining, or treat no observed drops as a zero-dollar rate', async () => {
 +it('shows known dollars and a lower-bound rate over all points, with the affected models', async () => {
 +  const response = observedCycleFixture()
 +  const cycle = response.cycles[0]
@@ -1117,10 +1202,11 @@ index 5a32ffc..066f990 100644
 +  await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" readOnlyAccountId="3" />))
 +  const cells = element.querySelector('table tbody tr')!.querySelectorAll('td')
 +  expect(cells[1].textContent).toContain('≥ $0.75')
-+  expect(cells[1].textContent).toContain('≥ $3.00 in observed drops')
-+  expect(cells[2].textContent).toContain('4 percentage points')
-+  expect(cells[3].textContent).toContain('≥ $12.00')
-+  expect(cells[3].textContent).toContain('Unpriced: codex-auto-review')
++  expect(cells[4].textContent).toContain('≥ $3.00 in observed drops')
++  expect(cells[2].textContent).toContain('4 %')
++  expect(cells[1].textContent).toContain('≥ $12.00')
++  expect(cells[1].textContent).not.toContain('Priced portion only')
++  expect(cells[4].textContent).toContain('Unpriced: codex-auto-review')
 +  expect(element.textContent).toContain('Affected models: codex-auto-review.')
 +  expect(JSON.stringify(response)).toBe(original)
 +})
@@ -1135,7 +1221,7 @@ index 5a32ffc..066f990 100644
 +  await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" />))
 +  const cells = element.querySelector('table tbody tr')!.querySelectorAll('td')
 +  expect(cells[1].querySelector('strong')!.textContent).toBe('—')
-+  expect(cells[3].querySelector('strong')!.textContent).toBe('—')
++  expect(cells[1].querySelector('small')!.textContent).toBe('—')
 +  expect(element.textContent).not.toContain('$0.00')
 +  expect(element.textContent).not.toContain('$150.00')
 +  expect(element.textContent).toContain('Price or token details unavailable')
@@ -1150,18 +1236,36 @@ index 5a32ffc..066f990 100644
 +  expect(row.cycle.usage.cost_available).toBe(false)
 +})
 +
- it('does not infer used quota from last remaining, or treat no observed drops as a zero-dollar rate', async () => {
++it('distinguishes last reported window usage from missing observed drops', async () => {
    const response = fixture()
    expect(weeklyCycleValue(response.cycles[0]).costPerPoint).toBeNull()
    api.fetchCodexQuotaHistory.mockResolvedValue(response)
    await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" />))
 -  expect(element.querySelector('table tbody tr td')!.textContent).toBe('No observed drop')
 -  expect(element.querySelector('table tbody tr td:nth-child(3)')!.textContent).toContain('$12.00')
-+  expect(element.querySelector('table tbody tr td:nth-child(2)')!.textContent).toBe('No observed drop')
-+  expect(element.querySelector('table tbody tr td:nth-child(4)')!.textContent).toContain('$12.00')
++  const cells = element.querySelector('table tbody tr')!.querySelectorAll('td')
++  expect([...cells[1].children].map(line => line.textContent)).toEqual(['—', '$12.00', '83 %'])
++  expect([...cells[2].children].map(line => line.textContent)).toEqual(['0 %', '0 intervals', '42 requests'])
++  expect(cells[4].textContent).toContain('No observed drop')
  })
  
  it('preserves the quota-drop rate through unused reset-time grouping', () => {
+@@ -191,3 +242,15 @@ it('preserves the quota-drop rate through unused reset-time grouping', () => {
+   expect(row.cycle.usage.total_cost_usd).toBe(18.75)
+   expect(weeklyCycleValue(row.cycle).costPerPoint).toBe(2.25)
+ })
++
++it('uses browser date preferences even when the dashboard language is English', async () => {
++  vi.spyOn(window.navigator, 'languages', 'get').mockReturnValue(['de-DE'])
++  api.fetchCodexQuotaHistory.mockResolvedValue(fixture())
++  await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" />))
++  const expected = new Intl.DateTimeFormat('de-DE', {
++    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
++  }).format(new Date(date))
++  expect(element.textContent).toContain('Reporting period: ')
++  expect(element.textContent).toContain(expected)
++  expect(element.querySelector('table tbody tr td:nth-child(4)')!.textContent).toContain(expected)
++})
 diff --git a/web/src/components/usage/test/WeeklyTrendCharts.test.tsx b/web/src/components/usage/test/WeeklyTrendCharts.test.tsx
 index 162f954..f9061ac 100644
 --- a/web/src/components/usage/test/WeeklyTrendCharts.test.tsx

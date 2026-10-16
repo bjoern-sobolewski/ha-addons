@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.35
+
+- Compact weekly cycle values into one column: API value per 1%, total delivered value and last observed window usage. Show observed percentage, intervals and requests together; move explanations into coverage.
+- Format weekly report dates, chart labels and detailed observation times using browser locale preferences independently of the dashboard language.
+
 ## 0.1.34
 
 - Recognize CPA's `POST /v1/images/generations` endpoint format when pricing text-to-image requests, including historical weekly values. Keep edits and unsupported methods unpriced.

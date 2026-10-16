@@ -120,8 +120,14 @@ The weekly cycle table leads with **API value / 1%**: total recorded API cost
 inside observed quota-drop intervals divided by the percentage points consumed
 in those same intervals. This is a blended observed average across models and
 modes, including partial cycles; it does not use remaining quota to guess
-unobserved consumption. The separate **Total API value** column includes all
-recorded cycle requests, so its value can exceed the observed-drop numerator.
+unobserved consumption. The value column stacks this rate, total API value, and
+the window's used percentage at its last observation (100 minus remaining).
+Total value includes all recorded cycle requests, so it can exceed the
+observed-drop numerator. **Observed quota used** separately shows the recorded
+percentage drop, observed intervals and all cycle requests. Explanations and
+pricing warnings appear in **Observation coverage**. Weekly dates and times,
+including detailed observations and chart dates, follow browser locale
+preferences independently of the dashboard language; chart days remain UTC.
 No observed drop leaves the rate unavailable. When some usage cannot be priced,
 the cycle table retains known dollars and the rate as a **≥ lower bound**, with
 all observed percentage points still included in the denominator. Affected

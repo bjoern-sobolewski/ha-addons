@@ -379,10 +379,28 @@ index e153098..8c5eeef 100644
 +.modelOptions { max-height: 260px; overflow-y: auto; }
 +.modelOptions .modelOption { display: flex; flex-direction: row; align-items: center; gap: 8px; padding: 8px 4px; cursor: pointer; color: var(--text-primary); small { margin-left: auto; color: var(--text-secondary); } input { margin: 0; } }
 diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
-index 551262b..7c27cb6 100644
+index 551262b..9411846 100644
 --- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
 +++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
-@@ -56,11 +56,13 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/Button'
+ import { CodexQuotaHistoryPanel } from './CodexQuotaHistoryPanel'
+ import { WeeklyTrendCharts } from './WeeklyTrendCharts'
+ import { weeklyCycleRows } from './weeklyCycleRows'
+-import { weeklyCycleValue } from './weeklyCycleValue'
++import { weeklyCycleValue, unpricedWeeklyModels } from './weeklyCycleValue'
+ import styles from './WeeklyQuotaValuePanel.module.scss'
+ 
+ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequired }: {
+@@ -40,6 +40,8 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+   const cycleViewKey = JSON.stringify([authIndex, readOnlyAccountId, role])
+   const showAllCycles = expandedCyclesFor === cycleViewKey
+   const visibleCycles = showAllCycles ? cycleRows : cycleRows.slice(0, 5)
++  const unpricedModels = [...new Set(cycleRows.flatMap(({ cycle }) => unpricedWeeklyModels(cycle.usage)))].sort()
++  const partialValue = (cost: number, complete: boolean) => complete ? money(cost) : cost > 0 && Number.isFinite(cost) ? `≥ ${money(cost)}` : '—'
+   const modeName = (mode: string) => mode === 'fast' ? t('weekly_quota.fast', 'Fast requested') : mode === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
+   return <div className={styles.panel} data-weekly-quota-value="true">
+     <div className={styles.toolbar}>
+@@ -56,11 +58,17 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
        </select>
      </label>}
      {history && !history.cycles.length && <p>{t('weekly_quota.empty', 'No weekly quota observations yet. History will appear after weekly quota is captured.')}</p>}
@@ -390,22 +408,31 @@ index 551262b..7c27cb6 100644
      {!!history?.cycles.length && <>
        <h4>{t('weekly_quota.cycle_value_title', 'Weekly cycle value per percentage point')}</h4>
        <p className={styles.note}>{t('weekly_quota.cycle_rate_note', 'API value / 1% is the recorded value between observed quota drops divided by the percentage points consumed in those same intervals, averaged across all models and modes. Total API value includes all cycle requests, including archived requests and usage outside observed drops. Remaining is the last observed value; a passed reset time alone does not confirm a rollover.')}</p>
++      {cycleRows.some(({ cycle }) => !cycle.usage.cost_available) && <p className={styles.note} role="note">
++        {t('weekly_quota.partial_pricing_note', '≥ marks a lower bound from the priced portion only. Unpriced usage is excluded from dollars, but all observed quota drops stay in the rate denominator. Missing prices or token details must be supplied before the full value can be calculated.')}
++        {unpricedModels.length > 0 && <> {t('weekly_quota.affected_models', 'Affected models: {{models}}.', { models: unpricedModels.join(', ') })}</>}
++      </p>}
        <div className={styles.scroll}><table className={styles.cyclesTable}>
          <thead><tr>
 +          <th>{t('analytics.remaining_at_reset', 'Remaining at reset / latest')}</th>
            <th>{t('weekly_quota.cycle_rate', 'API value / 1%')}</th>
            <th>{t('weekly_quota.observed_used', 'Observed quota used')}</th>
            <th>{t('weekly_quota.total_value', 'Total API value')}</th>
-@@ -72,13 +74,15 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+@@ -72,13 +80,17 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
            const shortened = cycle.effective_ended_at !== cycle.reset_at
            const value = weeklyCycleValue(cycle)
            return <tr key={cycle.id}>
+-            <td><strong className={styles.cycleRate}>{value.costPerPoint != null ? money(value.costPerPoint) : value.points > 0 ? t('weekly_quota.unpriced', 'Pricing incomplete') : t('weekly_quota.no_drop', 'No observed drop')}</strong>
+-              {value.costPerPoint != null && <small>{t('weekly_quota.sampled_value', '{{value}} in observed drops', { value: money(value.cost) })}</small>}</td>
 +            <td><strong>{cycle.last_remaining_percent == null ? '—' : `${cycle.last_remaining_percent}%`}</strong><small>{date(cycle.last_observed_at)}</small></td>
-             <td><strong className={styles.cycleRate}>{value.costPerPoint != null ? money(value.costPerPoint) : value.points > 0 ? t('weekly_quota.unpriced', 'Pricing incomplete') : t('weekly_quota.no_drop', 'No observed drop')}</strong>
-               {value.costPerPoint != null && <small>{t('weekly_quota.sampled_value', '{{value}} in observed drops', { value: money(value.cost) })}</small>}</td>
++            <td><strong className={styles.cycleRate}>{value.costPerPoint != null ? partialValue(value.costPerPoint, value.costAvailable) : value.points > 0 ? '—' : t('weekly_quota.no_drop', 'No observed drop')}</strong>
++              {value.costPerPoint != null && <small>{t('weekly_quota.sampled_value', '{{value}} in observed drops', { value: partialValue(value.cost, value.costAvailable) })}</small>}
++              {!value.costAvailable && <small>{t('weekly_quota.priced_portion', 'Priced portion only')}</small>}</td>
 +
              <td><strong>{value.points} {t('weekly_quota.points', 'percentage points')}</strong><small>{value.intervals} {t('weekly_quota.intervals', 'intervals')}</small></td>
-             <td><strong>{cycle.usage.cost_available ? money(cycle.usage.total_cost_usd) : t('weekly_quota.unpriced', 'Pricing incomplete')}</strong><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small></td>
+-            <td><strong>{cycle.usage.cost_available ? money(cycle.usage.total_cost_usd) : t('weekly_quota.unpriced', 'Pricing incomplete')}</strong><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small></td>
++            <td><strong>{partialValue(cycle.usage.total_cost_usd, cycle.usage.cost_available)}</strong><small>{cycle.usage.requests} {t('weekly_quota.requests', 'requests')}</small>
++              {!cycle.usage.cost_available && <small>{t('weekly_quota.priced_portion', 'Priced portion only')}{unpricedWeeklyModels(cycle.usage).length > 0 && <> · {t('weekly_quota.unpriced_models', 'Unpriced: {{models}}', { models: unpricedWeeklyModels(cycle.usage).join(', ') })}</>}</small>}</td>
              <td><strong>{date(shortened && !current ? cycle.effective_ended_at : cycle.reset_at)}</strong><small>{current ? t('weekly_quota.scheduled', 'Scheduled') : reset?.rollover_observed_at ? t('weekly_quota.observed', 'Rollover observed') : shortened ? t('weekly_quota.changed', 'Window changed') : t('weekly_quota.unconfirmed', 'Awaiting rollover observation')}</small>
                {reset?.rollover_observed_at && <small>{date(reset.rollover_observed_at)}</small>}</td>
 -            <td><small><strong>{t('weekly_quota.remaining', 'Last remaining')}: {cycle.last_remaining_percent == null ? '—' : `${cycle.last_remaining_percent}%`}</strong></small><small>{date(cycle.last_observed_at)}</small>
@@ -413,7 +440,7 @@ index 551262b..7c27cb6 100644
                {reset && <small>{t('weekly_quota.age', '{{minutes}} min before {{boundary}}', { minutes: Math.round(reset.last_observation_age_seconds / 60), boundary: current ? t('weekly_quota.report_time', 'report time') : t('weekly_quota.cycle_end', 'cycle end') })}</small>}
                <small>{t('weekly_quota.first', 'First observed')}: {date(cycle.first_observed_at)}</small>
                {combinedUpdates > 0 && <small>{t('weekly_quota.combined', '{{count}} reset-time updates combined while quota stayed at 100%', { count: combinedUpdates })}</small>}
-@@ -87,7 +91,6 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+@@ -87,7 +99,6 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
          })}</tbody>
        </table></div>
        {cycleRows.length > 5 && <Button size="sm" onClick={() => setExpandedCyclesFor(showAllCycles ? undefined : cycleViewKey)}>{showAllCycles ? t('weekly_quota.show_recent', 'Show recent cycles') : t('weekly_quota.show_older', 'Show older cycles ({{count}})', { count: cycleRows.length - 5 })}</Button>}
@@ -421,6 +448,16 @@ index 551262b..7c27cb6 100644
        <h4>{t('weekly_quota.models', 'Value by model and requested mode')}</h4>
        <p className={styles.note}>{t('weekly_quota.sample_note', 'Estimates need at least {{points}} percentage points, {{intervals}} qualifying intervals and {{requests}} requests. Only intervals of at most {{minutes}} minutes with one model/mode, complete pricing and no failed requests qualify. These are eligibility floors, not a confidence guarantee.', { points: report?.min_points, intervals: report?.min_intervals, requests: report?.min_requests, minutes: (report?.max_interval_seconds ?? 0) / 60 })}</p>
        {report && <p className={styles.note}>{t('weekly_quota.sample_coverage', '{{eligible}} of {{observed}} observed percentage points qualify; {{excluded}} intervals excluded.', { eligible: report.eligible_points, observed: report.observed_points, excluded: report.excluded_intervals })}</p>}
+@@ -95,7 +106,8 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+         <thead><tr><th>{t('weekly_quota.model', 'Model / mode')}</th><th>{t('weekly_quota.delivered', 'API value delivered')}</th><th>{t('weekly_quota.samples', 'Qualifying samples')}</th><th>{t('weekly_quota.per_point', 'API $ / percentage point')}</th><th>{t('weekly_quota.full', 'Estimated full allowance')}</th></tr></thead>
+         <tbody>{report?.modes.map(group => <tr key={`${group.model}:${group.mode}`}>
+           <td><strong>{group.model || '—'}</strong><small>{modeName(group.mode)}</small></td>
+-          <td>{group.cost_available ? money(group.total_cost_usd) : t('weekly_quota.unpriced', 'Pricing incomplete')}<small>{group.total_requests} {t('weekly_quota.requests', 'requests')}</small></td>
++          <td>{partialValue(group.total_cost_usd, group.cost_available)}<small>{group.total_requests} {t('weekly_quota.requests', 'requests')}</small>
++            {!group.cost_available && <small>{group.total_cost_usd > 0 ? t('weekly_quota.priced_portion', 'Priced portion only') : t('weekly_quota.price_unavailable', 'Price or token details unavailable')}</small>}</td>
+           <td>{group.percentage_points} {t('weekly_quota.points', 'percentage points')}<small>{group.sample_intervals} {t('weekly_quota.intervals', 'intervals')} · {group.sample_requests} {t('weekly_quota.requests', 'requests')}</small></td>
+           <td>{group.ready ? money(group.cost_per_point) : t('weekly_quota.insufficient', 'Insufficient data')}{group.ready && <small>{t('weekly_quota.observed_range', 'Observed range')}: {money(group.min_cost_per_point)} – {money(group.max_cost_per_point)}</small>}</td>
+           <td>{group.ready ? money(group.full_allowance_usd) : '—'}</td>
 diff --git a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
 index e95476c..663c9cc 100644
 --- a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
@@ -561,6 +598,43 @@ index 481b4b3..c78b04d 100644
    })
  
    it('renders Overview metrics with the list thresholds and recent cache rate', async () => {
+diff --git a/web/src/components/usage/credentials/weeklyCycleRows.ts b/web/src/components/usage/credentials/weeklyCycleRows.ts
+index d5f208e..fdd3717 100644
+--- a/web/src/components/usage/credentials/weeklyCycleRows.ts
++++ b/web/src/components/usage/credentials/weeklyCycleRows.ts
+@@ -8,6 +8,8 @@ export interface WeeklyCycleRow {
+ 
+ function addUsage(a: CodexQuotaHistoryUsage, b: CodexQuotaHistoryUsage): CodexQuotaHistoryUsage {
+   return {
++    // Preserve source pricing groups so combined reset updates retain diagnostics.
++    model_modes: [...a.model_modes ?? [], ...b.model_modes ?? []],
+     requests: a.requests + b.requests,
+     successful_requests: a.successful_requests + b.successful_requests,
+     failed_requests: a.failed_requests + b.failed_requests,
+diff --git a/web/src/components/usage/credentials/weeklyCycleValue.ts b/web/src/components/usage/credentials/weeklyCycleValue.ts
+index 418b610..30df422 100644
+--- a/web/src/components/usage/credentials/weeklyCycleValue.ts
++++ b/web/src/components/usage/credentials/weeklyCycleValue.ts
+@@ -1,4 +1,8 @@
+-import type { CodexQuotaHistoryCycle } from '@/lib/types'
++import type { CodexQuotaHistoryCycle, CodexQuotaHistoryUsage } from '@/lib/types'
++
++export function unpricedWeeklyModels(usage: CodexQuotaHistoryUsage) {
++  return [...new Set(usage.model_modes?.filter(group => !group.cost_available).map(group => group.model || '—') ?? [])].sort()
++}
+ 
+ // Keep numerator and denominator on the same observed quota-drop intervals.
+ // This descriptive cycle average can contain mixed models and modes.
+@@ -7,5 +11,8 @@ export function weeklyCycleValue(cycle: CodexQuotaHistoryCycle) {
+   const points = intervals.reduce((sum, interval) => sum + interval.percentage_points, 0)
+   const cost = intervals.reduce((sum, interval) => sum + interval.usage.total_cost_usd, 0)
+   const priced = intervals.every(interval => interval.usage.cost_available && Number.isFinite(interval.usage.total_cost_usd))
+-  return { points, intervals: intervals.length, cost, costPerPoint: points > 0 && priced ? cost / points : null }
++  // A partial numerator over ALL observed points is a lower bound. Never drop
++  // unpriced intervals from the denominator or label this a complete rate.
++  return { points, intervals: intervals.length, cost, costAvailable: priced,
++    costPerPoint: points > 0 && Number.isFinite(cost) && (priced || cost > 0) ? cost / points : null }
+ }
 diff --git a/web/src/components/usage/test/PerformancePanel.test.tsx b/web/src/components/usage/test/PerformancePanel.test.tsx
 index bd7e1f2..31f0fd6 100644
 --- a/web/src/components/usage/test/PerformancePanel.test.tsx
@@ -624,11 +698,25 @@ index bd7e1f2..31f0fd6 100644
 +  expect(mocks.fetch.mock.lastCall?.[1].metric).toBe('phase')
 +})
 diff --git a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
-index 5a32ffc..bf503ee 100644
+index 5a32ffc..066f990 100644
 --- a/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
 +++ b/web/src/components/usage/test/WeeklyQuotaValuePanel.test.tsx
-@@ -154,14 +154,14 @@ it('leads with weighted value per observed point and keeps total delivered value
-   expect(weeklyCycleValue(response.cycles[0])).toEqual({ points: 4, intervals: 2, cost: 9, costPerPoint: 2.25 })
+@@ -50,7 +50,8 @@ it('does not display missing prices or sparse estimates as zero or a full allowa
+   response.weekly_value!.modes[0] = { ...response.weekly_value!.modes[0], ready: false, cost_per_point: null, full_allowance_usd: null, min_cost_per_point: null, max_cost_per_point: null }
+   api.fetchCodexQuotaHistory.mockResolvedValue(response)
+   await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" />))
+-  expect(element.textContent).toContain('Pricing incomplete')
++  expect(element.textContent).toContain('≥ $12.00')
++  expect(element.textContent).toContain('Priced portion only')
+   expect(element.textContent).toContain('Insufficient data')
+   expect(element.textContent).not.toContain('$150.00')
+ })
+@@ -151,35 +152,82 @@ function observedCycleFixture(): CodexQuotaHistoryResponse {
+ 
+ it('leads with weighted value per observed point and keeps total delivered value separate for partial cycles', async () => {
+   const response = observedCycleFixture()
+-  expect(weeklyCycleValue(response.cycles[0])).toEqual({ points: 4, intervals: 2, cost: 9, costPerPoint: 2.25 })
++  expect(weeklyCycleValue(response.cycles[0])).toEqual({ points: 4, intervals: 2, cost: 9, costPerPoint: 2.25, costAvailable: true })
    api.fetchCodexQuotaHistory.mockResolvedValue(response)
    await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" readOnlyAccountId="3" />))
 -  expect([...element.querySelectorAll('table:first-of-type th')].slice(0, 5).map(cell => cell.textContent)).toEqual(['API value / 1%', 'Observed quota used', 'Total API value', 'Reset / rollover', 'Observation coverage'])
@@ -648,8 +736,66 @@ index 5a32ffc..bf503ee 100644
 +  expect(cells[5].textContent).toContain('Observation began after the cycle started')
  })
  
- it('keeps complete observed rates when total pricing is incomplete, but hides rates with missing interval prices', () => {
-@@ -178,8 +178,8 @@ it('does not infer used quota from last remaining, or treat no observed drops as
+-it('keeps complete observed rates when total pricing is incomplete, but hides rates with missing interval prices', () => {
++it('keeps complete observed rates independent of total pricing and marks incomplete rates as lower bounds', () => {
+   const cycle = observedCycleFixture().cycles[0]
+   cycle.usage.cost_available = false
+   expect(weeklyCycleValue(cycle).costPerPoint).toBe(2.25)
+   cycle.transitions[1].usage.cost_available = false
+-  expect(weeklyCycleValue(cycle).costPerPoint).toBeNull()
++  expect(weeklyCycleValue(cycle).costPerPoint).toBe(2.25)
++  expect(weeklyCycleValue(cycle).costAvailable).toBe(false)
+   expect(weeklyCycleValue(cycle).points).toBe(4)
+ })
+ 
++it('shows known dollars and a lower-bound rate over all points, with the affected models', async () => {
++  const response = observedCycleFixture()
++  const cycle = response.cycles[0]
++  cycle.usage.cost_available = false
++  cycle.usage.model_modes = [{ model: 'codex-auto-review', mode: 'normal', requests: 1, total_cost_usd: 0, cost_available: false }]
++  // Three unpriced points must remain in the denominator; do not show $3 / 1%.
++  cycle.transitions[1].usage.cost_available = false
++  cycle.transitions[1].usage.total_cost_usd = 0
++  const original = JSON.stringify(response)
++  api.fetchCodexQuotaHistory.mockResolvedValue(response)
++  await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" readOnlyAccountId="3" />))
++  const cells = element.querySelector('table tbody tr')!.querySelectorAll('td')
++  expect(cells[1].textContent).toContain('≥ $0.75')
++  expect(cells[1].textContent).toContain('≥ $3.00 in observed drops')
++  expect(cells[2].textContent).toContain('4 percentage points')
++  expect(cells[3].textContent).toContain('≥ $12.00')
++  expect(cells[3].textContent).toContain('Unpriced: codex-auto-review')
++  expect(element.textContent).toContain('Affected models: codex-auto-review.')
++  expect(JSON.stringify(response)).toBe(original)
++})
++
++it('does not present entirely unpriced usage as free or estimate a full allowance from it', async () => {
++  const response = observedCycleFixture()
++  const cycle = response.cycles[0]
++  cycle.usage = { ...cycle.usage, total_cost_usd: 0, cost_available: false }
++  cycle.transitions.forEach(interval => { interval.usage = { ...interval.usage, total_cost_usd: 0, cost_available: false } })
++  response.weekly_value!.modes[0] = { ...response.weekly_value!.modes[0], total_cost_usd: 0, cost_available: false, ready: false, cost_per_point: null, full_allowance_usd: null }
++  api.fetchCodexQuotaHistory.mockResolvedValue(response)
++  await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" />))
++  const cells = element.querySelector('table tbody tr')!.querySelectorAll('td')
++  expect(cells[1].querySelector('strong')!.textContent).toBe('—')
++  expect(cells[3].querySelector('strong')!.textContent).toBe('—')
++  expect(element.textContent).not.toContain('$0.00')
++  expect(element.textContent).not.toContain('$150.00')
++  expect(element.textContent).toContain('Price or token details unavailable')
++})
++
++it('retains missing-model diagnostics across combined reset updates', () => {
++  const response = movingResetFixture()
++  response.cycles[2].usage = { ...response.cycles[2].usage, cost_available: false,
++    model_modes: [{ model: 'codex-auto-review', mode: 'normal', requests: 1, total_cost_usd: 0, cost_available: false }] }
++  const row = weeklyCycleRows(response)[0]
++  expect(row.cycle.usage.model_modes?.some(group => group.model === 'codex-auto-review' && !group.cost_available)).toBe(true)
++  expect(row.cycle.usage.cost_available).toBe(false)
++})
++
+ it('does not infer used quota from last remaining, or treat no observed drops as a zero-dollar rate', async () => {
+   const response = fixture()
    expect(weeklyCycleValue(response.cycles[0]).costPerPoint).toBeNull()
    api.fetchCodexQuotaHistory.mockResolvedValue(response)
    await act(async () => root.render(<WeeklyQuotaValuePanel authIndex="account" />))
@@ -728,3 +874,15 @@ index 162f954..f9061ac 100644
 + expect(buildWeeklyTrendChartData(points,'phase',['a'],'normal',mode=>mode,'en').datasets[0].data).toEqual([80,null,null])
 + expect(buildWeeklyTrendChartData(points,'phase',[],'normal',mode=>mode,'en').datasets).toEqual([])
  })
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 0a97dc3..616015c 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -598,6 +598,7 @@ export interface CodexQuotaHistoryWindow {
+ 
+ // CodexQuotaHistoryUsage 是周期摘要与百分比变化区间共同复用的动态用量。
+ export interface CodexQuotaHistoryUsage {
++  model_modes?: Array<{ model: string; mode: string; requests: number; total_cost_usd: number; cost_available: boolean }>
+   requests: number
+   successful_requests: number
+   failed_requests: number

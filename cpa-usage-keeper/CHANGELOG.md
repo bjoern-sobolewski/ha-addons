@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.32
+
+- Keep priced weekly API value and value per percentage point visible as explicit lower bounds when other usage lacks pricing, and identify affected models.
+- Preserve missing-price diagnostics when unused reset updates are combined; keep entirely unpriced values unavailable and allowance estimates restricted to fully priced samples.
+
 ## 0.1.31
 
 - Default Response speed and Subscription value charts to the two most-used models, with a Top 2 shortcut in the model picker. Other models remain selectable.

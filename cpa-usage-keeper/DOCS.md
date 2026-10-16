@@ -122,7 +122,12 @@ in those same intervals. This is a blended observed average across models and
 modes, including partial cycles; it does not use remaining quota to guess
 unobserved consumption. The separate **Total API value** column includes all
 recorded cycle requests, so its value can exceed the observed-drop numerator.
-No observed drop or incomplete interval pricing leaves the rate unavailable.
+No observed drop leaves the rate unavailable. When some usage cannot be priced,
+the cycle table retains known dollars and the rate as a **≥ lower bound**, with
+all observed percentage points still included in the denominator. Affected
+models are listed; entirely unpriced values are unavailable, never zero. Missing
+model prices or token details must be supplied for complete values. Full-allowance
+estimates still require completely priced qualifying intervals.
 Observation coverage retains last remaining quota, timestamps and partial coverage.
 
 Consecutive reset-time updates while an unused weekly allowance stays at 100%

@@ -6,6 +6,7 @@ from pathlib import Path
 import secrets
 import tempfile
 import urllib.request
+from datetime import datetime
 
 from smoke import docker, eventually, request
 
@@ -98,6 +99,23 @@ def main():
             assert request(prefix + '/quota/history/synthetic-weekly-auth', opener=opener)[0] == 404
             assert request(prefix + '/read-only/accounts/0/weekly-quota', opener=opener)[0] == 404
             assert request(url + '?window_role=bad', opener=opener)[0] == 400
+            for days in (1, 7, 30):
+                status, remaining_body = request(url + '?remaining_days=' + str(days), opener=opener)
+                assert status == 200, (status, remaining_body)
+                remaining = json.loads(remaining_body)
+                points = remaining['remaining_history']
+                assert [point['remaining_percent'] for point in points] == [80, 20, 100, 98, 96, 94]
+                assert points[0]['interval_started_at'] is None
+                assert [point['usage']['total_cost_usd'] for point in points] == [0, 10, 20, 10, 10, 10]
+                assert [point['usage']['requests'] for point in points] == [0, 10, 20, 10, 10, 10]
+                assert 'weekly_value' not in remaining
+                start = datetime.fromisoformat(remaining['range_start'].replace('Z', '+00:00'))
+                end = datetime.fromisoformat(remaining['generated_at'].replace('Z', '+00:00'))
+                assert (end - start).total_seconds() == days * 86400
+                for hidden in (password, readonly, management, 'synthetic-weekly-auth', 'synthetic-private-client-key'):
+                    assert hidden.encode() not in remaining_body
+            assert request(url + '?remaining_days=365', opener=opener)[0] == 400
+            assert request(url + '?remaining_days=bad', opener=opener)[0] == 400
             performance_url = prefix + '/read-only/accounts/9101/performance?days=14&metric=latency'
             assert request(performance_url)[0] == 401
             status, performance_body = request(performance_url, opener=opener)

@@ -1,0 +1,715 @@
+diff --git a/internal/api/quota.go b/internal/api/quota.go
+index aaa6e3b..57dad68 100644
+--- a/internal/api/quota.go
++++ b/internal/api/quota.go
+@@ -57,7 +57,11 @@ func registerQuotaRoutes(router gin.IRoutes, provider QuotaProvider) {
+ 			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required"})
+ 			return
+ 		}
+-		request := quota.CodexQuotaHistoryRequest{AuthIndex: authIndex, WeeklyOnly: c.Query("weekly_only") == "true"}
++		days, valid := remainingHistoryDays(c)
++		if !valid {
++			return
++		}
++		request := quota.CodexQuotaHistoryRequest{AuthIndex: authIndex, WeeklyOnly: c.Query("weekly_only") == "true", RemainingDays: days}
+ 		if rawRole, ok := c.GetQuery("window_role"); ok {
+ 			role := strings.TrimSpace(rawRole)
+ 			request.WindowRole = &role
+@@ -362,3 +366,17 @@ func writeQuotaResetError(c *gin.Context, statusCode int, err error) {
+ 	}
+ 	c.JSON(statusCode, payload)
+ }
++
++// remainingHistoryDays is shared by admin and scoped read-only account reports.
++func remainingHistoryDays(c *gin.Context) (int, bool) {
++	raw, present := c.GetQuery("remaining_days")
++	if !present {
++		return 0, true
++	}
++	days, err := strconv.Atoi(raw)
++	if err != nil || (days != 1 && days != 7 && days != 30) {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "remaining_days must be 1, 7 or 30"})
++		return 0, false
++	}
++	return days, true
++}
+diff --git a/internal/api/read_only_reporting.go b/internal/api/read_only_reporting.go
+index 8d63070..60a391f 100644
+--- a/internal/api/read_only_reporting.go
++++ b/internal/api/read_only_reporting.go
+@@ -231,7 +231,11 @@ func registerReadOnlyReportingRoutes(router *gin.RouterGroup, usage service.Usag
+ 			c.JSON(404, gin.H{"error": "Account not found"})
+ 			return
+ 		}
+-		request := quota.CodexQuotaHistoryRequest{AuthIndex: detail.Identity.Identity, WeeklyOnly: true}
++		days, valid := remainingHistoryDays(c)
++		if !valid {
++			return
++		}
++		request := quota.CodexQuotaHistoryRequest{AuthIndex: detail.Identity.Identity, WeeklyOnly: true, RemainingDays: days}
+ 		if role, ok := c.GetQuery("window_role"); ok {
+ 			if role != "primary" && role != "secondary" {
+ 				c.JSON(400, gin.H{"error": "Invalid window"})
+diff --git a/internal/api/test/quota_test.go b/internal/api/test/quota_test.go
+index 539d2c3..1d0f46b 100644
+--- a/internal/api/test/quota_test.go
++++ b/internal/api/test/quota_test.go
+@@ -100,12 +100,12 @@ func TestCodexQuotaHistoryForwardsWindowRoleSelection(t *testing.T) {
+ 		}},
+ 	}}
+ 	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
+-	resp := serveAPIGet(router, "/api/v1/quota/history/codex-auth?window_role=secondary")
++	resp := serveAPIGet(router, "/api/v1/quota/history/codex-auth?window_role=secondary&remaining_days=7")
+ 
+ 	if resp.Code != http.StatusOK {
+ 		t.Fatalf("expected status 200, got %d body=%s", resp.Code, resp.Body.String())
+ 	}
+-	if provider.historyRequest.AuthIndex != "codex-auth" || provider.historyRequest.WindowRole == nil || *provider.historyRequest.WindowRole != "secondary" {
++	if provider.historyRequest.RemainingDays != 7 || provider.historyRequest.AuthIndex != "codex-auth" || provider.historyRequest.WindowRole == nil || *provider.historyRequest.WindowRole != "secondary" {
+ 		t.Fatalf("unexpected quota history request: %+v", provider.historyRequest)
+ 	}
+ 	body := resp.Body.String()
+@@ -121,6 +121,8 @@ func TestCodexQuotaHistoryMapsValidationAndIdentityErrors(t *testing.T) {
+ 		err        error
+ 		wantStatus int
+ 	}{
++		{name: "invalid remaining days", path: "/api/v1/quota/history/codex-auth?remaining_days=365", wantStatus: http.StatusBadRequest},
++		{name: "non-numeric remaining days", path: "/api/v1/quota/history/codex-auth?remaining_days=abc", wantStatus: http.StatusBadRequest},
+ 		{name: "service validation", path: "/api/v1/quota/history/codex-auth?window_role=primary", err: quota.ErrValidation, wantStatus: http.StatusBadRequest},
+ 		{name: "unsupported identity", path: "/api/v1/quota/history/codex-auth", err: quota.ErrUnsupportedType, wantStatus: http.StatusBadRequest},
+ 		{name: "missing identity", path: "/api/v1/quota/history/codex-auth", err: quota.ErrNotFound, wantStatus: http.StatusNotFound},
+diff --git a/internal/quota/codex_quota_efficiency.go b/internal/quota/codex_quota_efficiency.go
+index de75ff0..e12b55d 100644
+--- a/internal/quota/codex_quota_efficiency.go
++++ b/internal/quota/codex_quota_efficiency.go
+@@ -18,7 +18,8 @@ const codexQuotaHistoryRange = 30 * 24 * time.Hour
+ 
+ // CodexQuotaHistoryRequest 选择一个 Codex Auth File 及可选的上游主额度角色。
+ type CodexQuotaHistoryRequest struct {
+-	WeeklyOnly bool `json:"-"`
++	RemainingDays int  `json:"-"`
++	WeeklyOnly    bool `json:"-"`
+ 	// AuthIndex 来自详情抽屉当前 Auth File，不接受 AI Provider 身份。
+ 	AuthIndex string `json:"-"`
+ 	// WindowRole 可选地选择 primary 或 secondary；nil 表示自动选择当前角色。
+@@ -28,8 +29,16 @@ type CodexQuotaHistoryRequest struct {
+ }
+ 
+ // CodexQuotaHistoryResponse 是额度历史标签一次请求即可复用的完整响应。
++type QuotaRemainingPoint struct {
++	ObservedAt        time.Time              `json:"observed_at"`
++	RemainingPercent  int                    `json:"remaining_percent"`
++	IntervalStartedAt *time.Time             `json:"interval_started_at"`
++	Usage             CodexQuotaHistoryUsage `json:"usage"`
++}
++
+ type CodexQuotaHistoryResponse struct {
+-	WeeklyValue *WeeklyQuotaValue `json:"weekly_value,omitempty"`
++	RemainingHistory []QuotaRemainingPoint `json:"remaining_history,omitempty"`
++	WeeklyValue      *WeeklyQuotaValue     `json:"weekly_value,omitempty"`
+ 	// GeneratedAt 固定当前周期统计截点和 pricing snapshot 的响应生成时间。
+ 	GeneratedAt time.Time `json:"generated_at"`
+ 	// RangeStart 明确已结束周期只回溯最近三十天。
+@@ -176,23 +185,33 @@ func (s *Service) GetCodexQuotaHistory(ctx context.Context, request CodexQuotaHi
+ 	if now.IsZero() {
+ 		now = time.Now()
+ 	}
++	if request.RemainingDays != 0 && request.RemainingDays != 1 && request.RemainingDays != 7 && request.RemainingDays != 30 {
++		return response, fmt.Errorf("%w: remaining_days must be 1, 7 or 30", ErrValidation)
++	}
++	if request.RemainingDays > 0 {
++		request.WeeklyOnly = true
++	}
+ 	historyRange := codexQuotaHistoryRange
+ 	if request.WeeklyOnly {
+ 		historyRange = 90 * 24 * time.Hour
+ 	}
++	if request.RemainingDays > 0 {
++		historyRange = time.Duration(request.RemainingDays) * 24 * time.Hour
++	}
+ 	history, err := repository.BuildCodexQuotaEfficiencyHistory(ctx, s.db, repositorydto.CodexQuotaEfficiencyQuery{
+-		WeeklyOnly: request.WeeklyOnly,
+-		Provider:   provider,
+-		AuthIndex:  request.AuthIndex,
+-		Now:        now,
+-		RangeStart: now.Add(-historyRange),
+-		WindowRole: request.WindowRole,
++		WeeklyOnly:       request.WeeklyOnly,
++		RemainingHistory: request.RemainingDays > 0,
++		Provider:         provider,
++		AuthIndex:        request.AuthIndex,
++		Now:              now,
++		RangeStart:       now.Add(-historyRange),
++		WindowRole:       request.WindowRole,
+ 	}, s.pricing.NewResolver())
+ 	if err != nil {
+ 		return response, fmt.Errorf("get codex quota history: %w", err)
+ 	}
+ 	response = codexQuotaHistoryResponseFromRepository(history)
+-	if request.WeeklyOnly {
++	if request.WeeklyOnly && request.RemainingDays == 0 {
+ 		response.WeeklyValue = buildWeeklyQuotaValue(history)
+ 	}
+ 	return response, nil
+@@ -205,6 +224,12 @@ func codexQuotaHistoryResponseFromRepository(history repositorydto.CodexQuotaEff
+ 		Windows:     make([]CodexQuotaHistoryWindow, 0, len(history.Windows)),
+ 		Cycles:      make([]CodexQuotaHistoryCycle, 0, len(history.Cycles)),
+ 	}
++	for _, point := range history.RemainingHistory {
++		response.RemainingHistory = append(response.RemainingHistory, QuotaRemainingPoint{
++			ObservedAt: point.ObservedAt, RemainingPercent: point.RemainingPercent, IntervalStartedAt: point.IntervalStartedAt,
++			Usage: codexQuotaHistoryUsageFromRepository(point.Usage),
++		})
++	}
+ 	for _, window := range history.Windows {
+ 		response.Windows = append(response.Windows, codexQuotaHistoryWindowFromRepository(window))
+ 	}
+diff --git a/internal/repository/codex_quota_efficiency.go b/internal/repository/codex_quota_efficiency.go
+index 3c3fb0b..bc97dbf 100644
+--- a/internal/repository/codex_quota_efficiency.go
++++ b/internal/repository/codex_quota_efficiency.go
+@@ -232,8 +232,38 @@ func BuildCodexQuotaEfficiencyHistory(ctx context.Context, db *gorm.DB, query re
+ 		works = append(works, codexQuotaEfficiencyCycleWork{record: record, queryStart: period.start, queryEnd: queryEnd})
+ 	}
+ 
++	if query.RemainingHistory {
++		for _, work := range works {
++			for _, segment := range segmentsByCycle[work.record.ID] {
++				if segment.FirstObservedAt.Before(work.queryStart) || !segment.FirstObservedAt.Before(work.queryEnd) {
++					continue
++				}
++				result.RemainingHistory = append(result.RemainingHistory, repositorydto.QuotaRemainingPoint{
++					ObservedAt: segment.FirstObservedAt, RemainingPercent: segment.RemainingPercent,
++					Usage: repositorydto.CodexQuotaEfficiencyUsage{CostAvailable: true},
++				})
++			}
++		}
++		sort.SliceStable(result.RemainingHistory, func(i, j int) bool {
++			return result.RemainingHistory[i].ObservedAt.Before(result.RemainingHistory[j].ObservedAt)
++		})
++		unique := result.RemainingHistory[:0]
++		for _, point := range result.RemainingHistory {
++			if len(unique) > 0 {
++				previous := &unique[len(unique)-1]
++				if !point.ObservedAt.After(previous.ObservedAt) || point.RemainingPercent == previous.RemainingPercent {
++					continue
++				}
++				started := previous.ObservedAt
++				point.IntervalStartedAt = &started
++			}
++			unique = append(unique, point)
++		}
++		result.RemainingHistory = unique
++	}
++
+ 	// 单次有序流只从 SQLite 逐行读取必需字段；Go 线性归类后仅保留少量 pricing 分组。
+-	if err := streamCodexQuotaEfficiencyUsage(ctx, db, query.Provider, query.AuthIndex, works, costResolver, false, query.WeeklyOnly); err != nil {
++	if err := streamCodexQuotaEfficiencyUsage(ctx, db, query.Provider, query.AuthIndex, works, costResolver, false, query.WeeklyOnly && !query.RemainingHistory, result.RemainingHistory); err != nil {
+ 		return result, err
+ 	}
+ 	// 流式聚合结束后再计算每百分点值，保证 CostAvailable 已吸收所有 pricing 分组。
+@@ -428,7 +458,7 @@ func buildCodexQuotaEfficiencyTransitions(segments []entities.QuotaPercentSegmen
+ 	return transitions
+ }
+ 
+-func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider string, authIndex string, works []codexQuotaEfficiencyCycleWork, costResolver pricing.Resolver, keepAllPricingFields bool, collectDaily bool) error {
++func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider string, authIndex string, works []codexQuotaEfficiencyCycleWork, costResolver pricing.Resolver, keepAllPricingFields bool, collectDaily bool, remaining []repositorydto.QuotaRemainingPoint) error {
+ 	if len(works) == 0 {
+ 		return nil
+ 	}
+@@ -488,6 +518,11 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 		}
+ 	}
+ 
++	remainingAccumulators := make([]codexQuotaEfficiencyUsageAccumulator, len(remaining))
++	for index := range remaining {
++		remainingAccumulators[index] = newCodexQuotaEfficiencyUsageAccumulator(&remaining[index].Usage)
++	}
++	remainingIndex := 1
+ 	daily := make([]map[time.Time]*codexQuotaEfficiencyUsageAccumulator, len(works))
+ 	workIndex := 0
+ 	transitionIndex := 0
+@@ -503,6 +538,13 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 			return fmt.Errorf("scan codex quota efficiency usage: %w", err)
+ 		}
+ 		event.Timestamp = timeutil.NormalizeStorageTime(event.Timestamp)
++		// Attribute across cycle boundaries and gaps before the cycle-specific pointer skips them.
++		for remainingIndex < len(remaining) && event.Timestamp.After(remaining[remainingIndex].ObservedAt) {
++			remainingIndex++
++		}
++		if remainingIndex < len(remaining) && event.Timestamp.After(*remaining[remainingIndex].IntervalStartedAt) {
++			remainingAccumulators[remainingIndex].add(event)
++		}
+ 		// 右边界属于下一周期；跨过任意历史空洞时指针仍只向前移动。
+ 		for workIndex < len(works) && !event.Timestamp.Before(works[workIndex].queryEnd) {
+ 			workIndex++
+@@ -542,7 +584,10 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 					work.record.Transitions[index].Usage = repositorydto.CodexQuotaEfficiencyUsage{CostAvailable: true}
+ 				}
+ 			}
+-			return streamCodexQuotaEfficiencyUsage(ctx, db, provider, authIndex, works, costResolver, true, collectDaily)
++			for index := range remaining {
++				remaining[index].Usage = repositorydto.CodexQuotaEfficiencyUsage{CostAvailable: true}
++			}
++			return streamCodexQuotaEfficiencyUsage(ctx, db, provider, authIndex, works, costResolver, true, collectDaily, remaining)
+ 		}
+ 
+ 		transitions := work.record.Transitions
+@@ -562,6 +607,9 @@ func streamCodexQuotaEfficiencyUsage(ctx context.Context, db *gorm.DB, provider
+ 		return fmt.Errorf("iterate codex quota efficiency usage: %w", err)
+ 	}
+ 
++	for index := range remainingAccumulators {
++		remainingAccumulators[index].finalize(authIndex, costResolver)
++	}
+ 	// 事件流结束后再按 pricing 分组计价，避免对每条请求重复匹配价格规则。
+ 	for workIndex := range works {
+ 		cycleAccumulators[workIndex].finalize(authIndex, costResolver)
+diff --git a/internal/repository/dto/codex_quota_efficiency.go b/internal/repository/dto/codex_quota_efficiency.go
+index c5d3d3d..4b87127 100644
+--- a/internal/repository/dto/codex_quota_efficiency.go
++++ b/internal/repository/dto/codex_quota_efficiency.go
+@@ -4,7 +4,8 @@ import "time"
+ 
+ // CodexQuotaEfficiencyQuery 描述一次只读的账号主额度效率回溯，不会把统计结果写回历史表。
+ type CodexQuotaEfficiencyQuery struct {
+-	WeeklyOnly bool
++	RemainingHistory bool
++	WeeklyOnly       bool
+ 	// Provider 来自当前 Auth File 的真实 type；旧内部调用缺失时仍按 Codex 处理。
+ 	Provider string
+ 	// AuthIndex 是 Auth File 与 usage_events 之间唯一允许的账号关联键。
+@@ -18,7 +19,17 @@ type CodexQuotaEfficiencyQuery struct {
+ }
+ 
+ // CodexQuotaEfficiencyHistory 是图表、周期摘要和完整周期列表共同复用的规范化查询结果。
++// QuotaRemainingPoint records an actual observed change. The first point is a baseline;
++// all subsequent Usage intervals are (previous observation, this observation], including rollovers.
++type QuotaRemainingPoint struct {
++	ObservedAt        time.Time
++	RemainingPercent  int
++	IntervalStartedAt *time.Time
++	Usage             CodexQuotaEfficiencyUsage
++}
++
+ type CodexQuotaEfficiencyHistory struct {
++	RemainingHistory []QuotaRemainingPoint
+ 	// GeneratedAt 是本次 pricing snapshot 与当前周期截点共同绑定的生成时间。
+ 	GeneratedAt time.Time
+ 	// RangeStart 是响应实际采用的历史下界，供调用层明确“最近 30 天”口径。
+diff --git a/internal/repository/test/quota_remaining_history_test.go b/internal/repository/test/quota_remaining_history_test.go
+new file mode 100644
+index 0000000..e4ef297
+--- /dev/null
++++ b/internal/repository/test/quota_remaining_history_test.go
+@@ -0,0 +1,81 @@
++package test
++
++import (
++	"context"
++	"reflect"
++	"testing"
++	"time"
++
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/repository"
++	dto "cpa-usage-keeper/internal/repository/dto"
++)
++
++func TestRemainingHistoryAttributesRealChangesAcrossResetAndArchive(t *testing.T) {
++	db := openTestDatabase(t)
++	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
++	reset := now.Add(-time.Hour)
++	seedCodexQuotaEfficiencyCycle(t, db, "remaining-account", reset.Add(-7*24*time.Hour), reset, []codexQuotaEfficiencySegmentSeed{
++		{remaining: 20, first: now.Add(-3 * time.Hour), last: now.Add(-3 * time.Hour)},
++		{remaining: 18, first: now.Add(-2 * time.Hour), last: now.Add(-90 * time.Minute)},
++	})
++	seedCodexQuotaEfficiencyCycle(t, db, "remaining-account", reset, reset.Add(7*24*time.Hour), []codexQuotaEfficiencySegmentSeed{
++		{remaining: 100, first: now.Add(-50 * time.Minute), last: now.Add(-40 * time.Minute)},
++		{remaining: 99, first: now.Add(-30 * time.Minute), last: now.Add(-20 * time.Minute)},
++	})
++	unpriced := usageEventForQuotaEfficiency("unpriced", "oauth", "remaining-account", now.Add(-35*time.Minute), 1_000_000)
++	unpriced.Model = "unknown-price"
++	seedCodexQuotaEfficiencyUsage(t, db,
++		usageEventForQuotaEfficiency("baseline-excluded", "oauth", "remaining-account", now.Add(-3*time.Hour), 9_000_000),
++		usageEventForQuotaEfficiency("drop-right-boundary", "oauth", "remaining-account", now.Add(-2*time.Hour), 1_000_000),
++		usageEventForQuotaEfficiency("old-cycle-tail", "oauth", "remaining-account", now.Add(-70*time.Minute), 2_000_000),
++		usageEventForQuotaEfficiency("reset-boundary", "oauth", "remaining-account", reset, 3_000_000),
++		usageEventForQuotaEfficiency("new-cycle-head", "oauth", "remaining-account", now.Add(-50*time.Minute), 4_000_000),
++		usageEventForQuotaEfficiency("new-drop", "oauth", "remaining-account", now.Add(-30*time.Minute), 5_000_000),
++		usageEventForQuotaEfficiency("after-last-point", "oauth", "remaining-account", now.Add(-10*time.Minute), 9_000_000),
++		usageEventForQuotaEfficiency("other-account", "oauth", "other", now.Add(-40*time.Minute), 9_000_000),
++		usageEventForQuotaEfficiency("other-auth", "api_key", "remaining-account", now.Add(-40*time.Minute), 9_000_000), unpriced,
++	)
++	query := dto.CodexQuotaEfficiencyQuery{AuthIndex: "remaining-account", Now: now, RangeStart: now.Add(-7 * 24 * time.Hour), WeeklyOnly: true, RemainingHistory: true}
++	resolver := codexQuotaEfficiencyPricingResolver(t)
++	before, err := repository.BuildCodexQuotaEfficiencyHistory(context.Background(), db, query, resolver)
++	if err != nil {
++		t.Fatal(err)
++	}
++	points := before.RemainingHistory
++	if len(points) != 4 {
++		t.Fatalf("expected four actual observations, got %+v", points)
++	}
++	for i, want := range []int{20, 18, 100, 99} {
++		if points[i].RemainingPercent != want {
++			t.Fatalf("point %d: %+v", i, points[i])
++		}
++	}
++	if points[0].IntervalStartedAt != nil || points[0].Usage.Requests != 0 {
++		t.Fatal("baseline must not invent an interval")
++	}
++	for i, want := range []float64{0, 1, 9, 5} {
++		if points[i].Usage.TotalCostUSD != want {
++			t.Fatalf("interval %d cost=%v, want %v", i, points[i].Usage.TotalCostUSD, want)
++		}
++	}
++	if points[2].Usage.Requests != 3 || !points[2].Usage.CostAvailable {
++		t.Fatal("reset lost or duplicated boundary requests")
++	}
++	if points[3].Usage.Requests != 2 || points[3].Usage.CostAvailable {
++		t.Fatal("unpriced usage must remain explicitly incomplete")
++	}
++	if err := db.Exec("INSERT INTO usage_events_archive (" + entities.UsageEventStorageColumns + ") SELECT " + entities.UsageEventStorageColumns + " FROM usage_events").Error; err != nil {
++		t.Fatal(err)
++	}
++	if err := db.Exec("DELETE FROM usage_events").Error; err != nil {
++		t.Fatal(err)
++	}
++	after, err := repository.BuildCodexQuotaEfficiencyHistory(context.Background(), db, query, resolver)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !reflect.DeepEqual(before, after) {
++		t.Fatal("remaining history changed after archival")
++	}
++}
+diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+index 34b78fa..e09de3a 100644
+--- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
++++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+@@ -15,6 +15,7 @@ import { CredentialSubscriptionBadge } from './CredentialSubscriptionBadge'
+ import { CredentialKimiSiteBadge } from './CredentialKimiSiteBadge'
+ import { CredentialRequestEventsList } from './CredentialRequestEventsList'
+ import { PerformancePanel } from './PerformancePanel'
++import { QuotaRemainingHistory } from './QuotaRemainingHistory'
+ import { WeeklyQuotaValuePanel } from './WeeklyQuotaValuePanel'
+ import { CodexQuotaHistoryPanel } from './CodexQuotaHistoryPanel'
+ import { formatCredentialTimestamp, type CredentialDetailSelection } from './credentialViewModels'
+@@ -597,6 +598,7 @@ export function CredentialDetailDrawer({
+               windowCacheReadRate={row.windowCacheReadRate}
+             />
+           </section>
++          {quotaHistoryProvider === 'codex' && <QuotaRemainingHistory key={selectionKey} authIndex={sourceFilter} readOnlyAccountId={readOnly ? identityId : undefined} onAuthRequired={onAuthRequired} />}
+           </section>
+         ) : activeTab === 'quota-history' && hasQuotaHistory ? (
+           <section id={quotaHistoryPanelId} role="tabpanel" aria-labelledby={quotaHistoryTabId} className={styles.quotaHistoryPanel}>
+diff --git a/web/src/components/usage/credentials/QuotaRemainingHistory.module.scss b/web/src/components/usage/credentials/QuotaRemainingHistory.module.scss
+new file mode 100644
+index 0000000..c2a7fcb
+--- /dev/null
++++ b/web/src/components/usage/credentials/QuotaRemainingHistory.module.scss
+@@ -0,0 +1,17 @@
++.panel { margin-top: 14px; background: var(--bg-primary); min-width: 0; border: 1px solid var(--border-color); border-radius: var(--keeper-card-radius); padding: 16px; }
++.header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;
++  h3 { margin: 0; font-size: 12px; font-weight: 800; }
++}
++.periods { display: flex; gap: 4px;
++  button { border: 1px solid var(--border-color); border-radius: 6px; padding: 5px 10px; background: transparent; color: var(--text-secondary); cursor: pointer;
++    &[aria-pressed='true'] { background: var(--bg-tertiary); color: var(--text-primary); border-color: var(--text-secondary); }
++  }
++}
++.chart { height: 260px; min-width: 0; }
++.legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 16px; margin-top: 12px; font-size: 12px; color: var(--text-secondary);
++  > span, button { display: inline-flex; align-items: center; gap: 6px; }
++  button { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
++  i { width: 18px; height: 3px; border-radius: 2px; }
++}
++.hidden { text-decoration: line-through; opacity: .6; }
++.note { font-size: 11px; line-height: 1.5; color: var(--text-secondary); margin: 10px 0 0; }
+diff --git a/web/src/components/usage/credentials/QuotaRemainingHistory.tsx b/web/src/components/usage/credentials/QuotaRemainingHistory.tsx
+new file mode 100644
+index 0000000..7ad5b8f
+--- /dev/null
++++ b/web/src/components/usage/credentials/QuotaRemainingHistory.tsx
+@@ -0,0 +1,123 @@
++import { useEffect, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++import { Chart } from 'react-chartjs-2'
++import type { ChartData, ChartOptions } from 'chart.js'
++import '@/lib/chartjs'
++import { ApiError, fetchCodexQuotaHistory } from '@/lib/api'
++import type { CodexQuotaHistoryResponse, QuotaRemainingPoint } from '@/lib/types'
++import { useThemeStore } from '@/stores'
++import { buildUsageChartTooltipStyle, getUsageChartTheme } from '@/utils/usage/chartConfig'
++import { formatWeeklyDateTime, weeklyDateLocale } from './weeklyDateTime'
++import styles from './QuotaRemainingHistory.module.scss'
++
++type Period = 1 | 7 | 30
++type XY = { x: number; y: number | null }
++const remainingColor = '#3b82f6'
++const valueColor = '#d97706'
++
++// Keep the last real observation before the range as context. Never create hourly/daily points.
++export function visibleRemainingPoints(report: CodexQuotaHistoryResponse): QuotaRemainingPoint[] {
++  const start = Date.parse(report.range_start)
++  const end = Date.parse(report.generated_at)
++  const points = (report.remaining_history ?? []).filter(point => {
++    const time = Date.parse(point.observed_at)
++    return Number.isFinite(time) && time <= end
++  }).sort((a, b) => Date.parse(a.observed_at) - Date.parse(b.observed_at))
++  const before = points.filter(point => Date.parse(point.observed_at) < start).at(-1)
++  return [...(before ? [before] : []), ...points.filter(point => Date.parse(point.observed_at) >= start)]
++}
++
++export function quotaIntervalValue(point: QuotaRemainingPoint): string {
++  if (!point.interval_started_at) return '—'
++  if (!point.usage.cost_available && point.usage.total_cost_usd === 0) return '—'
++  const money = new Intl.NumberFormat(weeklyDateLocale(), { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(point.usage.total_cost_usd)
++  return `${point.usage.cost_available ? '' : '≥ '}${money}`
++}
++
++export function QuotaRemainingHistory({ authIndex, readOnlyAccountId, onAuthRequired }: {
++  authIndex: string
++  readOnlyAccountId?: string
++  onAuthRequired?: () => void
++}) {
++  const { t } = useTranslation()
++  const dark = useThemeStore(state => state.resolvedTheme) === 'dark'
++  const theme = getUsageChartTheme(dark)
++  const [days, setDays] = useState<Period>(7)
++  const [retry, setRetry] = useState(0)
++  const [showValue, setShowValue] = useState(true)
++  const requestKey = JSON.stringify([authIndex, readOnlyAccountId, days, retry])
++  const [result, setResult] = useState<{ key: string; report?: CodexQuotaHistoryResponse; error?: string } | null>(null)
++  const report = result?.key === requestKey ? result.report ?? null : null
++  const error = result?.key === requestKey ? result.error ?? '' : ''
++  const loading = result?.key !== requestKey
++  useEffect(() => {
++    const controller = new AbortController()
++    const load = async () => {
++      try {
++        const report = await fetchCodexQuotaHistory(authIndex, { weeklyOnly: true, remainingDays: days, readOnlyAccountId }, controller.signal)
++        if (!controller.signal.aborted) setResult({ key: requestKey, report })
++      } catch (failure) {
++        if (controller.signal.aborted) return
++        if (failure instanceof ApiError && failure.status === 401) { onAuthRequired?.(); return }
++        setResult({ key: requestKey, error: t('quota_timeline.load_failed', 'Could not load rate-limit history.') })
++      }
++    }
++    void load()
++    return () => controller.abort()
++  }, [authIndex, readOnlyAccountId, days, requestKey, onAuthRequired, t])
++
++  const points = report ? visibleRemainingPoints(report) : []
++  const remainingLabel = t('quota_timeline.remaining', 'Remaining quota')
++  const valueLabel = t('quota_timeline.value', 'Interval API value')
++  const title = t('quota_timeline.title', 'Rate-limit remaining history')
++  const data: ChartData<'line', XY[]> = { datasets: [
++    { label: remainingLabel, yAxisID: 'remaining', data: points.map(point => ({ x: Date.parse(point.observed_at), y: point.remaining_percent })), borderColor: remainingColor, backgroundColor: remainingColor, stepped: 'before', borderWidth: 2, pointRadius: 2, pointHoverRadius: 5 },
++    { label: valueLabel, yAxisID: 'value', hidden: !showValue, data: points.map(point => ({ x: Date.parse(point.observed_at), y: point.interval_started_at && (point.usage.cost_available || point.usage.total_cost_usd > 0) ? point.usage.total_cost_usd : null })), borderColor: valueColor, backgroundColor: valueColor, borderWidth: 1.5, borderDash: [4, 3], pointRadius: 2, pointHoverRadius: 5, spanGaps: false },
++  ] }
++  const options: ChartOptions<'line'> = {
++    responsive: true, maintainAspectRatio: false, animation: false,
++    interaction: { mode: 'index', intersect: false },
++    plugins: {
++      legend: { display: false },
++      // Use the remaining series as the tooltip anchor. Its callbacks deliberately read
++      // both values from the report, independently of dataset visibility.
++      tooltip: { ...buildUsageChartTooltipStyle(theme), filter: item => item.datasetIndex === 0, callbacks: {
++        title: items => items.length ? formatWeeklyDateTime(points[items[0].dataIndex].observed_at) : '',
++        label: item => {
++          const point = points[item.dataIndex]
++          return [`${remainingLabel}: ${point.remaining_percent}%`, `${valueLabel}: ${quotaIntervalValue(point)}`]
++        },
++        afterBody: items => {
++          if (!items.length) return []
++          const point = points[items[0].dataIndex]
++          if (!point.interval_started_at) return [t('quota_timeline.baseline', 'First observation · no preceding interval')]
++          return [
++            `${formatWeeklyDateTime(point.interval_started_at)} → ${formatWeeklyDateTime(point.observed_at)}`,
++            t('quota_timeline.requests', '{{count}} requests', { count: point.usage.requests }),
++            ...(!point.usage.cost_available ? [t('quota_timeline.partial', 'Pricing incomplete · known value only')] : []),
++          ]
++        },
++      } },
++    },
++    scales: {
++      x: { type: 'linear', min: report ? Date.parse(report.range_start) : undefined, max: report ? Date.parse(report.generated_at) : undefined,
++        ticks: { color: theme.textSecondary, maxTicksLimit: 6, callback: value => new Intl.DateTimeFormat(weeklyDateLocale(), days === 1 ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric' }).format(new Date(Number(value))) }, grid: { display: false } },
++      remaining: { position: 'left', min: 0, max: 100, title: { display: true, text: remainingLabel, color: theme.textSecondary }, ticks: { color: theme.textSecondary, callback: value => `${value}%` }, grid: { color: theme.grid } },
++      value: { position: 'right', beginAtZero: true, display: showValue, title: { display: true, text: 'USD', color: theme.textSecondary }, ticks: { color: theme.textSecondary }, grid: { drawOnChartArea: false } },
++    },
++  }
++  return <section className={styles.panel} aria-label={title}>
++    <div className={styles.header}><h3>{title}</h3><div className={styles.periods} role="group" aria-label={t('quota_timeline.period', 'History period')}>
++      {([1, 7, 30] as const).map(period => <button key={period} type="button" aria-pressed={days === period} onClick={() => setDays(period)}>{period}d</button>)}
++    </div></div>
++    {loading ? <p role="status">{t('common.loading', 'Loading…')}</p> : error ? <p role="status">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>{t('common.retry', 'Retry')}</button></p> : points.length ? <>
++      <div className={styles.chart}><Chart type="line" data={data} options={options} role="img" aria-label={title} /></div>
++      <div className={styles.legend} aria-label={t('quota_timeline.legend', 'Chart legend')}>
++        <span><i style={{ background: remainingColor }} />{remainingLabel}</span>
++        <button type="button" aria-pressed={showValue} onClick={() => setShowValue(value => !value)}><i style={{ background: valueColor }} /><span className={!showValue ? styles.hidden : undefined}>{valueLabel}</span></button>
++      </div>
++      <p className={styles.note}>{t('quota_timeline.note', 'Weekly window · one point per detected change. API value covers recorded requests since the previous point, including resets. Hover always shows both values.')}</p>
++      <p className={styles.note}>{t('quota_timeline.last_observed', 'Last detected change: {{time}} · {{remaining}}% remaining', { time: formatWeeklyDateTime(points.at(-1)!.observed_at), remaining: points.at(-1)!.remaining_percent })}</p>
++    </> : <p role="status">{t('quota_timeline.empty', 'No weekly rate-limit history recorded for this period.')}</p>}
++  </section>
++}
+diff --git a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
+index c78b04d..f96b365 100644
+--- a/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialDetailDrawer.test.tsx
+@@ -283,7 +283,11 @@ describe('CredentialDetailDrawer', () => {
+     await renderDrawer({ selection: authFileSelection })
+ 
+     const quotaTab = document.body.querySelector<HTMLButtonElement>('[data-credential-detail-tab="quota-history"]')!
+-    expect(fetchCodexQuotaHistory).not.toHaveBeenCalled()
++    expect(fetchCodexQuotaHistory).toHaveBeenCalledWith('auth-file-identity-1', expect.objectContaining({ remainingDays: 7 }), expect.any(AbortSignal))
++    const sections = [...document.body.querySelectorAll('section')]
++    const health = sections.findIndex(section => section.querySelector('h3')?.textContent === 'usage_stats.credentials_detail_health')
++    const timeline = sections.findIndex(section => section.getAttribute('aria-label')?.startsWith('quota_timeline.title'))
++    expect(timeline).toBeGreaterThan(health)
+     await act(async () => {
+       quotaTab.click()
+     })
+@@ -308,7 +312,7 @@ describe('CredentialDetailDrawer', () => {
+   it('reloads quota history when the same Auth File changes provider type', async () => {
+     await renderDrawer({ selection: authFileSelection })
+     await act(async () => { document.body.querySelector<HTMLButtonElement>('[data-credential-detail-tab="quota-history"]')!.click() })
+-    expect(fetchCodexQuotaHistory).toHaveBeenCalledTimes(1)
++    expect(fetchCodexQuotaHistory).toHaveBeenCalledTimes(2)
+ 
+     const changedType: CredentialDetailSelection = {
+       kind: 'auth-file',
+@@ -321,7 +325,7 @@ describe('CredentialDetailDrawer', () => {
+     }
+     await renderDrawer({ selection: changedType })
+     expect(document.body.querySelector('[data-credential-detail-tab="quota-history"]')?.getAttribute('aria-selected')).toBe('true')
+-    expect(fetchCodexQuotaHistory).toHaveBeenCalledTimes(2)
++    expect(fetchCodexQuotaHistory).toHaveBeenCalledTimes(3)
+     expect(fetchCodexQuotaHistory).toHaveBeenLastCalledWith('auth-file-identity-1', {}, expect.any(AbortSignal))
+   })
+ 
+diff --git a/web/src/components/usage/test/QuotaRemainingHistory.test.tsx b/web/src/components/usage/test/QuotaRemainingHistory.test.tsx
+new file mode 100644
+index 0000000..8594757
+--- /dev/null
++++ b/web/src/components/usage/test/QuotaRemainingHistory.test.tsx
+@@ -0,0 +1,55 @@
++// @vitest-environment happy-dom
++import { act } from 'react'
++import { createRoot, type Root } from 'react-dom/client'
++import { afterEach, beforeEach, expect, it, vi } from 'vitest'
++import type { ComponentProps } from 'react'
++import i18n from '@/i18n'
++import type { CodexQuotaHistoryResponse, QuotaRemainingPoint } from '@/lib/types'
++const api = vi.hoisted(() => ({ fetchCodexQuotaHistory: vi.fn() }))
++vi.mock('@/lib/api', async original => ({ ...await original<typeof import('@/lib/api')>(), ...api }))
++const charts = vi.hoisted(() => ({ props: {} as Record<string, unknown> }))
++vi.mock('react-chartjs-2', () => ({ Chart: (props: Record<string, unknown>) => { charts.props = props; return <div role="img" /> } }))
++import { QuotaRemainingHistory, quotaIntervalValue, visibleRemainingPoints } from '../credentials/QuotaRemainingHistory'
++const usage = { requests: 3, successful_requests: 3, failed_requests: 0, input_tokens: 10, output_tokens: 1, reasoning_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, total_tokens: 11, total_cost_usd: 4.5, cost_available: true }
++const point = (time: string, remaining: number, start: string | null): QuotaRemainingPoint => ({observed_at: time, remaining_percent: remaining, interval_started_at: start, usage})
++const report: CodexQuotaHistoryResponse = { generated_at:'2026-10-19T12:00:00Z', range_start:'2026-10-12T12:00:00Z', windows:[], selected_window:null, cycles:[], remaining_history:[
++  point('2026-10-10T12:00:00Z',30,null), point('2026-10-11T12:00:00Z',20,'2026-10-10T12:00:00Z'), point('2026-10-15T12:00:00Z',100,'2026-10-11T12:00:00Z'), point('2026-10-19T10:00:00Z',98,'2026-10-15T12:00:00Z'),
++] }
++let element: HTMLDivElement; let root: Root
++beforeEach(async () => { globalThis.IS_REACT_ACT_ENVIRONMENT=true; await i18n.changeLanguage('en'); vi.clearAllMocks(); api.fetchCodexQuotaHistory.mockResolvedValue(report); element=document.createElement('div');document.body.append(element);root=createRoot(element) })
++afterEach(async () => { await act(async()=>root.unmount());element.remove() })
++const button = (text: string) => [...element.querySelectorAll('button')].find(node => node.textContent === text)!
++
++it('keeps one real baseline before the range, real change timestamps and reset jumps', () => {
++  expect(visibleRemainingPoints(report).map(p=>p.remaining_percent)).toEqual([20,100,98])
++  expect(quotaIntervalValue({...report.remaining_history![0],interval_started_at:null})).toBe('—')
++  expect(quotaIntervalValue({...report.remaining_history![1],usage:{...usage,cost_available:false}})).toMatch(/^≥ /)
++  expect(quotaIntervalValue({...report.remaining_history![1],usage:{...usage,cost_available:false,total_cost_usd:0}})).toBe('—')
++})
++
++it('defaults to 7 days and retains both tooltip values when the value legend is deselected', async () => {
++  await act(async()=>root.render(<QuotaRemainingHistory authIndex="account" readOnlyAccountId="3" />))
++  expect(api.fetchCodexQuotaHistory).toHaveBeenLastCalledWith('account',{weeklyOnly:true,remainingDays:7,readOnlyAccountId:'3'},expect.any(AbortSignal))
++  expect(button('7d').getAttribute('aria-pressed')).toBe('true')
++  await act(async()=>button('Interval API value').click())
++  expect(button('Interval API value').getAttribute('aria-pressed')).toBe('false')
++  const props = charts.props as unknown as {data:{datasets:{hidden?:boolean}[]};options:{plugins:{tooltip:{callbacks:{label:(item:{dataIndex:number})=>string[]}}}}}
++  expect(props.data.datasets[1].hidden).toBe(true)
++  const lines = props.options.plugins.tooltip.callbacks.label({dataIndex:2})
++  expect(lines[0]).toBe('Remaining quota: 98%');expect(lines[1]).toContain('4.50')
++  const signal=api.fetchCodexQuotaHistory.mock.calls[0][2] as AbortSignal
++  await act(async()=>button('1d').click());expect(signal.aborted).toBe(true)
++  expect(api.fetchCodexQuotaHistory.mock.calls.at(-1)![1].remainingDays).toBe(1)
++  await act(async()=>button('30d').click());expect(api.fetchCodexQuotaHistory.mock.calls.at(-1)![1].remainingDays).toBe(30)
++})
++
++it('discards obsolete account responses and retries errors', async () => {
++  let finish!: (value: CodexQuotaHistoryResponse)=>void
++  api.fetchCodexQuotaHistory.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve})).mockRejectedValueOnce(new Error('offline'))
++  const props: ComponentProps<typeof QuotaRemainingHistory>={authIndex:'old'}
++  await act(async()=>root.render(<QuotaRemainingHistory {...props}/>))
++  await act(async()=>root.render(<QuotaRemainingHistory authIndex="new"/>))
++  await act(async()=>finish(report))
++  expect(element.textContent).toContain('Could not load');expect(element.querySelector('[role="img"]')).toBeNull()
++  await act(async()=>button('Retry').click());expect(element.querySelector('[role="img"]')).not.toBeNull()
++})
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index 2951d3b..625d3b1 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -726,6 +726,7 @@ export async function fetchUsageQuotaCache(authIndexes: string[], signal?: Abort
+ }
+ 
+ export interface FetchCodexQuotaHistoryOptions {
++  remainingDays?: 1 | 7 | 30
+   windowRole?: 'primary' | 'secondary'
+   weeklyOnly?: boolean
+   readOnlyAccountId?: string
+@@ -739,6 +740,7 @@ export async function fetchCodexQuotaHistory(
+   const params = new URLSearchParams()
+   if (options.windowRole) params.set('window_role', options.windowRole)
+   if (options.weeklyOnly) params.set('weekly_only', 'true')
++  if (options.remainingDays) params.set('remaining_days', String(options.remainingDays))
+   const query = params.toString()
+   const path = options.readOnlyAccountId ? `/read-only/accounts/${encodeURIComponent(options.readOnlyAccountId)}/weekly-quota` : `/quota/history/${encodeURIComponent(authIndex)}`
+   const response = await apiFetch(`${apiPath(path)}${query ? `?${query}` : ''}`, { signal })
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 214a6eb..b66a9a5 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -645,7 +645,15 @@ export interface CodexQuotaHistoryCycle {
+ }
+ 
+ // CodexQuotaHistoryResponse 一次请求驱动当前周期图表和包含进行中周期的最近三十天完整列表。
++export interface QuotaRemainingPoint {
++  observed_at: string
++  remaining_percent: number
++  interval_started_at: string | null
++  usage: CodexQuotaHistoryUsage
++}
++
+ export interface CodexQuotaHistoryResponse {
++  remaining_history?: QuotaRemainingPoint[]
+   weekly_value?: WeeklyQuotaValue
+   generated_at: string
+   range_start: string
+diff --git a/web/src/pages/test/ReadOnlyReportingPage.test.tsx b/web/src/pages/test/ReadOnlyReportingPage.test.tsx
+index 42b95fd..8cc5b0f 100644
+--- a/web/src/pages/test/ReadOnlyReportingPage.test.tsx
++++ b/web/src/pages/test/ReadOnlyReportingPage.test.tsx
+@@ -11,6 +11,7 @@ it('renders cached account usage and drill-down without management controls or a
+  globalThis.IS_REACT_ACT_ENVIRONMENT=true;await i18n.changeLanguage('en');localStorage.clear();
+  const identity={id:'3',name:'Codex account 1',displayName:'Codex account 1',identity:'account:opaque',type:'codex',auth_type:1,auth_type_name:'Auth file',disabled:false,is_deleted:false,total_requests:5,success_count:4,failure_count:1,total_tokens:1200,input_tokens:1000,cache_read_tokens:100,period_stats:{total_requests:5,success_count:4,failure_count:1,total_tokens:1200,input_tokens:1000,cache_read_tokens:100}};
+  api.fetchReadOnlyReport.mockImplementation((path:string)=>Promise.resolve(path==='accounts'?{identities:[identity],total_count:1,total_pages:1,type_counts:[{type:'codex',count:1}]}:{items:[{auth_index:'account:opaque',status:'completed',quota:{id:'safe',quota:[{key:'weekly',label:'Weekly',remainingFraction:0.94}]}}]}));
++  api.fetchCodexQuotaHistory.mockResolvedValue({generated_at:new Date().toISOString(),range_start:new Date().toISOString(),windows:[],selected_window:null,cycles:[]});
+  api.fetchUsageEvents.mockResolvedValue({events:[],has_more:false});
+  const element=document.createElement('div');document.body.append(element);const root=createRoot(element);
+  try {
+@@ -24,7 +25,7 @@ it('renders cached account usage and drill-down without management controls or a
+   const requestTab=document.querySelector<HTMLButtonElement>('[data-credential-detail-tab="requests"]');expect(requestTab).not.toBeNull();
+   expect(document.querySelector('[data-credential-detail-tab="errors"]')).toBeNull();
+   const weeklyTab=document.querySelector<HTMLButtonElement>('[data-credential-detail-tab="quota-history"]');expect(weeklyTab).not.toBeNull();
+-  api.fetchCodexQuotaHistory.mockResolvedValue({generated_at:new Date().toISOString(),range_start:new Date().toISOString(),windows:[],selected_window:null,cycles:[]});
++
+   await act(async()=>weeklyTab!.click());
+   expect(api.fetchCodexQuotaHistory).toHaveBeenCalledWith('account:opaque',expect.objectContaining({weeklyOnly:true,readOnlyAccountId:'3'}),expect.any(AbortSignal));
+   expect(document.querySelector('[aria-label="Delete cycle"]')).toBeNull();

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.36
+
+- Add weekly remaining-quota history below Recent health in account Overview, with 1/7/30-day periods and seven days selected by default. Plot actual detected changes and interval API value on separate axes.
+- Allow API value to be hidden from the legend while keeping both values in tooltips, including reset intervals and incomplete-price indicators.
+
 ## 0.1.35
 
 - Compact weekly cycle values into one column: API value per 1%, total delivered value and last observed window usage. Show observed percentage, intervals and requests together; move explanations into coverage.

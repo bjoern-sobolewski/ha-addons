@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15
+
+- Route self-contained Codex WebSocket requests of 8 MiB or larger over upstream HTTP before sending them, avoiding oversized-frame reconnect loops during compaction.
+- Keep the client WebSocket open and retain HTTP conversation state for compaction, tool continuations and interruption. New connections with small requests still use upstream WebSockets.
+- Preserve connection-local deltas on their existing upstream transport; never replay incomplete history over HTTP.
+
 ## 0.1.14
 
 - Update CLIProxyAPI to 8.0.28 and the pinned management panel to 1.26.3.

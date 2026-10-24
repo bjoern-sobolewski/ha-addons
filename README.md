@@ -46,6 +46,8 @@ Authorization: Bearer <machine's CPA client key>
 
 Use `https://codex.example.com/v1` as the client API base URL. The gateway forwards `/v1/` requests with streaming buffering disabled, supports WebSocket upgrades, and returns 404 for other paths. Management (`/v0/management`, `/v8/management`) and `/management.html` are therefore unavailable through this route. Never point the public tunnel at port 8317 or Keeper's port.
 
+Codex full-context WebSocket requests of 8 MiB or larger automatically use HTTP upstream while the client WebSocket stays open. That connection retains HTTP conversation state for later turns; new small-request connections still use WebSockets. Incremental requests that depend on an existing upstream WebSocket are not blindly replayed over HTTP.
+
 Before connecting a real client, check that missing/incorrect Access credentials are rejected at Cloudflare, missing/incorrect CPA keys are rejected by CPA, a valid `/v1/models` request succeeds, and `/management.html` returns 404 even with valid credentials. Then test an actual long streaming request with your provider; the local gateway's one-hour read timeout does not override Cloudflare's limits.
 
 ## Storage and backups

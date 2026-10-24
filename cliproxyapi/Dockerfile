@@ -23,13 +23,15 @@ COPY patches/interrupt-test-sync.patch /tmp/interrupt-test-sync.patch
 RUN git apply --check /tmp/interrupt-test-sync.patch && git apply /tmp/interrupt-test-sync.patch
 COPY patches/upstream-compatibility.patch /tmp/upstream-compatibility.patch
 RUN git apply --check /tmp/upstream-compatibility.patch && git apply /tmp/upstream-compatibility.patch
+COPY patches/oversized-codex-http.patch /tmp/oversized-codex-http.patch
+RUN git apply --check /tmp/oversized-codex-http.patch && git apply /tmp/oversized-codex-http.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/ ./
 RUN go test ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
 RUN go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
 RUN go test ./sdk/api/handlers/openai
-RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.28-ha.1" -o /out/CLIProxyAPI ./cmd/server
+RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.28-ha.2" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -65,7 +67,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.14
+ARG BUILD_VERSION=0.1.15
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

@@ -1,0 +1,487 @@
+diff --git a/internal/runtime/executor/codex_oversized_websocket_test.go b/internal/runtime/executor/codex_oversized_websocket_test.go
+new file mode 100644
+index 00000000..7734f2d2
+--- /dev/null
++++ b/internal/runtime/executor/codex_oversized_websocket_test.go
+@@ -0,0 +1,232 @@
++package executor
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++	"github.com/tidwall/gjson"
++)
++
++// Exercise the real handler, auth manager and auto executor on both sides of
++// the transport switch. No credentials or external provider are required.
++func TestCodexOversizedWebsocketCompactionAndContinuation(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	for _, prewarm := range []bool{false, true} {
++		t.Run(fmt.Sprintf("prewarm=%v", prewarm), func(t *testing.T) {
++			var wsCalls, httpCalls atomic.Int32
++			requests := make(chan []byte, 8)
++			canceled := make(chan struct{})
++			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if websocket.IsWebSocketUpgrade(r) {
++					c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++					if err != nil {
++						return
++					}
++					defer c.Close()
++					for {
++						_, body, err := c.ReadMessage()
++						if err != nil {
++							return
++						}
++						wsCalls.Add(1)
++						if len(body) >= 8*1024*1024 {
++							t.Error("oversized replay reached upstream WebSocket")
++						}
++						_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"warm","status":"completed","output":[]}}`))
++					}
++				}
++				body, err := io.ReadAll(r.Body)
++				if err != nil {
++					t.Error(err)
++					return
++				}
++				requests <- body
++				if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer test-only" {
++					t.Error("HTTP transport lost method/authentication")
++				}
++				if gjson.GetBytes(body, "previous_response_id").Exists() {
++					t.Error("HTTP received connection-local previous_response_id")
++				}
++				if gjson.GetBytes(body, "service_tier").String() != "priority" {
++					t.Error("HTTP lost service tier")
++				}
++				n := httpCalls.Add(1)
++				if n == 4 {
++					w.Header().Set("Content-Type", "text/event-stream")
++					fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-4\",\"status\":\"in_progress\"}}\n\n")
++					w.(http.Flusher).Flush()
++					select {
++					case <-r.Context().Done():
++						close(canceled)
++					case <-time.After(10 * time.Second):
++						t.Error("HTTP interrupt did not cancel upstream")
++					}
++					return
++				}
++
++				output := `[]`
++				switch n {
++				case 1:
++					output = `[{"type":"compaction","id":"cmp-1","encrypted_content":"opaque-summary"}]`
++				case 2:
++					output = `[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"check","arguments":"{}","status":"completed"}]`
++				}
++				w.Header().Set("Content-Type", "text/event-stream")
++				fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-%d\",\"status\":\"completed\",\"output\":%s,\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n", n, output)
++			}))
++			defer upstream.Close()
++			manager := coreauth.NewManager(nil, nil, nil)
++			manager.RegisterExecutor(NewCodexAutoExecutor(&config.Config{}))
++			auth := &coreauth.Auth{ID: "oversized-test", Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": "true", "base_url": upstream.URL, "api_key": "test-only"}}
++			if _, err := manager.Register(context.Background(), auth); err != nil {
++				t.Fatal(err)
++			}
++			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "oversized-test-model"}})
++			defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
++			h := openai.NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
++			router := gin.New()
++			router.GET("/v1/responses", h.ResponsesWebsocket)
++			server := httptest.NewServer(router)
++			defer server.Close()
++			dial := func() *websocket.Conn {
++				c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
++				if err != nil {
++					t.Fatal(err)
++				}
++				return c
++			}
++			c := dial()
++			defer c.Close()
++			turn := func(conn *websocket.Conn, body string) []byte {
++				t.Helper()
++				_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
++				if err := conn.WriteMessage(websocket.TextMessage, []byte(body)); err != nil {
++					t.Fatal(err)
++				}
++				for {
++					_, event, err := conn.ReadMessage()
++					if err != nil {
++						t.Fatal(err)
++					}
++					switch gjson.GetBytes(event, "type").String() {
++					case "error", "response.failed":
++						t.Fatalf("unexpected error: %.500s", event)
++					case "response.completed":
++						return event
++					}
++				}
++			}
++			if prewarm {
++				turn(c, `{"type":"response.create","model":"oversized-test-model","generate":false,"input":[]}`)
++			}
++			// Match the failing production shape: a full transcript plus compaction
++			// trigger, larger than the upstream frame limit, over the same client socket.
++			large := strings.Repeat("x", 26*1024*1024)
++			modelField := `,"model":"oversized-test-model"`
++			if prewarm {
++				modelField = ""
++			} // inherit model when replacing a native WS transcript
++			turn(c, `{"type":"response.create"`+modelField+`,"service_tier":"priority","input":[{"type":"message","role":"user","content":"`+large+`"},{"type":"compaction_trigger"}]}`)
++			captured := <-requests
++			if gjson.GetBytes(captured, "input.0.content").String() != large {
++				t.Fatal("large transcript truncated or changed")
++			}
++			if gjson.GetBytes(captured, "input.1.type").String() != "compaction_trigger" {
++				t.Fatal("compaction trigger lost")
++			}
++			turn(c, `{"type":"response.create","model":"oversized-test-model","service_tier":"priority","input":[{"type":"compaction","id":"cmp-1","encrypted_content":"opaque-summary"},{"type":"message","role":"user","content":"continue"}]}`)
++			captured = <-requests
++			if gjson.GetBytes(captured, "input.#").Int() != 2 || gjson.GetBytes(captured, "input.0.encrypted_content").String() != "opaque-summary" {
++				t.Fatal("compacted transcript not used as replacement")
++			}
++			completed := turn(c, `{"type":"response.create","previous_response_id":"resp-2","service_tier":"priority","input":[{"type":"function_call_output","call_id":"call-1","output":"done"}]}`)
++			captured = <-requests
++			if gjson.GetBytes(captured, "input.#").Int() != 4 || gjson.GetBytes(captured, "input.2.call_id").String() != "call-1" || gjson.GetBytes(captured, "input.3.output").String() != "done" {
++				t.Fatal("HTTP continuation lost tool history")
++			}
++			if gjson.GetBytes(completed, "response.usage.total_tokens").Int() != 5 {
++				t.Fatal("usage lost across SSE/WebSocket bridge")
++			}
++			if httpCalls.Load() != 3 {
++				t.Fatalf("HTTP executions=%d, want 3", httpCalls.Load())
++			}
++			expectedWS := int32(0)
++			if prewarm {
++				expectedWS = 1
++			}
++			if wsCalls.Load() != expectedWS {
++				t.Fatalf("WebSocket executions=%d, want %d", wsCalls.Load(), expectedWS)
++			}
++			// Interrupt must cancel HTTP rather than write to the retired WS,
++			// and the same downstream socket must remain usable afterward.
++			if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","previous_response_id":"resp-3","service_tier":"priority","input":[]}`)); err != nil {
++				t.Fatal(err)
++			}
++			_, created, err := c.ReadMessage()
++			if err != nil || gjson.GetBytes(created, "type").String() != "response.created" {
++				t.Fatalf("created event: %s %v", created, err)
++			}
++			<-requests
++			if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"resp-4","mode":"discard_partial_items"}`)); err != nil {
++				t.Fatal(err)
++			}
++			_, interrupted, err := c.ReadMessage()
++			if err != nil || gjson.GetBytes(interrupted, "response.incomplete_details.reason").String() != "interrupted" {
++				t.Fatalf("interrupt event: %s %v", interrupted, err)
++			}
++			select {
++			case <-canceled:
++			case <-time.After(10 * time.Second):
++				t.Fatal("HTTP not canceled")
++			}
++			turn(c, `{"type":"response.create","previous_response_id":"resp-4","service_tier":"priority","input":[]}`)
++			<-requests
++			if httpCalls.Load() != 5 {
++				t.Fatalf("unexpected HTTP execution count: %d", httpCalls.Load())
++			}
++			// HTTP preference is connection-local, not a global auth/config mutation.
++			fresh := dial()
++			defer fresh.Close()
++			turn(fresh, `{"type":"response.create","model":"oversized-test-model","input":[]}`)
++			if wsCalls.Load() != expectedWS+1 {
++				t.Fatal("fresh small connection did not use WebSocket")
++			}
++		})
++	}
++}
++
++func TestCodexAutoExecutorConflictingTransportRequirementsRejectReplay(t *testing.T) {
++	exec := NewCodexAutoExecutor(&config.Config{})
++	ctx := coreexecutor.WithRequiredUpstreamHTTP(coreexecutor.WithRequiredUpstreamWebsocket(coreexecutor.WithDownstreamWebsocket(context.Background())))
++	auth := &coreauth.Auth{Attributes: map[string]string{"websockets": "true"}}
++	req := coreexecutor.Request{Model: "test", Payload: []byte(`{"previous_response_id":"connection-local"}`)}
++	opts := coreexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
++	for _, stream := range []bool{false, true} {
++		var err error
++		if stream {
++			_, err = exec.ExecuteStream(ctx, auth, req, opts)
++		} else {
++			_, err = exec.Execute(ctx, auth, req, opts)
++		}
++		if err == nil || !strings.Contains(err.Error(), "upstream_http_replay_required") {
++			t.Fatalf("stream=%v: expected replay-required error, got %v", stream, err)
++		}
++	}
++}
+diff --git a/internal/runtime/executor/codex_websockets_executor.go b/internal/runtime/executor/codex_websockets_executor.go
+index 65ec499c..3029275d 100644
+--- a/internal/runtime/executor/codex_websockets_executor.go
++++ b/internal/runtime/executor/codex_websockets_executor.go
+@@ -75,7 +75,7 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
+ 	if e == nil || e.httpExec == nil || e.wsExec == nil {
+ 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
+ 	}
+-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
++	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) && !cliproxyexecutor.RequiredUpstreamHTTP(ctx) {
+ 		return e.wsExec.Execute(ctx, auth, req, opts)
+ 	}
+ 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
+@@ -88,7 +88,7 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
+ 	if e == nil || e.httpExec == nil || e.wsExec == nil {
+ 		return nil, fmt.Errorf("codex auto executor: executor is nil")
+ 	}
+-	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) {
++	if cliproxyexecutor.DownstreamWebsocket(ctx) && codexWebsocketsEnabled(auth) && !cliproxyexecutor.RequiredUpstreamHTTP(ctx) {
+ 		return e.wsExec.ExecuteStream(ctx, auth, req, opts)
+ 	}
+ 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
+diff --git a/sdk/api/handlers/openai/openai_responses_oversized_test.go b/sdk/api/handlers/openai/openai_responses_oversized_test.go
+new file mode 100644
+index 00000000..f10ad8a7
+--- /dev/null
++++ b/sdk/api/handlers/openai/openai_responses_oversized_test.go
+@@ -0,0 +1,90 @@
++package openai
++
++import (
++	"context"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
++	"github.com/tidwall/gjson"
++)
++
++type oversizedTransportChoice struct{ http, ws bool }
++type oversizedCaptureExecutor struct {
++	websocketProviderCaptureExecutor
++	choices chan oversizedTransportChoice
++}
++
++func (e *oversizedCaptureExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
++	e.choices <- oversizedTransportChoice{coreexecutor.RequiredUpstreamHTTP(ctx), coreexecutor.RequiredUpstreamWebsocket(ctx)}
++	return e.websocketCaptureExecutor.ExecuteStream(ctx, auth, req, opts)
++}
++
++func TestResponsesWebsocketOversizedTransportBoundaries(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	for _, tc := range []struct {
++		name, provider, kind, parent string
++		large, wantHTTP, wantWS      bool
++	}{
++		{name: "small Codex", provider: "codex", kind: "response.create"},
++		{name: "large Codex reset", provider: "codex", kind: "response.create", large: true, wantHTTP: true},
++		{name: "large xAI unchanged", provider: "xai", kind: "response.create", large: true},
++		{name: "large delta must retain upstream state", provider: "codex", kind: "response.create", parent: `,"previous_response_id":"resp-upstream"`, large: true, wantWS: true},
++		{name: "large append must retain upstream state", provider: "codex", kind: "response.append", large: true, wantWS: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			exec := &oversizedCaptureExecutor{websocketProviderCaptureExecutor: websocketProviderCaptureExecutor{provider: tc.provider}, choices: make(chan oversizedTransportChoice, 4)}
++			manager := coreauth.NewManager(nil, nil, nil)
++			manager.RegisterExecutor(exec)
++			auth := &coreauth.Auth{ID: "size-boundary", Provider: tc.provider, Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": "true"}}
++			if _, err := manager.Register(context.Background(), auth); err != nil {
++				t.Fatal(err)
++			}
++			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "boundary-model"}})
++			defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
++			h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
++			router := gin.New()
++			router.GET("/responses", h.ResponsesWebsocket)
++			server := httptest.NewServer(router)
++			defer server.Close()
++			c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/responses", nil)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer c.Close()
++			turn := func(body string) {
++				t.Helper()
++				_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
++				if err := c.WriteMessage(websocket.TextMessage, []byte(body)); err != nil {
++					t.Fatal(err)
++				}
++				_, event, err := c.ReadMessage()
++				if err != nil {
++					t.Fatal(err)
++				}
++				if gjson.GetBytes(event, "type").String() != "response.completed" {
++					t.Fatalf("unexpected response: %.300s", event)
++				}
++			}
++			turn(`{"type":"response.create","model":"boundary-model","input":[]}`)
++			<-exec.choices
++			content := "small"
++			if tc.large {
++				content = strings.Repeat("x", responsesWebsocketCodexHTTPThreshold)
++			}
++			turn(`{"type":"` + tc.kind + `"` + tc.parent + `,"input":[{"type":"message","role":"user","content":"` + content + `"}]}`)
++			got := <-exec.choices
++			if got.http != tc.wantHTTP || got.ws != tc.wantWS {
++				t.Fatalf("transport requirements=%+v, want HTTP=%v WS=%v", got, tc.wantHTTP, tc.wantWS)
++			}
++		})
++	}
++}
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 2b5ab5e0..e0c12b41 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -303,6 +303,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 	wsDone := make(chan struct{})
+ 	defer close(wsDone)
+ 	var codexDuplexStream atomic.Bool
++	// Sticky for this downstream socket: subsequent deltas use retained HTTP history.
++	var codexHTTPOnly atomic.Bool
+ 
+ 	if h != nil && h.AuthManager != nil {
+ 		type upstreamDisconnectSubscriber interface {
+@@ -321,7 +323,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 						case <-wsDone:
+ 							return
+ 						case disconnectErr := <-disconnectCh:
+-							if provider == "codex" && codexDuplexStream.Load() {
++							if provider == "codex" && (codexDuplexStream.Load() || codexHTTPOnly.Load()) {
+ 								// Only the selected credential's duplex stream owns closure:
+ 								// drain its acknowledgements and pending events in order.
+ 								// OAuth-only steering still leaves API keys in normal mode.
+@@ -391,6 +393,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 	upstreamModeForAuth := func(auth *coreauth.Auth) string {
+ 		if auth != nil && websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
+ 			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
++			if provider == "codex" && codexHTTPOnly.Load() {
++				return responsesWebsocketUpstreamModeHTTP
++			}
+ 			if provider == "codex" || provider == "xai" {
+ 				return responsesWebsocketUpstreamModeWS
+ 			}
+@@ -507,6 +512,24 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 				useUpstreamWebsocketPassthrough = provider == "codex" || provider == "xai"
+ 			}
+ 		}
++
++		// Decide before normalization: HTTP must retain the complete transcript,
++		// whereas native WebSocket passthrough keeps only upstream session state.
++		providerRoute, _ := handlers.PreparedStreamProviderRoute(executionParent)
++		providers, _ := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(requestModelName))
++		_, codexModel := providers["codex"]
++		codexRoute := !isPluginExecutorRoute && (providerRoute == "codex" ||
++			(!routeOverridesModelResolution && codexModel))
++		switchCodexHTTP := codexRoute && !codexHTTPOnly.Load() && len(payload) >= responsesWebsocketCodexHTTPThreshold &&
++			gjson.ValidBytes(payload) && gjson.GetBytes(payload, "type").String() == wsRequestTypeCreate &&
++			!responsesWebsocketRequestRequiresCurrentUpstream(payload)
++		forceCodexHTTP := codexRoute && (codexHTTPOnly.Load() || switchCodexHTTP)
++		if switchCodexHTTP && explicitRequestModelName == "" && requestModelName != "" {
++			payload, _ = sjson.SetBytes(payload, "model", requestModelName)
++		}
++		if forceCodexHTTP {
++			useUpstreamWebsocketPassthrough = false
++		}
+ 		nativeWebsocketPassthrough := !routeOverridesModelResolution && responsesWebsocketNativePassthroughAllowed(
+ 			upstreamMode,
+ 			useUpstreamWebsocketPassthrough,
+@@ -661,6 +684,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 			continue
+ 		}
+ 
++		if switchCodexHTTP {
++			// Commit only after validation. Retire the old upstream after disarming
++			// its disconnect watcher; the downstream connection stays open.
++			codexHTTPOnly.Store(true)
++			if exec, ok := h.AuthManager.Executor("codex"); ok {
++				if closer, ok := exec.(interface{ CloseExecutionSession(string) }); ok {
++					closer.CloseExecutionSession(passthroughSessionID)
++				}
++			}
++			log.Infof("responses websocket: routing oversized Codex request over HTTP id=%s bytes=%d", passthroughSessionID, len(payload))
++		}
++
+ 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
+ 		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
+ 
+@@ -706,6 +741,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		pinnedAuthAttempted := false
+ 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, executionParent)
+ 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
++		if forceCodexHTTP {
++			cliCtx = cliproxyexecutor.WithRequiredUpstreamHTTP(cliCtx)
++		}
+ 		if duplexInput != nil {
+ 			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
+ 			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
+@@ -884,6 +922,10 @@ func responsesWebsocketHTTPReplayRequiredError() error {
+ 	return cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
+ }
+ 
++// Leave headroom below the upstream WebSocket frame limit, including executor
++// transformations. This is a routing threshold, not a request-size rejection.
++const responsesWebsocketCodexHTTPThreshold = 8 * 1024 * 1024
++
+ func responsesWebsocketRequestRequiresCurrentUpstream(payload []byte) bool {
+ 	return strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" ||
+ 		strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeAppend
+diff --git a/sdk/cliproxy/executor/context.go b/sdk/cliproxy/executor/context.go
+index 30cbebf5..fa7adebb 100644
+--- a/sdk/cliproxy/executor/context.go
++++ b/sdk/cliproxy/executor/context.go
+@@ -7,6 +7,7 @@ import (
+ 
+ type downstreamWebsocketContextKey struct{}
+ type requireUpstreamWebsocketContextKey struct{}
++type requireUpstreamHTTPContextKey struct{}
+ type upstreamAttemptTrackerContextKey struct{}
+ 
+ type upstreamAttemptTracker struct {
+@@ -77,3 +78,21 @@ func UpstreamAttempted(ctx context.Context) bool {
+ 	tracker, ok := ctx.Value(upstreamAttemptTrackerContextKey{}).(*upstreamAttemptTracker)
+ 	return ok && tracker != nil && tracker.attempted.Load()
+ }
++
++// WithRequiredUpstreamHTTP selects HTTP after the caller has assembled replayable
++// request context. It must never be used to replay a connection-local delta.
++func WithRequiredUpstreamHTTP(ctx context.Context) context.Context {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	return context.WithValue(ctx, requireUpstreamHTTPContextKey{}, true)
++}
++
++// RequiredUpstreamHTTP reports whether the caller selected HTTP transport.
++func RequiredUpstreamHTTP(ctx context.Context) bool {
++	if ctx == nil {
++		return false
++	}
++	enabled, _ := ctx.Value(requireUpstreamHTTPContextKey{}).(bool)
++	return enabled
++}

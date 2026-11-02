@@ -18,6 +18,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - run: python -m unittest discover -s tests -v
 
@@ -53,6 +54,7 @@ jobs:
       matrix:
         suite: [smoke, oversized_flow, quota_flow, weekly_quota_flow]
     env:
+      PYTHONUNBUFFERED: '1'
       CPA_TEST_IMAGE: ha-cliproxyapi-ci:local
       CPA_QUOTA_IMAGE: ha-cliproxyapi-ci:local
       KEEPER_TEST_IMAGE: ha-cpa-usage-keeper-ci:local
@@ -64,6 +66,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - uses: actions/download-artifact@v4
         with:
@@ -126,6 +129,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - name: Read app metadata
         id: app
@@ -170,6 +174,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - name: Read app metadata
         id: app

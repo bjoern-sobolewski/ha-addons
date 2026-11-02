@@ -1,0 +1,680 @@
+diff --git a/src/features/authFiles/AuthFilesPage.tsx b/src/features/authFiles/AuthFilesPage.tsx
+index 7ce9a3f..81c04fd 100644
+--- a/src/features/authFiles/AuthFilesPage.tsx
++++ b/src/features/authFiles/AuthFilesPage.tsx
+@@ -1,6 +1,8 @@
+ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { useNavigate } from 'react-router-dom';
++import { apiClient } from '@/services/api/client';
++import { makeCodexReconnectTarget } from './reconnect';
+ import { useInterval } from '@/hooks/useInterval';
+ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+ import { useRevealOnScroll } from '@/hooks/motion';
+@@ -726,6 +728,14 @@ export function AuthFilesPage() {
+                 onShowModels={showModels}
+                 onDownload={handleDownload}
+                 onManualRefresh={handleManualRefresh}
++                onReconnect={(item) => {
++                  const target = makeCodexReconnectTarget(
++                    item,
++                    apiClient.getConnectionRevision(),
++                    useAuthStore.getState().apiBase
++                  );
++                  if (target) navigate('/auth-files/reconnect', { state: target });
++                }}
+                 onCooldownReset={handleCooldownReset}
+                 onOpenPrefixProxyEditor={openPrefixProxyEditor}
+                 onDelete={handleDelete}
+diff --git a/src/features/authFiles/CodexReconnectPage.module.scss b/src/features/authFiles/CodexReconnectPage.module.scss
+new file mode 100644
+index 0000000..d9bc772
+--- /dev/null
++++ b/src/features/authFiles/CodexReconnectPage.module.scss
+@@ -0,0 +1,31 @@
++.card {
++  > p {
++    margin-block: $spacing-md;
++  }
++
++  > :global(.btn) {
++    margin-inline-end: $spacing-sm;
++  }
++}
++
++.title {
++  margin: 0;
++  font-size: 28px;
++}
++
++.flow {
++  display: flex;
++  flex-direction: column;
++  align-items: flex-start;
++  gap: $spacing-md;
++  margin-block: $spacing-md;
++  overflow-wrap: anywhere;
++}
++
++.error {
++  color: $error-color;
++}
++
++.success {
++  color: $success-color;
++}
+diff --git a/src/features/authFiles/CodexReconnectPage.tsx b/src/features/authFiles/CodexReconnectPage.tsx
+new file mode 100644
+index 0000000..a927609
+--- /dev/null
++++ b/src/features/authFiles/CodexReconnectPage.tsx
+@@ -0,0 +1,230 @@
++import { useEffect, useRef, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import { useLocation, useNavigate } from 'react-router-dom';
++import { Button } from '@/components/ui/Button';
++import { Card } from '@/components/ui/Card';
++import { Input } from '@/components/ui/Input';
++import { oauthApi } from '@/services/api/oauth';
++import { apiClient } from '@/services/api/client';
++import { useAuthStore, useQuotaStore } from '@/stores';
++import { copyToClipboard } from '@/utils/clipboard';
++import { getErrorMessage } from '@/utils/helpers';
++import { createOAuthAttempts } from '@/features/oauth/oauthAttempts';
++import { notifyAuthFilesChanged } from './authFilesEvents';
++import { readCodexReconnectTarget } from './reconnect';
++import styles from './CodexReconnectPage.module.scss';
++
++export function CodexReconnectPage() {
++  const { t } = useTranslation();
++  const location = useLocation();
++  const navigate = useNavigate();
++  const apiBase = useAuthStore((state) => state.apiBase);
++  const [status, setStatus] = useState<'idle' | 'starting' | 'waiting' | 'success' | 'error'>(
++    'idle'
++  );
++  const [login, setLogin] = useState<{ url: string; state: string }>();
++  const [callback, setCallback] = useState('');
++  const [error, setError] = useState('');
++  const [busy, setBusy] = useState(false);
++  const pending = useRef(false);
++  const attempts = useRef(
++    createOAuthAttempts({
++      setTimeout: (fn, delay) => window.setTimeout(fn, delay),
++      clearTimeout: (timer) => window.clearTimeout(timer),
++    })
++  );
++  const target = readCodexReconnectTarget(
++    location.state,
++    apiClient.getConnectionRevision(),
++    apiBase
++  );
++
++  useEffect(() => {
++    const unsubscribe = useAuthStore.subscribe((current, previous) => {
++      if (
++        current.apiBase !== previous.apiBase ||
++        current.managementKey !== previous.managementKey ||
++        current.isAuthenticated !== previous.isAuthenticated
++      ) {
++        attempts.current.invalidateAll();
++        setLogin(undefined);
++        setStatus('idle');
++        setBusy(false);
++        pending.current = false;
++      }
++    });
++    const activeAttempts = attempts.current;
++    return () => {
++      unsubscribe();
++      activeAttempts.invalidateAll();
++    };
++  }, []);
++
++  const complete = () => {
++    attempts.current.invalidateAll();
++    setLogin(undefined);
++    setStatus('success');
++    setBusy(false);
++    pending.current = false;
++    useQuotaStore.getState().clearQuotaCache();
++    notifyAuthFilesChanged();
++  };
++
++  const start = async () => {
++    if (!target || pending.current || login || status === 'success') return;
++    pending.current = true;
++    const attempt = attempts.current.begin('codex');
++    setError('');
++    setStatus('starting');
++    try {
++      const result = await oauthApi.reconnectCodex(target, attempt.signal);
++      if (!attempt.isCurrent()) return;
++      if (!result.state || !result.url) throw new Error(t('auth_files.reconnect_missing_state'));
++      setLogin({ url: result.url, state: result.state });
++      setStatus('waiting');
++      const poll = () =>
++        attempt.poll(
++          () => oauthApi.getAuthStatus(result.state!, attempt.signal),
++          (response) => {
++            if (response.status === 'ok') {
++              complete();
++              return false;
++            }
++            if (response.status === 'error') {
++              attempt.invalidate();
++              setLogin(undefined);
++              setStatus('error');
++              setError(response.error || t('auth_files.reconnect_failed'));
++              return false;
++            }
++            return true;
++          },
++          (failure) => {
++            setStatus('error');
++            setError(getErrorMessage(failure));
++            if (attempt.isCurrent()) poll();
++          },
++          1500
++        );
++      poll();
++    } catch (failure) {
++      if (!attempt.isCurrent()) return;
++      attempt.invalidate();
++      setStatus('error');
++      setError(
++        (failure as { status?: number }).status === 404
++          ? t('auth_files.reconnect_requires_backend')
++          : getErrorMessage(failure)
++      );
++    } finally {
++      if (attempt.isCurrent()) pending.current = false;
++      // Invalidated attempts must not release a newer request's guard.
++      if (!attempts.current.get('codex')) pending.current = false;
++    }
++  };
++
++  const submit = async () => {
++    const attempt = attempts.current.get('codex');
++    if (!login || !attempt?.isCurrent() || pending.current || !callback.trim()) return;
++    pending.current = true;
++    setBusy(true);
++    try {
++      await oauthApi.submitCallback('codex', callback.trim(), attempt.signal);
++      if (!attempt.isCurrent()) return;
++      setCallback('');
++      setError('');
++    } catch (failure) {
++      if (attempt.isCurrent()) setError(getErrorMessage(failure));
++    } finally {
++      if (attempt.isCurrent()) {
++        pending.current = false;
++        setBusy(false);
++      }
++    }
++  };
++
++  const back = async () => {
++    if (pending.current) return;
++    const attempt = attempts.current.get('codex');
++    if (login && attempt?.isCurrent()) {
++      pending.current = true;
++      setBusy(true);
++      try {
++        const result = await oauthApi.cancelSession(login.state, attempt.signal);
++        if (!attempt.isCurrent()) return;
++        if (!result.cancelled) {
++          const resultStatus = await oauthApi.getAuthStatus(login.state, attempt.signal);
++          if (!attempt.isCurrent()) return;
++          if (resultStatus.status === 'wait')
++            throw new Error(t('auth_files.reconnect_cancel_failed'));
++          if (resultStatus.status === 'ok') complete();
++        }
++        attempt.invalidate();
++      } catch (failure) {
++        if (attempt.isCurrent()) {
++          setError(getErrorMessage(failure));
++          pending.current = false;
++          setBusy(false);
++        }
++        return;
++      }
++    }
++    navigate('/auth-files');
++  };
++
++  return (
++    <Card
++      className={styles.card}
++      title={<h1 className={styles.title}>{t('auth_files.reconnect_title')}</h1>}
++    >
++      <p>
++        {target
++          ? t('auth_files.reconnect_hint', { name: target.name })
++          : t('auth_files.reconnect_invalid')}
++      </p>
++      {error && (
++        <p className={styles.error} role="alert">
++          {error}
++        </p>
++      )}
++      {status === 'success' && (
++        <p className={styles.success} role="status">
++          {t('auth_files.reconnect_success')}
++        </p>
++      )}
++      {target && !login && status !== 'success' && (
++        <Button onClick={() => void start()} loading={status === 'starting'}>
++          {t('auth_files.reconnect_button')}
++        </Button>
++      )}
++      {login && (
++        <div className={styles.flow}>
++          <p role="status">{t('auth_files.reconnect_waiting')}</p>
++          <Button onClick={() => window.open(login.url, '_blank', 'noopener,noreferrer')}>
++            {t('auth_files.reconnect_open')}
++          </Button>
++          <Button variant="secondary" onClick={() => void copyToClipboard(login.url)}>
++            {t('auth_files.reconnect_copy')}
++          </Button>
++          <Input
++            label={t('auth_files.reconnect_callback')}
++            value={callback}
++            onChange={(event) => setCallback(event.target.value)}
++            hint={t('auth_files.reconnect_callback_hint')}
++            disabled={busy}
++          />
++          <Button onClick={() => void submit()} loading={busy} disabled={!callback.trim()}>
++            {t('auth_files.reconnect_submit')}
++          </Button>
++        </div>
++      )}
++      <Button
++        variant="secondary"
++        onClick={() => void back()}
++        disabled={status === 'starting' || busy}
++      >
++        {t(login ? 'auth_files.reconnect_cancel' : 'auth_files.reconnect_back')}
++      </Button>
++    </Card>
++  );
++}
+diff --git a/src/features/authFiles/components/AuthFileCard.tsx b/src/features/authFiles/components/AuthFileCard.tsx
+index ffc1cc5..bf98f99 100644
+--- a/src/features/authFiles/components/AuthFileCard.tsx
++++ b/src/features/authFiles/components/AuthFileCard.tsx
+@@ -1,5 +1,6 @@
+ import { useState, type CSSProperties } from 'react';
+ import { getAuthFileRefreshKey } from '@/features/authFiles/manualRefresh';
++import { makeCodexReconnectTarget } from '@/features/authFiles/reconnect';
+ import { useTranslation } from 'react-i18next';
+ import { Button } from '@/components/ui/Button';
+ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+@@ -54,6 +55,7 @@ export type AuthFileCardProps = {
+   onShowModels: (file: AuthFileItem) => void;
+   onDownload: (name: string) => void;
+   onManualRefresh: (file: AuthFileItem) => void;
++  onReconnect?: (file: AuthFileItem) => void;
+   onCooldownReset: (file: AuthFileItem) => void;
+   onOpenPrefixProxyEditor: (file: AuthFileItem) => void;
+   onDelete: (name: string) => void;
+@@ -79,6 +81,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
+     onShowModels,
+     onDownload,
+     onManualRefresh,
++    onReconnect,
+     onCooldownReset,
+     onOpenPrefixProxyEditor,
+     onDelete,
+@@ -274,6 +277,17 @@ export function AuthFileCard(props: AuthFileCardProps) {
+           )}
+           {!isRuntimeOnly && (
+             <div className={styles.utilityActions}>
++              {onReconnect && makeCodexReconnectTarget(file, 0) && (
++                <Button
++                  variant="secondary"
++                  size="sm"
++                  onClick={() => onReconnect(file)}
++                  disabled={disableControls || isManualRefreshing || deleting === file.name}
++                  aria-label={t('auth_files.reconnect_account', { name: file.name })}
++                >
++                  {t('auth_files.reconnect_button')}
++                </Button>
++              )}
+               {showManualRefreshButton && (
+                 <Button
+                   variant="secondary"
+diff --git a/src/features/authFiles/reconnect.ts b/src/features/authFiles/reconnect.ts
+new file mode 100644
+index 0000000..495aed3
+--- /dev/null
++++ b/src/features/authFiles/reconnect.ts
+@@ -0,0 +1,41 @@
++import type { AuthFileItem } from '@/types';
++
++export interface CodexReconnectTarget {
++  name: string;
++  authIndex: string;
++  connectionRevision: number;
++  apiBase: string;
++}
++
++export function makeCodexReconnectTarget(
++  file: AuthFileItem,
++  connectionRevision: number,
++  apiBase = ''
++): CodexReconnectTarget | null {
++  const runtimeOnly = file.runtimeOnly ?? file['runtime_only'];
++  if (runtimeOnly === true || runtimeOnly === 'true') return null;
++  if (String(file.type ?? file.provider).toLowerCase() !== 'codex') return null;
++  const authIndex = typeof file.authIndex === 'string' ? file.authIndex.trim() : '';
++  if (!authIndex || !file.name || /[/\\]/.test(file.name)) return null;
++  return { name: file.name, authIndex, connectionRevision, apiBase };
++}
++
++export function readCodexReconnectTarget(
++  value: unknown,
++  connectionRevision: number,
++  apiBase = ''
++): CodexReconnectTarget | null {
++  if (!value || typeof value !== 'object') return null;
++  const target = value as Partial<CodexReconnectTarget>;
++  if (
++    typeof target.name !== 'string' ||
++    !target.name.trim() ||
++    /[/\\]/.test(target.name) ||
++    typeof target.authIndex !== 'string' ||
++    !target.authIndex.trim() ||
++    target.connectionRevision !== connectionRevision ||
++    target.apiBase !== apiBase
++  )
++    return null;
++  return target as CodexReconnectTarget;
++}
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index dd019b9..ccbcb33 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -217,6 +217,24 @@
+     "routing_strategy_fill_first": "fill-first (prioritize)"
+   },
+   "auth_files": {
++    "reconnect_button": "Reconnect",
++    "reconnect_account": "Reconnect {{name}}",
++    "reconnect_title": "Reconnect Codex account",
++    "reconnect_hint": "Sign in again to the same Codex account for {{name}}. Your existing settings and usage history will be retained. You do not need to delete the credential.",
++    "reconnect_invalid": "Select an existing Codex account from Auth Files to reconnect. The connection may have changed.",
++    "reconnect_success": "Account reconnected. The existing credential and tracking identity were retained.",
++    "reconnect_waiting": "Waiting for sign-in. Use the same Codex account.",
++    "reconnect_open": "Open sign-in",
++    "reconnect_copy": "Copy sign-in link",
++    "reconnect_callback": "Redirect URL",
++    "reconnect_callback_hint": "If the browser cannot reach the callback, paste the full redirect URL here.",
++    "reconnect_submit": "Submit redirect URL",
++    "reconnect_cancel": "Cancel and return to Auth Files",
++    "reconnect_back": "Back to Auth Files",
++    "reconnect_requires_backend": "Reconnect requires a backend with account reconnect support. The existing credential has not been changed.",
++    "reconnect_missing_state": "The server did not return a sign-in session.",
++    "reconnect_failed": "Reconnect failed.",
++    "reconnect_cancel_failed": "The sign-in is still pending; cancellation could not be confirmed.",
+     "reauth_explanation": "The provider refresh token expired or was reused.",
+     "reauth_required": "The provider refresh token expired or was reused. Sign in again through OAuth Login.",
+     "reauth_login": "OAuth Login",
+diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
+index 6a1911f..c4cbe4d 100644
+--- a/src/i18n/locales/ko.json
++++ b/src/i18n/locales/ko.json
+@@ -217,6 +217,24 @@
+     "routing_strategy_fill_first": "fill-first (우선 채우기)"
+   },
+   "auth_files": {
++    "reconnect_button": "다시 로그인",
++    "reconnect_account": "다시 로그인 {{name}}",
++    "reconnect_title": "Codex 계정 다시 로그인",
++    "reconnect_hint": "{{name}}에 해당하는 동일한 Codex 계정으로 다시 로그인하세요. 기존 설정과 사용 기록이 유지됩니다. 자격 증명을 삭제할 필요가 없습니다.",
++    "reconnect_invalid": "Select an existing Codex account from Auth Files to reconnect. The connection may have changed.",
++    "reconnect_success": "Account reconnected. The existing credential and tracking identity were retained.",
++    "reconnect_waiting": "Waiting for sign-in. Use the same Codex account.",
++    "reconnect_open": "Open sign-in",
++    "reconnect_copy": "Copy sign-in link",
++    "reconnect_callback": "Redirect URL",
++    "reconnect_callback_hint": "If the browser cannot reach the callback, paste the full redirect URL here.",
++    "reconnect_submit": "Submit redirect URL",
++    "reconnect_cancel": "Cancel and return to Auth Files",
++    "reconnect_back": "Back to Auth Files",
++    "reconnect_requires_backend": "Reconnect requires a backend with account reconnect support. The existing credential has not been changed.",
++    "reconnect_missing_state": "The server did not return a sign-in session.",
++    "reconnect_failed": "Reconnect failed.",
++    "reconnect_cancel_failed": "The sign-in is still pending; cancellation could not be confirmed.",
+     "title": "인증 파일 관리",
+     "meta_total": "자격 증명 {{count}}개",
+     "meta_active": "활성 {{count}}개",
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index 3f95661..a159142 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -216,6 +216,24 @@
+     "routing_strategy_fill_first": "fill-first (приоритет)"
+   },
+   "auth_files": {
++    "reconnect_button": "Войти снова",
++    "reconnect_account": "Повторный вход: {{name}}",
++    "reconnect_title": "Повторный вход в аккаунт Codex",
++    "reconnect_hint": "Войдите снова в тот же аккаунт Codex для {{name}}. Настройки и история использования сохранятся. Удалять учётные данные не нужно.",
++    "reconnect_invalid": "Выберите существующий аккаунт Codex в разделе файлов авторизации. Возможно, подключение изменилось.",
++    "reconnect_success": "Вход выполнен. Учётные данные и идентификатор отслеживания сохранены.",
++    "reconnect_waiting": "Ожидание входа. Используйте тот же аккаунт Codex.",
++    "reconnect_open": "Открыть страницу входа",
++    "reconnect_copy": "Копировать ссылку входа",
++    "reconnect_callback": "URL перенаправления",
++    "reconnect_callback_hint": "Если браузер не может открыть обратный вызов, вставьте полный URL перенаправления.",
++    "reconnect_submit": "Отправить URL",
++    "reconnect_cancel": "Отменить и вернуться к файлам авторизации",
++    "reconnect_back": "К файлам авторизации",
++    "reconnect_requires_backend": "Сервер должен поддерживать повторный вход в существующий аккаунт. Учётные данные не изменены.",
++    "reconnect_missing_state": "Сервер не вернул сеанс входа.",
++    "reconnect_failed": "Не удалось войти снова.",
++    "reconnect_cancel_failed": "Вход ещё ожидается; отмена не подтверждена.",
+     "reauth_explanation": "Токен обновления провайдера истёк или был использован повторно.",
+     "reauth_required": "Токен обновления провайдера истёк или был использован повторно. Войдите снова через OAuth.",
+     "reauth_login": "Вход OAuth",
+diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
+index ec2963e..663e960 100644
+--- a/src/i18n/locales/vi.json
++++ b/src/i18n/locales/vi.json
+@@ -217,6 +217,24 @@
+     "routing_strategy_fill_first": "fill-first (ưu tiên lấp đầy)"
+   },
+   "auth_files": {
++    "reconnect_button": "Đăng nhập lại",
++    "reconnect_account": "Đăng nhập lại {{name}}",
++    "reconnect_title": "Đăng nhập lại tài khoản Codex",
++    "reconnect_hint": "Đăng nhập lại bằng cùng tài khoản Codex cho {{name}}. Cài đặt và lịch sử sử dụng hiện có được giữ nguyên. Bạn không cần xóa thông tin xác thực.",
++    "reconnect_invalid": "Select an existing Codex account from Auth Files to reconnect. The connection may have changed.",
++    "reconnect_success": "Account reconnected. The existing credential and tracking identity were retained.",
++    "reconnect_waiting": "Waiting for sign-in. Use the same Codex account.",
++    "reconnect_open": "Open sign-in",
++    "reconnect_copy": "Copy sign-in link",
++    "reconnect_callback": "Redirect URL",
++    "reconnect_callback_hint": "If the browser cannot reach the callback, paste the full redirect URL here.",
++    "reconnect_submit": "Submit redirect URL",
++    "reconnect_cancel": "Cancel and return to Auth Files",
++    "reconnect_back": "Back to Auth Files",
++    "reconnect_requires_backend": "Reconnect requires a backend with account reconnect support. The existing credential has not been changed.",
++    "reconnect_missing_state": "The server did not return a sign-in session.",
++    "reconnect_failed": "Reconnect failed.",
++    "reconnect_cancel_failed": "The sign-in is still pending; cancellation could not be confirmed.",
+     "title": "Quản lý File xác thực",
+     "meta_total": "{{count}} credential",
+     "meta_active": "{{count}} đang hoạt động",
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index 9062ebd..81c730a 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -217,6 +217,24 @@
+     "routing_strategy_fill_first": "fill-first (优先填充)"
+   },
+   "auth_files": {
++    "reconnect_button": "重新登录",
++    "reconnect_account": "重新登录 {{name}}",
++    "reconnect_title": "重新登录 Codex 账号",
++    "reconnect_hint": "请使用 {{name}} 对应的同一个 Codex 账号重新登录。现有设置和使用历史将保留，无需删除凭据。",
++    "reconnect_invalid": "请从认证文件中选择现有 Codex 账号。连接可能已更改。",
++    "reconnect_success": "重新登录成功，现有凭据和跟踪标识已保留。",
++    "reconnect_waiting": "正在等待登录，请使用同一个 Codex 账号。",
++    "reconnect_open": "打开登录页面",
++    "reconnect_copy": "复制登录链接",
++    "reconnect_callback": "重定向 URL",
++    "reconnect_callback_hint": "如果浏览器无法访问回调地址，请在此粘贴完整的重定向 URL。",
++    "reconnect_submit": "提交重定向 URL",
++    "reconnect_cancel": "取消并返回认证文件",
++    "reconnect_back": "返回认证文件",
++    "reconnect_requires_backend": "后端需要支持现有账号重新登录。现有凭据未更改。",
++    "reconnect_missing_state": "服务器未返回登录会话。",
++    "reconnect_failed": "重新登录失败。",
++    "reconnect_cancel_failed": "登录仍在等待，无法确认取消。",
+     "reauth_explanation": "提供商刷新令牌已过期或被重复使用。",
+     "reauth_required": "提供商刷新令牌已过期或被重复使用。请通过 OAuth 登录重新授权。",
+     "reauth_login": "OAuth 登录",
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index 8080b62..9c4ea28 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -217,6 +217,24 @@
+     "routing_strategy_fill_first": "fill-first（優先填充）"
+   },
+   "auth_files": {
++    "reconnect_button": "重新登入",
++    "reconnect_account": "重新登入 {{name}}",
++    "reconnect_title": "重新登入 Codex 帳號",
++    "reconnect_hint": "請使用 {{name}} 對應的同一個 Codex 帳號重新登入。現有設定和使用歷史將保留，無需刪除憑證。",
++    "reconnect_invalid": "請從認證檔案中選擇現有 Codex 帳號。連線可能已變更。",
++    "reconnect_success": "重新登入成功，現有憑證和追蹤識別碼已保留。",
++    "reconnect_waiting": "正在等待登入，請使用同一個 Codex 帳號。",
++    "reconnect_open": "開啟登入頁面",
++    "reconnect_copy": "複製登入連結",
++    "reconnect_callback": "重新導向 URL",
++    "reconnect_callback_hint": "如果瀏覽器無法存取回呼位址，請在此貼上完整的重新導向 URL。",
++    "reconnect_submit": "提交重新導向 URL",
++    "reconnect_cancel": "取消並返回認證檔案",
++    "reconnect_back": "返回認證檔案",
++    "reconnect_requires_backend": "後端需要支援現有帳號重新登入。現有憑證未變更。",
++    "reconnect_missing_state": "伺服器未傳回登入工作階段。",
++    "reconnect_failed": "重新登入失敗。",
++    "reconnect_cancel_failed": "登入仍在等待，無法確認取消。",
+     "reauth_explanation": "供應商重新整理權杖已過期或被重複使用。",
+     "reauth_required": "供應商重新整理權杖已過期或被重複使用。請透過 OAuth 登入重新授權。",
+     "reauth_login": "OAuth 登入",
+diff --git a/src/router/MainRoutes.tsx b/src/router/MainRoutes.tsx
+index 3867ead..e76543d 100644
+--- a/src/router/MainRoutes.tsx
++++ b/src/router/MainRoutes.tsx
+@@ -2,6 +2,7 @@ import { Navigate, useRoutes, type Location } from 'react-router-dom';
+ import { DashboardPage } from '@/features/dashboard/DashboardPage';
+ import { ProvidersWorkbenchPage } from '@/features/providers/ProvidersWorkbenchPage';
+ import { AuthFilesPage } from '@/features/authFiles/AuthFilesPage';
++import { CodexReconnectPage } from '@/features/authFiles/CodexReconnectPage';
+ import { AuthFilesOAuthExcludedEditPage } from '@/pages/AuthFilesOAuthExcludedEditPage';
+ import { AuthFilesOAuthModelAliasEditPage } from '@/pages/AuthFilesOAuthModelAliasEditPage';
+ import { OAuthPage } from '@/features/oauth/OAuthPage';
+@@ -24,6 +25,7 @@ const createMainRoutes = (supportsPlugin: boolean) => [
+   { path: '/ai-providers', element: <ProvidersWorkbenchPage /> },
+   { path: '/ai-providers/*', element: <Navigate to="/ai-providers" replace /> },
+   { path: '/auth-files', element: <AuthFilesPage /> },
++  { path: '/auth-files/reconnect', element: <CodexReconnectPage /> },
+   { path: '/auth-files/oauth-excluded', element: <AuthFilesOAuthExcludedEditPage /> },
+   { path: '/auth-files/oauth-model-alias', element: <AuthFilesOAuthModelAliasEditPage /> },
+   { path: '/oauth', element: <OAuthPage /> },
+diff --git a/src/services/api/oauth.ts b/src/services/api/oauth.ts
+index 474f9b4..79ad0ad 100644
+--- a/src/services/api/oauth.ts
++++ b/src/services/api/oauth.ts
+@@ -39,6 +39,11 @@ const normalizeProviderForManagementPath = (provider: string): string => {
+ };
+ 
+ export const oauthApi = {
++  reconnectCodex: (target: { name: string; authIndex: string }, signal?: AbortSignal) =>
++    apiClient.get<OAuthStartResponse>('/credentials/reconnect', {
++      params: { name: target.name, auth_index: target.authIndex, is_webui: true },
++      ...(signal ? { signal } : {}),
++    }),
+   startAuth: (provider: string, signal?: AbortSignal) => {
+     const providerKey = normalizeProviderForManagementPath(provider);
+     const params: Record<string, string | boolean> = { provider: providerKey };
+diff --git a/tests/codexReconnect.test.ts b/tests/codexReconnect.test.ts
+new file mode 100644
+index 0000000..7d35c41
+--- /dev/null
++++ b/tests/codexReconnect.test.ts
+@@ -0,0 +1,71 @@
++import { describe, expect, spyOn, test } from 'bun:test';
++import {
++  makeCodexReconnectTarget,
++  readCodexReconnectTarget,
++} from '../src/features/authFiles/reconnect';
++import { oauthApi } from '../src/services/api/oauth';
++import { apiClient } from '../src/services/api/client';
++
++describe('Codex reconnect identity', () => {
++  const file = { name: 'codex-existing.json', type: 'codex', authIndex: 'stable-index' };
++  test('uses the selected existing identity even when the credential is disabled', () => {
++    expect(makeCodexReconnectTarget({ ...file, disabled: true }, 3)).toEqual({
++      name: file.name,
++      authIndex: 'stable-index',
++      connectionRevision: 3,
++      apiBase: '',
++    });
++  });
++  test('rejects unsupported, runtime-only and unidentified credentials', () => {
++    for (const unsupported of [
++      { ...file, type: 'claude' },
++      { ...file, runtimeOnly: true },
++      { ...file, runtime_only: 'true' },
++      { ...file, authIndex: null },
++      { ...file, name: '../outside.json' },
++    ])
++      expect(makeCodexReconnectTarget(unsupported, 3)).toBeNull();
++  });
++  test('does not reuse a target after a connection change or direct navigation', () => {
++    const target = makeCodexReconnectTarget(file, 3);
++    expect(readCodexReconnectTarget(target, 3)).toEqual(target);
++    expect(readCodexReconnectTarget(target, 4)).toBeNull();
++    expect(readCodexReconnectTarget(target, 3, 'https://other.example.test')).toBeNull();
++    expect(readCodexReconnectTarget(null, 3)).toBeNull();
++    expect(readCodexReconnectTarget({ name: 'a', connectionRevision: 3 }, 3)).toBeNull();
++  });
++});
++
++describe('Codex reconnect API', () => {
++  test('uses an account-bound endpoint and forwards cancellation', async () => {
++    const signal = new AbortController().signal;
++    const get = spyOn(apiClient, 'get').mockResolvedValue({
++      url: 'https://auth.example.test',
++      state: 'fixture-state',
++    });
++    try {
++      await oauthApi.reconnectCodex(
++        { name: 'codex-existing.json', authIndex: 'stable-index' },
++        signal
++      );
++      expect(get).toHaveBeenCalledWith('/credentials/reconnect', {
++        params: { name: 'codex-existing.json', auth_index: 'stable-index', is_webui: true },
++        signal,
++      });
++    } finally {
++      get.mockRestore();
++    }
++  });
++  test('never falls back to creating an account on an older backend', async () => {
++    const error = Object.assign(new Error('not found'), { status: 404 });
++    const get = spyOn(apiClient, 'get').mockRejectedValue(error);
++    try {
++      await expect(
++        oauthApi.reconnectCodex({ name: 'codex-existing.json', authIndex: 'stable-index' })
++      ).rejects.toBe(error);
++      expect(get).toHaveBeenCalledTimes(1);
++    } finally {
++      get.mockRestore();
++    }
++  });
++});

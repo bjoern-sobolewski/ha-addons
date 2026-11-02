@@ -1,0 +1,587 @@
+diff --git a/internal/api/handlers/management/auth_files_crud.go b/internal/api/handlers/management/auth_files_crud.go
+index 73476434..df73f160 100644
+--- a/internal/api/handlers/management/auth_files_crud.go
++++ b/internal/api/handlers/management/auth_files_crud.go
+@@ -131,6 +131,8 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
+ 
+ // Delete auth files: single by name or all
+ func (h *Handler) DeleteAuthFile(c *gin.Context) {
++	h.authStatusMu.Lock()
++	defer h.authStatusMu.Unlock()
+ 	if h.authManager == nil {
+ 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+ 		return
+diff --git a/internal/api/handlers/management/auth_files_fields.go b/internal/api/handlers/management/auth_files_fields.go
+index 27496777..021ee257 100644
+--- a/internal/api/handlers/management/auth_files_fields.go
++++ b/internal/api/handlers/management/auth_files_fields.go
+@@ -1000,6 +1000,9 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
+ 				}
+ 			}
+ 		}
++		if !record.CreatedAt.IsZero() {
++			persistedRecord.CreatedAt = record.CreatedAt
++		}
+ 		if errHook := h.postAuthPersistHook(ctx, persistedRecord); errHook != nil {
+ 			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
+ 		}
+diff --git a/internal/api/handlers/management/auth_files_provider_oauth.go b/internal/api/handlers/management/auth_files_provider_oauth.go
+index 48fc4ef4..6cc7803e 100644
+--- a/internal/api/handlers/management/auth_files_provider_oauth.go
++++ b/internal/api/handlers/management/auth_files_provider_oauth.go
+@@ -196,6 +196,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
+ }
+ 
+ func (h *Handler) RequestCodexToken(c *gin.Context) {
++	h.requestCodexToken(c, nil)
++}
++
++func (h *Handler) requestCodexToken(c *gin.Context, reconnect *codexReconnectTarget) {
+ 	ctx := context.Background()
+ 	ctx = PopulateAuthContext(ctx, c)
+ 
+@@ -339,9 +343,24 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
+ 		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
+ 			return
+ 		}
+-		savedPath, errSave := h.saveTokenRecord(ctx, record)
++		var savedPath string
++		var errSave error
++		if reconnect != nil {
++			savedPath, errSave = h.saveCodexReconnect(ctx, state, reconnect, record)
++		} else {
++			savedPath, errSave = h.saveTokenRecord(ctx, record)
++		}
+ 		if errSave != nil {
+-			SetOAuthSessionError(state, "Failed to save authentication tokens")
++			message := "Failed to save authentication tokens"
++			if reconnect != nil {
++				message = "Reconnect failed; the existing credential was retained"
++				if errors.Is(errSave, errCodexReconnectAccount) || errors.Is(errSave, errCodexReconnectChanged) {
++					message = errSave.Error()
++				} else if savedPath != "" {
++					message = "Credentials saved, but runtime synchronization failed; reload the credential list"
++				}
++			}
++			SetOAuthSessionError(state, message)
+ 			log.Errorf("Failed to save authentication tokens: %v", errSave)
+ 			return
+ 		}
+diff --git a/internal/api/handlers/management/auth_files_reconnect.go b/internal/api/handlers/management/auth_files_reconnect.go
+new file mode 100644
+index 00000000..3c8fef03
+--- /dev/null
++++ b/internal/api/handlers/management/auth_files_reconnect.go
+@@ -0,0 +1,206 @@
++package management
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++)
++
++var errCodexReconnectChanged = errors.New("the credential changed or was removed during sign-in; start reconnect again")
++var errCodexReconnectAccount = errors.New("sign in to the same Codex account; the existing credential has not been changed")
++
++type codexReconnectTarget struct {
++	id, name, index, path, accountID string
++	registrationEpoch                uint64
++}
++
++// ReconnectCodexAuthFile starts a fresh OAuth flow bound to an existing file.
++// A separate endpoint makes older backends fail safely instead of ignoring the target.
++func (h *Handler) ReconnectCodexAuthFile(c *gin.Context) {
++	if h == nil || h.cfg == nil || h.authManager == nil {
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
++		return
++	}
++	name, index := strings.TrimSpace(c.Query("name")), strings.TrimSpace(c.Query("auth_index"))
++	if name == "" || index == "" || filepath.Base(name) != name || strings.ContainsAny(name, "/\\") {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "an existing credential name and auth_index are required"})
++		return
++	}
++	auth, ok := h.lookupAuthFile(name, index)
++	if !ok || auth == nil {
++		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
++		return
++	}
++	if auth.Provider != "codex" || auth.AuthKind() != coreauth.AuthKindOAuth || coreauth.IsPluginVirtualAuth(auth) {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "reconnect supports Codex OAuth files only"})
++		return
++	}
++	path, errPath := filepath.Abs(filepath.Join(h.cfg.AuthDir, name))
++	if errPath != nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential path"})
++		return
++	}
++	if source := auth.Attributes[coreauth.AttributePath]; source != "" {
++		absoluteSource, errSource := filepath.Abs(source)
++		if errSource != nil || filepath.Clean(absoluteSource) != path {
++			c.JSON(http.StatusBadRequest, gin.H{"error": "reconnect requires a file in the configured auth directory"})
++			return
++		}
++	}
++	metadata, _, errRead := readCodexReconnectFile(path)
++	if errRead != nil {
++		c.JSON(http.StatusConflict, gin.H{"error": "the existing Codex credential cannot be verified"})
++		return
++	}
++	accountID := codexReconnectAccountID(metadata)
++	if accountID == "" {
++		c.JSON(http.StatusConflict, gin.H{"error": "the existing Codex account identity cannot be verified"})
++		return
++	}
++	target := &codexReconnectTarget{auth.ID, name, index, path, accountID, auth.RegistrationEpoch}
++	h.requestCodexToken(c, target)
++}
++
++func codexReconnectAccountID(metadata map[string]any) string {
++	accountID, _ := metadata["account_id"].(string)
++	accountID = strings.TrimSpace(accountID)
++	if token, _ := metadata["id_token"].(string); token != "" {
++		if claims, errParse := codex.ParseJWTToken(token); errParse == nil && claims != nil {
++			claimID := strings.TrimSpace(claims.GetAccountID())
++			if claimID != "" {
++				if accountID != "" && accountID != claimID {
++					return ""
++				}
++				accountID = claimID
++			}
++		}
++	}
++	return accountID
++}
++
++func readCodexReconnectFile(path string) (map[string]any, []byte, error) {
++	info, errStat := os.Lstat(path)
++	if errStat != nil || !info.Mode().IsRegular() {
++		return nil, nil, errCodexReconnectChanged
++	}
++	raw, errRead := os.ReadFile(path)
++	if errRead != nil {
++		return nil, nil, errCodexReconnectChanged
++	}
++	var metadata map[string]any
++	if json.Unmarshal(raw, &metadata) != nil || metadata["type"] != "codex" {
++		return nil, nil, errCodexReconnectChanged
++	}
++	return metadata, raw, nil
++}
++
++func (h *Handler) saveCodexReconnect(ctx context.Context, state string, target *codexReconnectTarget, record *coreauth.Auth) (string, error) {
++	h.authStatusMu.Lock()
++	defer h.authStatusMu.Unlock()
++	if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
++		return "", errGuard
++	}
++	current, ok := h.lookupAuthFile(target.name, target.index)
++	if !ok || current.ID != target.id || current.RegistrationEpoch != target.registrationEpoch || current.Provider != "codex" {
++		return "", errCodexReconnectChanged
++	}
++	metadata, raw, errRead := readCodexReconnectFile(target.path)
++	if errRead != nil {
++		return "", errRead
++	}
++	if codexReconnectAccountID(metadata) != target.accountID {
++		return "", errCodexReconnectChanged
++	}
++	storage, okStorage := record.Storage.(*codex.CodexTokenStorage)
++	if !okStorage || strings.TrimSpace(storage.AccountID) != target.accountID {
++		return "", errCodexReconnectAccount
++	}
++	if codexReconnectAccountID(map[string]any{"account_id": storage.AccountID, "id_token": storage.IDToken}) != target.accountID {
++		return "", errCodexReconnectAccount
++	}
++	// Keep the path-derived index, even when email or subscription plan changes.
++	record.ID, record.FileName, record.Index = target.id, target.name, target.index
++	record.CreatedAt = current.CreatedAt
++	if record.Attributes == nil {
++		record.Attributes = make(map[string]string)
++	}
++	record.Attributes[coreauth.AttributePath] = target.path
++	coreauth.MergeExistingAuthMetadata(record, metadata)
++	record.Storage = &atomicCodexReconnectStorage{storage, target.path, sha256.Sum256(raw), state}
++	return h.saveTokenRecord(ctx, record)
++}
++
++// Write to a private temporary file first: a failed write must not truncate the old tokens.
++type atomicCodexReconnectStorage struct {
++	*codex.CodexTokenStorage
++	path     string
++	expected [32]byte
++	state    string
++}
++
++func (s *atomicCodexReconnectStorage) SaveTokenToFile(path string) error {
++	absolute, errPath := filepath.Abs(path)
++	if errPath != nil || absolute != s.path {
++		return errCodexReconnectChanged
++	}
++	s.Type = "codex"
++	data, errMerge := misc.MergeMetadata(s.CodexTokenStorage, s.Metadata)
++	if errMerge != nil {
++		return fmt.Errorf("prepare reconnect credentials: %w", errMerge)
++	}
++	file, errCreate := os.CreateTemp(filepath.Dir(path), ".codex-reconnect-*")
++	if errCreate != nil {
++		return fmt.Errorf("create reconnect temporary file: %w", errCreate)
++	}
++	temporary := file.Name()
++	defer func() { _ = file.Close(); _ = os.Remove(temporary) }()
++	if errEncode := json.NewEncoder(file).Encode(data); errEncode != nil {
++		return fmt.Errorf("write reconnect credentials: %w", errEncode)
++	}
++	if errSync := file.Sync(); errSync != nil {
++		return fmt.Errorf("sync reconnect credentials: %w", errSync)
++	}
++	if errClose := file.Close(); errClose != nil {
++		return fmt.Errorf("close reconnect credentials: %w", errClose)
++	}
++	_, raw, errRead := readCodexReconnectFile(path)
++	if errRead != nil || sha256.Sum256(raw) != s.expected {
++		return errCodexReconnectChanged
++	}
++	return persistCodexReconnectSession(s.state, func() error {
++		if errRename := os.Rename(temporary, path); errRename != nil {
++			return fmt.Errorf("replace reconnect credentials: %w", errRename)
++		}
++		return nil
++	})
++}
++
++// Serialize cancellation with the final replacement. Once persisted, cancellation
++// must not claim success while the runtime synchronization hook is still running.
++func persistCodexReconnectSession(state string, persist func() error) error {
++	oauthSessions.mu.Lock()
++	defer oauthSessions.mu.Unlock()
++	oauthSessions.purgeExpiredLocked(time.Now())
++	session, ok := oauthSessions.sessions[state]
++	if !ok || session.Provider != "codex" || session.Completed || session.Persisted || session.Status != "" {
++		return errOAuthSessionNotPending
++	}
++	if errPersist := persist(); errPersist != nil {
++		return errPersist
++	}
++	session.Persisted = true
++	oauthSessions.sessions[state] = session
++	return nil
++}
+diff --git a/internal/api/handlers/management/auth_files_reconnect_test.go b/internal/api/handlers/management/auth_files_reconnect_test.go
+new file mode 100644
+index 00000000..f67dd5b9
+--- /dev/null
++++ b/internal/api/handlers/management/auth_files_reconnect_test.go
+@@ -0,0 +1,221 @@
++package management
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"os"
++	"path/filepath"
++	"reflect"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++)
++
++func reconnectFixture(t *testing.T) (*Handler, *codexReconnectTarget, *coreauth.Auth, []byte, string) {
++	t.Helper()
++	dir := t.TempDir()
++	name := "codex-original-pro.json"
++	path := filepath.Join(dir, name)
++	raw := []byte(`{"type":"codex","account_id":"account-original","access_token":"old-test-token","refresh_token":"old-test-refresh","disabled":true,"websockets":true,"prefix":"team","note":"keep this","priority":2,"weight":3}`)
++	if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
++		t.Fatal(errWrite)
++	}
++	var metadata map[string]any
++	if errDecode := json.Unmarshal(raw, &metadata); errDecode != nil {
++		t.Fatal(errDecode)
++	}
++	manager := coreauth.NewManager(nil, nil, nil)
++	existing := &coreauth.Auth{ID: name, FileName: name, Provider: "codex", Metadata: metadata,
++		Attributes: map[string]string{coreauth.AttributePath: path}, Disabled: true, Success: 120, Failed: 3, CreatedAt: time.Unix(100, 0).UTC()}
++	registered, errRegister := manager.Register(context.Background(), existing)
++	if errRegister != nil {
++		t.Fatal(errRegister)
++	}
++	h := NewHandler(&config.Config{AuthDir: dir}, "", manager)
++	h.tokenStore = sdkAuth.NewFileTokenStore()
++	target := &codexReconnectTarget{registered.ID, name, registered.EnsureIndex(), path, "account-original", registered.RegistrationEpoch}
++	record := &coreauth.Auth{ID: "different-plan.json", FileName: "different-plan.json", Provider: "codex",
++		Storage:  &codex.CodexTokenStorage{AccountID: "account-original", AccessToken: "new-test-token", RefreshToken: "new-test-refresh", Email: "new-label@example.test", PlanType: "plus"},
++		Metadata: map[string]any{"account_id": "account-original", "plan_type": "plus"}}
++	state := "test-reconnect-state"
++	RegisterOAuthSession(state, "codex")
++	t.Cleanup(func() { CompleteOAuthSession(state) })
++	return h, target, record, raw, state
++}
++
++func TestCodexReconnectPreservesTrackingIdentityAndSettings(t *testing.T) {
++	h, target, record, _, state := reconnectFixture(t)
++	hookCalled := false
++	h.SetPostAuthPersistHook(func(_ context.Context, saved *coreauth.Auth) error {
++		hookCalled = true
++		if saved.EnsureIndex() != target.index {
++			t.Errorf("tracking identity changed")
++		}
++		if !saved.Disabled {
++			t.Errorf("disabled status changed")
++		}
++		if !saved.CreatedAt.Equal(time.Unix(100, 0)) {
++			t.Errorf("creation time changed")
++		}
++		_, errUpdate := h.authManager.Update(context.Background(), saved)
++		return errUpdate
++	})
++	path, errSave := h.saveCodexReconnect(context.Background(), state, target, record)
++	if errSave != nil {
++		t.Fatal(errSave)
++	}
++	if path != target.path || record.ID != target.id || !hookCalled {
++		t.Fatal("existing record was not updated in place")
++	}
++	metadata, _, errRead := readCodexReconnectFile(path)
++	if errRead != nil {
++		t.Fatal(errRead)
++	}
++	for key, want := range map[string]any{"access_token": "new-test-token", "refresh_token": "new-test-refresh", "account_id": "account-original", "plan_type": "plus", "prefix": "team", "note": "keep this", "websockets": true, "disabled": true, "priority": float64(2), "weight": float64(3)} {
++		if !reflect.DeepEqual(metadata[key], want) {
++			t.Errorf("%s was not preserved/updated correctly", key)
++		}
++	}
++	entries, errList := os.ReadDir(filepath.Dir(path))
++	if errList != nil || len(entries) != 1 {
++		t.Fatal("reconnect created an extra file or left temporary credentials")
++	}
++	if CancelOAuthSession(state) {
++		t.Fatal("cancel reported success after credentials were persisted")
++	}
++	updated, ok := h.authManager.GetByID(target.id)
++	if !ok || updated.Success != 120 || updated.Failed != 3 {
++		t.Fatal("runtime counters were reset")
++	}
++}
++
++func TestCodexReconnectRejectsUnsafeReplacement(t *testing.T) {
++	for _, scenario := range []string{"wrong-account", "missing-account", "cancelled", "removed", "metadata-change", "save-failure", "changed-during-save"} {
++		t.Run(scenario, func(t *testing.T) {
++			h, target, record, raw, state := reconnectFixture(t)
++			want := raw
++			switch scenario {
++			case "wrong-account":
++				record.Storage.(*codex.CodexTokenStorage).AccountID = "another-account"
++			case "missing-account":
++				record.Storage.(*codex.CodexTokenStorage).AccountID = ""
++			case "cancelled":
++				CancelOAuthSession(state)
++			case "removed":
++				if errRemove := os.Remove(target.path); errRemove != nil {
++					t.Fatal(errRemove)
++				}
++			case "metadata-change":
++				want = []byte(`{"type":"codex","account_id":"another-account"}`)
++				if errWrite := os.WriteFile(target.path, want, 0o600); errWrite != nil {
++					t.Fatal(errWrite)
++				}
++			case "save-failure":
++				h.SetPostAuthHook(func(context.Context, *coreauth.Auth) error { return errors.New("test failure before persistence") })
++			case "changed-during-save":
++				want = []byte(`{"type":"codex","account_id":"account-original","access_token":"concurrent-token"}`)
++				h.SetPostAuthHook(func(context.Context, *coreauth.Auth) error { return os.WriteFile(target.path, want, 0o600) })
++			}
++			if _, errSave := h.saveCodexReconnect(context.Background(), state, target, record); errSave == nil {
++				t.Fatal("unsafe reconnect succeeded")
++			}
++			got, errRead := os.ReadFile(target.path)
++			if scenario == "removed" {
++				if !os.IsNotExist(errRead) {
++					t.Fatal("deleted credential was recreated")
++				}
++				return
++			}
++			if errRead != nil || string(got) != string(want) {
++				t.Fatal("failed reconnect changed existing credentials")
++			}
++		})
++	}
++}
++
++func TestCodexReconnectRequiresExistingMatchingTarget(t *testing.T) {
++	h, target, _, _, _ := reconnectFixture(t)
++	router := gin.New()
++	router.GET("/reconnect", h.ReconnectCodexAuthFile)
++	for _, query := range []string{"", "?name=" + target.name, "?name=" + target.name + "&auth_index=wrong", "?name=../outside.json&auth_index=" + target.index} {
++		w := httptest.NewRecorder()
++		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/reconnect"+query, nil))
++		if w.Code == http.StatusOK {
++			t.Fatal("invalid reconnect target started an OAuth flow")
++		}
++	}
++}
++
++type reconnectTestOAuth struct{ fakeCodexOAuthService }
++
++func (f *reconnectTestOAuth) ExchangeCodeForTokens(ctx context.Context, code string, pkce *codex.PKCECodes) (*codex.CodexAuthBundle, error) {
++	bundle, errExchange := f.fakeCodexOAuthService.ExchangeCodeForTokens(ctx, code, pkce)
++	if errExchange != nil {
++		return nil, errExchange
++	}
++	bundle.TokenData.AccountID = "account-original"
++	bundle.TokenData.PlanType = "plus"
++	return bundle, nil
++}
++
++func TestCodexReconnectOAuthFlowUpdatesExistingFile(t *testing.T) {
++	h, target, _, _, _ := reconnectFixture(t)
++	previousFactory := newCodexOAuthService
++	newCodexOAuthService = func(*config.Config) codexOAuthService { return &reconnectTestOAuth{} }
++	t.Cleanup(func() { newCodexOAuthService = previousFactory })
++	persisted := make(chan *coreauth.Auth, 1)
++	h.SetPostAuthPersistHook(func(_ context.Context, auth *coreauth.Auth) error { persisted <- auth.Clone(); return nil })
++	router := gin.New()
++	router.GET("/reconnect", h.ReconnectCodexAuthFile)
++	query := url.Values{"name": {target.name}, "auth_index": {target.index}}
++	w := httptest.NewRecorder()
++	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/reconnect?"+query.Encode(), nil))
++	if w.Code != http.StatusOK {
++		t.Fatalf("start reconnect: status %d", w.Code)
++	}
++	var response struct {
++		State string `json:"state"`
++		URL   string `json:"url"`
++	}
++	if errDecode := json.Unmarshal(w.Body.Bytes(), &response); errDecode != nil || response.State == "" || response.URL == "" {
++		t.Fatal("missing OAuth session")
++	}
++	t.Cleanup(func() { CompleteOAuthSession(response.State) })
++	if _, errCallback := WriteOAuthCallbackFileForPendingSession(h.cfg.AuthDir, "codex", response.State, "reconnected", ""); errCallback != nil {
++		t.Fatal(errCallback)
++	}
++	select {
++	case saved := <-persisted:
++		if saved.EnsureIndex() != target.index || saved.FileName != target.name {
++			t.Fatal("OAuth flow changed tracking identity")
++		}
++		metadata, _, errRead := readCodexReconnectFile(target.path)
++		if errRead != nil || metadata["access_token"] != "access-reconnected" || metadata["plan_type"] != "plus" {
++			t.Fatal("fresh OAuth tokens were not saved in place")
++		}
++	case <-time.After(3 * time.Second):
++		t.Fatal("reconnect OAuth flow did not persist")
++	}
++}
++
++func TestCodexReconnectCancellationAtCommit(t *testing.T) {
++	state := "test-reconnect-cancel-commit"
++	RegisterOAuthSession(state, "codex")
++	defer CompleteOAuthSession(state)
++	if !CancelOAuthSession(state) {
++		t.Fatal("cancel failed")
++	}
++	called := false
++	if errPersist := persistCodexReconnectSession(state, func() error { called = true; return nil }); !errors.Is(errPersist, errOAuthSessionNotPending) || called {
++		t.Fatal("cancelled session committed")
++	}
++}
+diff --git a/internal/api/handlers/management/oauth_sessions.go b/internal/api/handlers/management/oauth_sessions.go
+index 336f9bbc..e3e429c6 100644
+--- a/internal/api/handlers/management/oauth_sessions.go
++++ b/internal/api/handlers/management/oauth_sessions.go
+@@ -38,6 +38,7 @@ type oauthSession struct {
+ 	Source    string
+ 	Metadata  map[string]any
+ 	Completed bool
++	Persisted bool
+ 	CreatedAt time.Time
+ 	ExpiresAt time.Time
+ }
+@@ -220,7 +221,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
+ 	if !ok {
+ 		return false
+ 	}
+-	if session.Completed || session.Status != "" {
++	if session.Completed || session.Persisted || session.Status != "" {
+ 		return false
+ 	}
+ 	if provider == "" {
+@@ -243,7 +244,7 @@ func (s *oauthSessionStore) Cancel(state string) bool {
+ 
+ 	s.purgeExpiredLocked(now)
+ 	session, ok := s.sessions[state]
+-	if !ok || session.Completed || session.Status != "" {
++	if !ok || session.Completed || session.Persisted || session.Status != "" {
+ 		return false
+ 	}
+ 	delete(s.sessions, state)
+diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
+index bbf1ba32..c2d573a7 100644
+--- a/internal/api/server_management_v8.go
++++ b/internal/api/server_management_v8.go
+@@ -51,6 +51,7 @@ func (s *Server) registerManagementV8Routes() {
+ 	v8.PATCH("/credentials/status", s.mgmt.PatchAuthFileStatus)
+ 	v8.PATCH("/credentials/fields", s.mgmt.PatchAuthFileFields)
+ 	v8.POST("/credentials/refresh", s.mgmt.RefreshAuthFiles)
++	v8.GET("/credentials/reconnect", s.mgmt.ReconnectCodexAuthFile)
+ 	v8.POST("/oauth/import", s.mgmt.ImportOAuthV8)
+ 	v8.GET("/oauth/auth-url", s.mgmt.StartOAuthV8)
+ 	v8.GET("/oauth/status", s.mgmt.GetAuthStatus)
+diff --git a/internal/api/server_management_v8_test.go b/internal/api/server_management_v8_test.go
+index 09c20b18..9b8a0201 100644
+--- a/internal/api/server_management_v8_test.go
++++ b/internal/api/server_management_v8_test.go
+@@ -45,7 +45,7 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
+ 			s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
+ 			s.managementRoutesEnabled.Store(tc.enabled)
+ 			s.registerManagementRoutes()
+-			for _, route := range []string{"/v0/management/config", "/v8/management/config", "/v0/management/plugins", "/v8/management/plugins"} {
++			for _, route := range []string{"/v0/management/config", "/v8/management/config", "/v0/management/plugins", "/v8/management/plugins", "/v8/management/credentials/reconnect"} {
+ 				req := httptest.NewRequest(http.MethodGet, route, nil)
+ 				req.RemoteAddr = "127.0.0.1:1234"
+ 				if tc.authorized {
+@@ -53,8 +53,13 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
+ 				}
+ 				recorder := httptest.NewRecorder()
+ 				s.engine.ServeHTTP(recorder, req)
+-				if recorder.Code != tc.want {
+-					t.Fatalf("%s: status=%d want=%d body=%s", route, recorder.Code, tc.want, recorder.Body.String())
++				want := tc.want
++				if route == "/v8/management/credentials/reconnect" && want == http.StatusOK {
++					// Only authorized requests reach the handler's missing-manager check.
++					want = http.StatusServiceUnavailable
++				}
++				if recorder.Code != want {
++					t.Fatalf("%s: status=%d want=%d body=%s", route, recorder.Code, want, recorder.Body.String())
+ 				}
+ 			}
+ 		})
+@@ -89,6 +94,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
+ 		"GET /v0/management/debug", "PUT /v0/management/request-retry", "GET /v0/management/auth-files",
+ 		"GET /v8/management/observability/logs", "GET /v8/management/observability/usage/queue",
+ 		"GET /v8/management/credentials", "POST /v8/management/credentials",
++		"GET /v8/management/credentials/reconnect",
+ 		"GET /v8/management/oauth/auth-url", "POST /v8/management/oauth/import", "POST /v8/management/oauth/callback",
+ 		"POST /v8/management/routing/cooldown/reset",
+ 		"GET /v8/management/plugins/:id/quota", "POST /v8/management/plugins/:id/quota", "DELETE /v8/management/plugins/:id/quota",

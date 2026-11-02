@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.16
+
+- Add Reconnect to existing Codex accounts in Auth Files so an expired or unusable refresh token can be replaced through a fresh sign-in without deleting the account.
+- Verify the same account and retain its credential filename, usage tracking identity, settings, WebSocket preference and disabled state. Cancellation or a different account leaves the existing credential intact.
+
 ## 0.1.15
 
 - Route self-contained Codex WebSocket requests of 8 MiB or larger over upstream HTTP before sending them, avoiding oversized-frame reconnect loops during compaction.

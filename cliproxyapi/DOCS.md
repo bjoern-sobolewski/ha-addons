@@ -65,6 +65,14 @@ credit checks. Refresh credentials in the card footer renews OAuth credentials;
 it does not reload quota or mark account data as fresh. Failed account queries
 keep the last successful snapshot and capture time visible with an error.
 
+If a Codex refresh token is expired or no longer usable, choose **Reconnect**
+on the existing Auth Files card and complete sign-in using the same account.
+Reconnect replaces its OAuth tokens in place, retaining its filename, tracking
+identity, settings, WebSocket preference and disabled state. You do not need to
+delete the credential. A different account or cancellation leaves the existing
+credential intact. Refresh credentials continues to use the existing refresh
+token and cannot recover an expired or revoked refresh token.
+
 Auth Files adds a small refresh icon and compact age beside quota percentages.
 Hover, focus or tap it for the provider observation timestamp and source.
 The timestamp is captured when the quota response arrives; cache reads and

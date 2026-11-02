@@ -58,9 +58,9 @@ COPY --from=source /src/cmd/ ./cmd/
 COPY --from=source /src/internal/ ./internal/
 COPY --from=source /src/web/static.go ./web/static.go
 COPY --from=web-builder /src/web/dist ./web/dist
-RUN go test ./internal/cpa/test ./internal/repository/test ./internal/ranking/test -run "TestSharedKeyName|TestLocalRanking.*Profile" && go test ./internal/app/test ./internal/service/test ./internal/quota ./internal/api/test ./internal/config/test ./internal/auth/test ./internal/quota/test ./internal/cpa/dto/apicall/test
-RUN go test ./internal/pricing/test ./internal/entities/test ./internal/repository/test ./internal/repository/migration/test
-RUN CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=1.15.11-ha.10" -o /out/cpa-usage-keeper ./cmd/server/main.go
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/cpa/test ./internal/repository/test ./internal/ranking/test -run "TestSharedKeyName|TestLocalRanking.*Profile" && go test ./internal/app/test ./internal/service/test ./internal/quota ./internal/api/test ./internal/config/test ./internal/auth/test ./internal/quota/test ./internal/cpa/dto/apicall/test
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/pricing/test ./internal/entities/test ./internal/repository/test ./internal/repository/migration/test
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=1.15.11-ha.10" -o /out/cpa-usage-keeper ./cmd/server/main.go
 
 FROM ghcr.io/willxup/cpa-usage-keeper:1.15.11@sha256:e7e295e4c302ba72d170830b6847c879056d52b55bb45fd80e7a1ba22fb87a69
 USER root

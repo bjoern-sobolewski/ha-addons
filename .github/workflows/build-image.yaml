@@ -1,0 +1,56 @@
+name: Build one app image
+on:
+  workflow_call:
+    inputs:
+      app:
+        required: true
+        type: string
+      arch:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Read app metadata
+        id: app
+        env:
+          APP: ${{ inputs.app }}
+        run: python .github/scripts/app_metadata.py "$APP"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and export once
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.app }}
+          platforms: linux/${{ inputs.arch }}
+          build-args: BUILD_VERSION=${{ steps.app.outputs.version }}
+          tags: ${{ steps.app.outputs.image }}:${{ steps.app.outputs.version }}-${{ inputs.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.app.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+          # OCI archives keep provenance; publication copies every manifest intact.
+          outputs: type=oci,dest=${{ runner.temp }}/${{ inputs.app }}-${{ inputs.arch }}.tar
+          provenance: true
+          cache-from: type=gha,scope=${{ inputs.app }}-${{ inputs.arch }},version=2
+          cache-to: type=gha,scope=${{ inputs.app }}-${{ inputs.arch }},mode=max,version=2,timeout=2m,ignore-error=true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-${{ inputs.app }}-${{ inputs.arch }}
+          path: ${{ runner.temp }}/${{ inputs.app }}-${{ inputs.arch }}.tar
+          # The OCI layers are already compressed.
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error

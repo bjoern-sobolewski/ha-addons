@@ -6,29 +6,112 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  validate:
+  configuration:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
       - run: pip install -r requirements-dev.txt
       - run: python -m unittest discover -s tests -v
-      - run: docker build -t ha-cpa-test:local cliproxyapi
-      - run: docker build -t ha-keeper-test:local cpa-usage-keeper
-      - run: python tests/smoke.py
-      - run: python tests/oversized_flow.py
-      - run: docker tag ha-cpa-test:local ha-cpa-quota:local
-      - run: docker tag ha-keeper-test:local ha-keeper-quota:local
-      - run: python tests/quota_flow.py
-      - run: python tests/weekly_quota_flow.py
+
+  build-amd64:
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [cliproxyapi, cpa-usage-keeper]
+    uses: ./.github/workflows/build-image.yaml
+    with:
+      app: ${{ matrix.app }}
+      arch: amd64
+      runner: ubuntu-latest
+
+  build-arm64:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [cliproxyapi, cpa-usage-keeper]
+    uses: ./.github/workflows/build-image.yaml
+    with:
+      app: ${{ matrix.app }}
+      arch: arm64
+      runner: ubuntu-24.04-arm
+
+  integration:
+    needs: build-amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [smoke, oversized_flow, quota_flow, weekly_quota_flow]
+    env:
+      CPA_TEST_IMAGE: ha-cliproxyapi-ci:local
+      CPA_QUOTA_IMAGE: ha-cliproxyapi-ci:local
+      KEEPER_TEST_IMAGE: ha-cpa-usage-keeper-ci:local
+      KEEPER_QUOTA_IMAGE: ha-cpa-usage-keeper-ci:local
+      KEEPER_WEEKLY_IMAGE: ha-cpa-usage-keeper-ci:local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-*-amd64
+          merge-multiple: true
+          path: ${{ runner.temp }}/images
+      - name: Load the built images for testing
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends skopeo
+          for app in cliproxyapi cpa-usage-keeper; do
+            skopeo --override-arch amd64 copy \
+              "oci-archive:$RUNNER_TEMP/images/$app-amd64.tar" \
+              "docker-daemon:ha-$app-ci:local"
+          done
+      - name: Run integration suite
         env:
-          KEEPER_WEEKLY_IMAGE: ha-keeper-test:local
+          SUITE: ${{ matrix.suite }}
+        run: python "tests/$SUITE.py"
+
+  # Keep a single required-check name, including when a prerequisite fails.
+  validate:
+    if: always()
+    needs: [configuration, build-amd64, build-arm64, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all validation results
+        env:
+          CONFIGURATION: ${{ needs.configuration.result }}
+          AMD64: ${{ needs.build-amd64.result }}
+          ARM64: ${{ needs.build-arm64.result }}
+          INTEGRATION: ${{ needs.integration.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          test "$CONFIGURATION" = success
+          test "$AMD64" = success
+          test "$INTEGRATION" = success
+          if [ "$EVENT" = pull_request ]; then
+            test "$ARM64" = skipped
+          else
+            test "$ARM64" = success
+          fi
+
   publish:
     needs: validate
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       packages: write
@@ -37,52 +120,40 @@ jobs:
       matrix:
         app: [cliproxyapi, cpa-usage-keeper]
         arch: [amd64, arm64]
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
       - run: pip install -r requirements-dev.txt
-      - name: Read app version and image
+      - name: Read app metadata
         id: app
         env:
           APP: ${{ matrix.app }}
+        run: python .github/scripts/app_metadata.py "$APP"
+      - uses: actions/download-artifact@v4
+        with:
+          name: image-${{ matrix.app }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/images
+      - name: Publish the existing image with its attestations
+        env:
+          APP: ${{ matrix.app }}
+          ARCH: ${{ matrix.arch }}
+          IMAGE: ${{ steps.app.outputs.image }}
+          VERSION: ${{ steps.app.outputs.version }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python - <<'PY'
-          import os, yaml
-          from pathlib import Path
-          config = yaml.safe_load(Path(os.environ['APP'], 'config.yaml').read_text())
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f"version={config['version']}\nimage={config['image']}\n")
-          PY
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.app }}
-          platforms: linux/${{ matrix.arch }}
-          push: true
-          build-args: BUILD_VERSION=${{ steps.app.outputs.version }}
-          tags: |
-            ${{ steps.app.outputs.image }}:${{ steps.app.outputs.version }}-${{ matrix.arch }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.app.outputs.version }}
-            org.opencontainers.image.licenses=MIT
-          cache-from: |
-            type=gha,scope=${{ matrix.app }}-${{ matrix.arch }}
-            type=gha,scope=${{ matrix.app }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.app }}-${{ matrix.arch }}
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends skopeo
+          printf '%s' "$GHCR_TOKEN" | skopeo login \
+            --authfile "$RUNNER_TEMP/registry-auth.json" \
+            --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          skopeo copy --all --preserve-digests --retry-times 3 \
+            --authfile "$RUNNER_TEMP/registry-auth.json" \
+            "oci-archive:$RUNNER_TEMP/images/$APP-$ARCH.tar" \
+            "docker://$IMAGE:$VERSION-$ARCH"
+
   publish-manifests:
     needs: publish
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -98,19 +169,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
       - run: pip install -r requirements-dev.txt
-      - name: Read app version and image
+      - name: Read app metadata
         id: app
         env:
           APP: ${{ matrix.app }}
-        run: |
-          python - <<'PY'
-          import os, yaml
-          from pathlib import Path
-          config = yaml.safe_load(Path(os.environ['APP'], 'config.yaml').read_text())
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f"version={config['version']}\nimage={config['image']}\n")
-          PY
+        run: python .github/scripts/app_metadata.py "$APP"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:

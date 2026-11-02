@@ -66,7 +66,9 @@ python tests/smoke.py
 
 Smoke tests use random disposable credentials, a fake model provider, isolated Docker resources, and no paid model calls. They check API authentication, blocked management paths, a model response, SSE forwarding, Keeper authentication and usage ingestion, persistence across restarts, and graceful shutdown. Resources are removed when the test exits.
 
-To update an upstream release, change its version and manifest digest in the Dockerfile, bump the app `version`, update the changelog, and push to `main`. Actions validates and tests amd64, then publishes both amd64 and arm64 under the app version tag. Home Assistant uses that exact version. Forks must update `repository.yaml` and the app image names/URLs to their own account.
+To update an upstream release, change its version and manifest digest in the Dockerfile, bump the app `version`, update the changelog, and push to `main`. Actions builds both apps in parallel on native amd64 and arm64 runners. The amd64 images feed four independent integration suites; publication waits for all builds and tests to pass. Published images are copied from the original OCI build artifacts, including provenance, without rebuilding them. Home Assistant uses the exact app version tag. Forks must update `repository.yaml` and the app image names/URLs to their own account.
+
+Pull requests retain the amd64 build and integration checks without registry write permissions. Build layers use separate app/architecture caches; temporary Go compiler caches stay outside exported layers. OCI artifacts expire after one day, so rerun the full workflow if a later publication retry needs expired artifacts. Concurrent main-branch releases are serialized to keep their tags ordered.
 
 ## Internal documentation
 

@@ -29,12 +29,14 @@ COPY patches/codex-reconnect.patch /tmp/codex-reconnect.patch
 RUN git apply --check /tmp/codex-reconnect.patch && git apply /tmp/codex-reconnect.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
+COPY --from=source /src/go.mod /src/go.sum ./
+RUN go mod download
 COPY --from=source /src/ ./
-RUN go test ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
-RUN go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
-RUN go test ./sdk/api/handlers/openai
-RUN go test ./internal/api -run 'TestManagementV8'
-RUN CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.28-ha.3" -o /out/CLIProxyAPI ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/api/handlers/openai
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api -run 'TestManagementV8'
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.28-ha.3" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -55,11 +57,10 @@ COPY patches/cpamc-codex-reconnect.patch /tmp/cpamc-codex-reconnect.patch
 RUN git apply --check /tmp/cpamc-codex-reconnect.patch && git apply /tmp/cpamc-codex-reconnect.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
+COPY --from=panel-source /src/package.json /src/bun.lock ./
+RUN npx --yes --package=bun@1.3.14 bun install --frozen-lockfile
 COPY --from=panel-source /src/ ./
-# 6.13.0 imports an undeclared @codemirror/streamparser dependency. Keep the
-# previously verified language release until upstream fixes its package.
-RUN npx --yes --package=bun@1.3.14 bun install --frozen-lockfile \
-    && npx --yes --package=bun@1.3.14 bun run verify
+RUN npx --yes --package=bun@1.3.14 bun run verify
 FROM eceasy/cli-proxy-api:v8.0.28@sha256:5de1679350c368fb031d46900da30d97c1e9e9a3b150fc4c4181e7e65022a09e
 USER root
 RUN apt-get update \

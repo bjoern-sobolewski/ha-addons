@@ -1,5 +1,5 @@
 diff --git a/internal/api/handlers/management/auth_files.go b/internal/api/handlers/management/auth_files.go
-index 86878e9b..6d51004d 100644
+index f59aaf0d..0a3feb14 100644
 --- a/internal/api/handlers/management/auth_files.go
 +++ b/internal/api/handlers/management/auth_files.go
 @@ -4,6 +4,7 @@ import (
@@ -10,7 +10,7 @@ index 86878e9b..6d51004d 100644
  	"os"
  	"path/filepath"
  	"sort"
-@@ -676,6 +677,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
+@@ -682,6 +683,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
  		"source":         "memory",
  		"size":           int64(0),
  	}
@@ -80,7 +80,7 @@ index 00000000..ff3202c7
 +	}
 +}
 diff --git a/internal/api/handlers/management/auth_files_refresh.go b/internal/api/handlers/management/auth_files_refresh.go
-index c144379c..3d6bb0ec 100644
+index 7c17dfdd..77b4ffe4 100644
 --- a/internal/api/handlers/management/auth_files_refresh.go
 +++ b/internal/api/handlers/management/auth_files_refresh.go
 @@ -2,6 +2,7 @@ package management
@@ -103,7 +103,7 @@ index c144379c..3d6bb0ec 100644
  			"error": err.Error(),
  		})
 diff --git a/internal/auth/codex/openai_auth.go b/internal/auth/codex/openai_auth.go
-index bc9ce24a..bf72fd63 100644
+index d5246ace..931e40ee 100644
 --- a/internal/auth/codex/openai_auth.go
 +++ b/internal/auth/codex/openai_auth.go
 @@ -8,6 +8,7 @@ import (
@@ -131,18 +131,16 @@ index bc9ce24a..bf72fd63 100644
  			return nil, err
  		}
  
-@@ -347,8 +347,7 @@ func isNonRetryableRefreshErr(err error) bool {
+@@ -347,6 +347,7 @@ func isNonRetryableRefreshErr(err error) bool {
  	if err == nil {
  		return false
  	}
--	raw := strings.ToLower(err.Error())
--	return strings.Contains(raw, "refresh_token_reused")
-+	return refreshdiagnostic.Reason(err) != ""
- }
- 
- // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
++	if refreshdiagnostic.Reason(err) != "" { return true }
+ 	raw := strings.ToLower(err.Error())
+ 	for _, token := range []string{
+ 		"refresh_token_reused",
 diff --git a/internal/auth/codex/openai_auth_test.go b/internal/auth/codex/openai_auth_test.go
-index b0c86678..64c92e2e 100644
+index aeaeb5e1..c0ef7463 100644
 --- a/internal/auth/codex/openai_auth_test.go
 +++ b/internal/auth/codex/openai_auth_test.go
 @@ -67,6 +67,18 @@ func resetCodexRefreshGroupForTest() {
@@ -265,7 +263,7 @@ index 00000000..f89bef56
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/conductor_cooldown.go b/sdk/cliproxy/auth/conductor_cooldown.go
-index 96e11d73..84b171df 100644
+index 93034394..76379170 100644
 --- a/sdk/cliproxy/auth/conductor_cooldown.go
 +++ b/sdk/cliproxy/auth/conductor_cooldown.go
 @@ -5,6 +5,7 @@ import (
@@ -276,7 +274,7 @@ index 96e11d73..84b171df 100644
  	"io"
  	"net"
  	"net/http"
-@@ -1753,7 +1754,7 @@ func isUnauthorizedError(err error) bool {
+@@ -2209,7 +2210,7 @@ func isUnauthorizedError(err error) bool {
  	if err == nil {
  		return false
  	}
@@ -285,7 +283,7 @@ index 96e11d73..84b171df 100644
  		return true
  	}
  	raw := strings.ToLower(err.Error())
-@@ -1765,7 +1766,7 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
+@@ -2221,7 +2222,7 @@ func hasUnauthorizedAuthFailure(auth *Auth) bool {
  		return false
  	}
  	if auth.Unavailable && auth.Status == StatusError && auth.NextRefreshAfter.IsZero() && auth.NextRetryAfter.IsZero() &&
@@ -294,7 +292,7 @@ index 96e11d73..84b171df 100644
  		return true
  	}
  	return false
-@@ -1809,6 +1810,11 @@ func refreshErrorFromError(err error) *Error {
+@@ -2438,6 +2439,11 @@ func refreshErrorFromError(err error) *Error {
  		authErr.Code = "unauthorized"
  		authErr.Retryable = false
  	}
@@ -307,7 +305,7 @@ index 96e11d73..84b171df 100644
  }
  
 diff --git a/sdk/cliproxy/auth/conductor_refresh.go b/sdk/cliproxy/auth/conductor_refresh.go
-index feb47d88..f5643057 100644
+index dd165d96..0921996c 100644
 --- a/sdk/cliproxy/auth/conductor_refresh.go
 +++ b/sdk/cliproxy/auth/conductor_refresh.go
 @@ -2,9 +2,11 @@ package auth
@@ -322,7 +320,7 @@ index feb47d88..f5643057 100644
  	"net/http"
  	"strconv"
  	"strings"
-@@ -392,7 +394,9 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
+@@ -412,7 +414,9 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
  }
  
  type authRefreshLock struct {
@@ -333,7 +331,7 @@ index feb47d88..f5643057 100644
  }
  
  func authOuterAccessToken(auth *Auth) string {
-@@ -741,6 +745,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+@@ -1364,6 +1368,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
  	}
  	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
  	if err != nil {
@@ -341,10 +339,10 @@ index feb47d88..f5643057 100644
  		unauthorized := isUnauthorizedError(err)
  		invalidGrant := isInvalidGrantError(err)
  		shouldReschedule := false
-@@ -756,6 +761,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
- 				m.mu.Unlock()
- 				return nil, err
+@@ -1381,6 +1386,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
  			}
+ 			terminalRefresh := isTerminalRefreshError(current, err)
+ 			sanitizedRefreshErr := sanitizeRenewalError(current, err)
 +			if reauthReason != "" && (lock.diagnosticReason != reauthReason || lock.diagnosticEpoch != current.RegistrationEpoch) {
 +				fingerprint := sha256.Sum256([]byte(current.ID))
 +				log.WithFields(log.Fields{"provider": "codex", "credential_ref": fmt.Sprintf("%x", fingerprint[:6]), "upstream_status": statusCodeFromError(err), "reason": reauthReason, "reauth_required": true, "retryable": false}).Warn("OAuth refresh requires sign-in; use OAuth Login")
@@ -354,8 +352,8 @@ index feb47d88..f5643057 100644
  			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
  			if wasTerminalUnauthorized {
  				current.Generation++
-@@ -768,6 +779,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
- 					current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+@@ -1399,6 +1410,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+ 					current.LastError = &Error{Code: "unauthorized", Message: sanitizedRefreshErr.Message, HTTPStatus: http.StatusUnauthorized}
  					current.StatusMessage = "unauthorized (refresh token invalid)"
  				}
 +				if reauthReason != "" {
@@ -365,7 +363,7 @@ index feb47d88..f5643057 100644
  				m.auths[id] = current
  				if m.scheduler != nil {
  					m.scheduler.upsertAuth(current.Clone())
-@@ -843,13 +858,21 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+@@ -1527,13 +1542,21 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
  				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && nextRetry.After(exp) {
  					nextRetry = exp
  				}
@@ -379,7 +377,7 @@ index feb47d88..f5643057 100644
  
 -				if !current.Unavailable {
 +				if !current.Unavailable && reauthReason == "" {
- 					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
+ 					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, sanitizedRefreshErr.Message)
  				}
  			}
 +			if reauthReason != "" {
@@ -388,7 +386,7 @@ index feb47d88..f5643057 100644
  			m.auths[id] = current
  			if m.scheduler != nil {
  				m.scheduler.upsertAuth(current.Clone())
-@@ -897,6 +920,13 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
+@@ -1599,6 +1622,13 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
  	if saved == nil {
  		return nil, fmt.Errorf("auth %s not found", id)
  	}
@@ -402,7 +400,7 @@ index feb47d88..f5643057 100644
  	targetAuth := saved
  	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
  	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))
-@@ -936,9 +966,12 @@ func (m *Manager) refreshWorkers() int {
+@@ -1638,9 +1668,12 @@ func (m *Manager) refreshWorkers() int {
  
  // ForceRefreshResult records the outcome of a forced refresh for one credential.
  type ForceRefreshResult struct {
@@ -418,7 +416,7 @@ index feb47d88..f5643057 100644
  }
  
  // ForceRefreshAll triggers an immediate refresh for all credentials that have refresh tokens or custom refresh evaluators.
-@@ -1001,6 +1034,12 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
+@@ -1703,6 +1736,12 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
  				res := ForceRefreshResult{ID: job.authID, Success: err == nil}
  				if err != nil {
  					res.Error = err.Error()

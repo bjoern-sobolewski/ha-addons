@@ -1,16 +1,3 @@
-diff --git a/internal/auth/codex/openai_auth.go b/internal/auth/codex/openai_auth.go
-index bf72fd63..6fd572f1 100644
---- a/internal/auth/codex/openai_auth.go
-+++ b/internal/auth/codex/openai_auth.go
-@@ -347,7 +347,7 @@ func isNonRetryableRefreshErr(err error) bool {
- 	if err == nil {
- 		return false
- 	}
--	return refreshdiagnostic.Reason(err) != ""
-+	return refreshdiagnostic.Reason(err) != "" || strings.Contains(strings.ToLower(err.Error()), "invalid_grant")
- }
- 
- // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
 diff --git a/internal/refreshdiagnostic/error.go b/internal/refreshdiagnostic/error.go
 index c1b7350b..a32e845a 100644
 --- a/internal/refreshdiagnostic/error.go

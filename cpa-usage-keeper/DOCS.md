@@ -31,7 +31,7 @@ Enable `viewer_dashboard_enabled` to start the restricted dashboard at container
 
 Set `read_only_password` to a separate password of at least 16 characters to enable **Read-only overview** on the login page. It must differ from the Keeper admin password and CPA management secret. An empty value disables this access; it is empty by default. Share this password only with people authorized to see every client's usage. A CPA client key continues to grant only that key's usage view and the optional shared provider quota view.
 
-The read-only login opens the same dashboard layout as API Key view, with Overview, Realtime, Analysis, Request Events, Auth Files, AI Provider, Local Ranking and Provider quota. Statistics cover all client keys, with key, OAuth account and API provider account breakdowns. The key dropdown includes current, revoked and historical keys; selecting a historical key does not restore its authentication access. Account/provider pages show usage, status, cached quota and request drill-downs. Account totals and provider quota are shared account information; the key dropdown filters request-based reporting. Client-key display names are included; actual keys, key fragments and provider credential identities are excluded. Costs are estimates, not additional subscription charges.
+The read-only login opens the same dashboard layout as API Key view, with Overview, Realtime, Analysis, Request Events, Credentials, AI Provider, Local Ranking and Provider quota. Statistics cover all client keys, with key, OAuth account and API provider account breakdowns. The key dropdown includes current, revoked and historical keys; selecting a historical key does not restore its authentication access. Account/provider pages show usage, status, cached quota and request drill-downs. Account totals and provider quota are shared account information; the key dropdown filters request-based reporting. Client-key display names are included; actual keys, key fragments and provider credential identities are excluded. Costs are estimates, not additional subscription charges.
 
 Request Events provides time, key, model, account and success/failure filters and CSV/JSON export of the same sanitized reporting data. Exports omit credential metadata, client addresses, request bodies, response bodies and raw logs. Local Ranking compares key usage without profile-editing or community participation controls. Language, theme, table column preferences and other display-only settings remain available.
 
@@ -57,7 +57,7 @@ For the HA Cloudflared app's hostname-only **Additional Hosts**, instead enable 
 
 If an existing WAF rule requires a Bearer header for the entire API hostname, narrow that rule to API paths or exclude the exact `viewer_base_path` and paths starting with `viewer_base_path + "/"`; browsers log in with a POSTed key and then an HttpOnly session cookie. Remove any exception for the old prefix when changing it. Keep API header protection in place and verify anonymous quota requests remain 401. Use HTTPS for remote access. Do not route the hostname directly to the full Keeper listener. Routing `/v1/` through Keeper makes that API hostname depend on Keeper being up; restoring its original CPA API gateway service bypasses this extra hop if Keeper is unavailable.
 
-This HA build applies a reviewed local patch to upstream Keeper 1.15.11 at commit `71a41cc2d1cce8d75b42473adf31f2616ad8085e`, builds its embedded frontend and binary, and retains the upstream runtime and `/data` database layout.
+This HA build applies the reviewed `ha-v2.patch` to upstream Keeper main at commit `7b2b670f631335c0e2223af769c5abc04d731d8a` (including v2.0.3), builds its embedded frontend and binary, and uses the pinned v2.0.3 runtime. Persistent data stays under `/data`; the upgrade changes the database schema as described below.
 
 ## Automatic quota freshness
 
@@ -87,7 +87,7 @@ shows a point at its actual value; missing chart samples remain missing.
 
 ## Weekly quota value
 
-Open **Auth Files → account → Weekly value** in the administrator or all-key
+Open **Credentials → account → Weekly value** in the administrator or all-key
 read-only dashboard. The report covers the last 90 days of recorded weekly
 Codex windows. It shows the scheduled reset, when a later cycle was observed,
 the last observed remaining percentage and its age, and recorded API-equivalent
@@ -95,7 +95,9 @@ value delivered during each cycle. A passed countdown alone does not confirm a
 reset. Shorter windows and reserve pools are outside this report.
 
 Model comparisons separate outgoing Normal (Auto/default) and Fast requested
-modes. Uncaptured historical modes remain unknown. Estimates use only intervals
+modes. Canonical effective outgoing tiers take precedence when available, with the
+maintained captured outgoing field as the historical fallback. Uncaptured
+historical modes remain unknown. Estimates use only intervals
 with one model/mode, complete pricing, no failed requests and at most one hour
 between percentage changes. At least five percentage points, three intervals
 and twenty requests are required. The report displays sample coverage and the
@@ -105,10 +107,11 @@ Mixed intervals still contribute to delivered dollar totals.
 API dollars per percentage point are total qualifying dollars divided by total
 qualifying percentage points. Multiplying by 100 estimates a full allowance for
 a similar workload. Context, caching, reasoning, changing quota rules and usage
-outside the proxy can affect this estimate. Prices and pricing rules are the
-current Keeper configuration, not a subscription invoice or confirmed billing
-tier. Historical totals include permanently archived requests and are recalculated
-if pricing changes; unavailable historical data cannot be reconstructed.
+outside the proxy can affect this estimate. API-equivalent values use each
+request's stored Keeper cost, not a subscription invoice or confirmed billing
+tier. Historical totals include permanently archived requests. Price edits apply
+to new events; explicit v2 recalculation can update eligible recent hot events.
+Unavailable historical data cannot be reconstructed.
 
 This is shared account reporting across all client keys. The separate all-key
 read-only login can view it without administrative controls; individual-key
@@ -159,7 +162,7 @@ have been consolidated into this tab.
 
 ## Response speed
 
-Open **Auth Files → Codex account → Response speed** in the admin or all-key
+Open **Credentials → Codex account → Response speed** in the admin or all-key
 read-only dashboard. Compare models and outgoing Normal/Fast requested mode
 over 7, 14, 30 or 90 days; account request history is independent of quota windows.
 The default is 7 days, total-time TPS and Normal + Fast modes. This is shared
@@ -221,3 +224,47 @@ as a lower bound when other image usage cannot be priced.
 Internal model labels without a verified API rate, such as `codex-auto-review`,
 must remain unpriced unless an explicit valuation policy is configured. A free
 subscription feature alone does not establish its API-equivalent token price.
+
+
+### Upgrading to 0.2.0 (Keeper v2)
+
+This wrapper builds the frozen upstream main commit
+`7b2b670f631335c0e2223af769c5abc04d731d8a` (including v2.0.3)
+on the upstream v2.0.3 runtime image. The runtime version identifies the
+maintained build as `2.0.3-main.7b2b670-ha.1`.
+
+Keep an HA backup including the add-on's data before upgrading. Keeper's staged
+startup also makes and verifies its own pre-upgrade SQLite backup before legacy
+conversion. Do not delete the backup directory or interrupt its storage access.
+The startup status page remains available while schema migration, immutable
+request-cost backfill and aggregate rebuild finish; reports open after those
+stages complete. Failed initialization remains visible and can resume from
+committed checkpoints. Allow adequate disk space for the database, backup and
+SQLite temporary/WAL data.
+
+Costs are now recorded when requests enter the database. Editing prices affects
+new events. The v2 pricing editor provides explicit, bounded recalculation for
+eligible recent hot events; older archived costs retain the migrated values.
+Historical unpriced or unsupported image usage remains unavailable instead of
+being assigned an invented value. Weekly values read these stored costs, and
+captured outgoing request tiers remain distinct from effective/client/response
+tiers.
+
+Local key names, ranking profile overrides and period rows, read-only session
+roles, and quota history remain in the same database. The upstream ranking
+removal migration is deliberately retained as a non-destructive marker in this
+maintained distribution. Public viewers continue to use their existing roles
+and base path. Plugin-generated identities do not become client-key viewers.
+
+For rollback, stop the add-on and restore the complete pre-upgrade database/data
+backup together with the previous add-on image. Never run the previous v1 binary
+against a v2-migrated database. Preserve the failed migrated database separately
+for diagnosis when storage permits. No production migration is performed by the
+repository tests or image build.
+
+The previous 18 sequential local patches are consolidated in `patches/ha-v2.patch`.
+Viewer scoping, names, sessions, quota freshness, outgoing tiers, weekly/daily
+value, remaining history, navigation and performance reporting are carried
+forward. Upstream v2 persisted costs and pricing controls replace the old
+read-time pricing machinery and editor; frozen historical migrations remain
+compatible with both stock upstream and this distribution's older databases.

@@ -1,11 +1,11 @@
 # Home Assistant AI proxy apps
 
-CLIProxyAPI and CPA Usage Keeper packaged for Home Assistant OS on Raspberry Pi 5 (64-bit) and amd64 machines. Images are built by GitHub Actions and published to GHCR. Upstream releases are pinned by version and image digest.
+CLIProxyAPI and CPA Usage Keeper packaged for Home Assistant OS on Raspberry Pi 5 (64-bit) and amd64 machines. Images are built by GitHub Actions and published to GHCR. Upstream source commits and runtime image digests are pinned. Some integrations include explicitly identified fixes beyond stable releases.
 
 | App | Upstream | Purpose |
 | --- | --- | --- |
-| CLIProxyAPI | 8.0.28 | Model API, provider credentials, private management, API-only gateway |
-| CPA Usage Keeper | 1.15.11 | Password-protected usage dashboard with persistent SQLite history |
+| CLIProxyAPI | 8.0.51 + main `be2563f`; management UI 1.27.2 | Model API, provider credentials, private management, API-only gateway |
+| CPA Usage Keeper | 2.0.3 + main `7b2b670` | Password-protected usage dashboard with persistent SQLite history |
 
 These are experimental community wrappers, unaffiliated with the upstream projects. Container integration and installation on Home Assistant OS are tested. Verify provider OAuth and long Cloudflare streams in your own deployment.
 
@@ -66,7 +66,7 @@ python tests/smoke.py
 
 Smoke tests use random disposable credentials, a fake model provider, isolated Docker resources, and no paid model calls. They check API authentication, blocked management paths, a model response, SSE forwarding, Keeper authentication and usage ingestion, persistence across restarts, and graceful shutdown. Resources are removed when the test exits.
 
-To update an upstream release, change its version and manifest digest in the Dockerfile, bump the app `version`, update the changelog, and push to `main`. Actions builds both apps in parallel on native amd64 and arm64 runners. The amd64 images feed four independent integration suites; publication waits for all builds and tests to pass. Published images are copied from the original OCI build artifacts, including provenance, without rebuilding them. Home Assistant uses the exact app version tag. Forks must update `repository.yaml` and the app image names/URLs to their own account.
+To update upstream, freeze each source commit and runtime image digest, reconcile the local patch chain, and verify the packaged applications before bumping app versions and changelogs. Keeper v2 upgrades require a stopped pre-upgrade database backup; rollback restores that backup together with the previous app version. Do not open a migrated v2 database with a v1 binary. Local ranking and restricted reporting remain supported by these wrappers. Actions builds both apps in parallel on native amd64 and arm64 runners. The amd64 images feed five independent integration suites; publication waits for all builds and tests to pass. Published images are copied from the original OCI build artifacts, including provenance, without rebuilding them. Home Assistant uses the exact app version tag. Forks must update `repository.yaml` and the app image names/URLs to their own account.
 
 Pull requests retain the amd64 build and integration checks without registry write permissions. Build layers use separate app/architecture caches; temporary Go compiler caches stay outside exported layers. OCI artifacts expire after one day, so rerun the full workflow if a later publication retry needs expired artifacts. Concurrent main-branch releases are serialized to keep their tags ordered.
 

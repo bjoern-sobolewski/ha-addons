@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- Integrate upstream Keeper v2.0.3 and main through `7b2b670`, including staged startup, persisted request costs, pricing branches, OIDC, execution traces and plugin identities.
+- Preserve the restricted viewer, persistent read-only sessions, shared key names, local ranking, captured outgoing tiers, weekly value, remaining history and matched response performance.
+- Carry image-generation pricing and unknown-price diagnostics into the v2 pricing model.
+- Back up the legacy database before v2 migration, backfill stored costs and rebuild aggregates. Rollback requires restoring the pre-upgrade database; an older Keeper must not open the migrated database.
+- Preserve outgoing-tier price rules during hot/archive migration and verify aggregates by tier. Keep the restricted viewer usable during staged startup through its read-only status route.
+
+
 ## 0.1.36
 
 - Add weekly remaining-quota history below Recent health in account Overview, with 1/7/30-day periods and seven days selected by default. Plot actual detected changes and interval API value on separate axes.

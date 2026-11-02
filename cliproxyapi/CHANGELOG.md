@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.17
+
+- Integrate CLIProxyAPI 8.0.51 plus the frozen main fixes at `be2563ff74a40979a9aadc59d0b24cedc6ba2e81`; pin management UI 1.27.2 at `f154fa9380825c4fe94bc577a9abaa7e505f8875`. The backend includes unreleased post-8.0.51 changes.
+- Include proactive Codex renewal, capacity-specific cooldowns, WebSocket continuity and early failover, protocol hardening, concurrent state protection, compression, transport isolation, translation and provider updates.
+- Preserve account-bound Reconnect, settings and tracking identity, safe diagnostics, shared key names, native traffic quota age/provenance, outgoing-tier history and the 8 MiB upstream HTTP fallback. Serialize Reconnect saves with native renewal and keep browser recovery/name operations bound to their starting connection.
+- Reconcile local patches with upstream v8 APIs, login storage and plan/reset controls; retain archived quota/reset guards and metadata validation fixes.
+
 ## 0.1.16
 
 - Add Reconnect to existing Codex accounts in Auth Files so an expired or unusable refresh token can be replaced through a fresh sign-in without deleting the account.

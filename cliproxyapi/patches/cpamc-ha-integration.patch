@@ -1,0 +1,4141 @@
+diff --git a/src/features/authFiles/AuthFilesPage.tsx b/src/features/authFiles/AuthFilesPage.tsx
+index 01ec04b..81c04fd 100644
+--- a/src/features/authFiles/AuthFilesPage.tsx
++++ b/src/features/authFiles/AuthFilesPage.tsx
+@@ -1,6 +1,8 @@
+ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { useNavigate } from 'react-router-dom';
++import { apiClient } from '@/services/api/client';
++import { makeCodexReconnectTarget } from './reconnect';
+ import { useInterval } from '@/hooks/useInterval';
+ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+ import { useRevealOnScroll } from '@/hooks/motion';
+@@ -89,6 +91,7 @@ export function AuthFilesPage() {
+   const [filter, setFilter] = useState<'all' | string>('all');
+   const [statusFilterMode, setStatusFilterMode] = useState<AuthFilesStatusFilterMode>('all');
+   const [compactMode, setCompactMode] = useState(false);
++  const [showQuotaAge, setShowQuotaAge] = useState(true);
+   const [search, setSearch] = useState('');
+   const [page, setPage] = useState(1);
+   const [pageSizeByMode, setPageSizeByMode] = useState({
+@@ -230,6 +233,7 @@ export function AuthFilesPage() {
+       if (typeof persistedCompactMode !== 'boolean' && typeof persisted.compactMode === 'boolean') {
+         setCompactMode(persisted.compactMode);
+       }
++      if (typeof persisted.showQuotaAge === 'boolean') setShowQuotaAge(persisted.showQuotaAge);
+       if (typeof persisted.search === 'string') {
+         setSearch(persisted.search);
+       }
+@@ -269,6 +273,7 @@ export function AuthFilesPage() {
+       problemOnly,
+       disabledOnly,
+       compactMode,
++      showQuotaAge,
+       search,
+       page,
+       pageSize,
+@@ -279,6 +284,7 @@ export function AuthFilesPage() {
+     writePersistedAuthFilesCompactMode(compactMode);
+   }, [
+     compactMode,
++    showQuotaAge,
+     disabledOnly,
+     filter,
+     page,
+@@ -641,6 +647,8 @@ export function AuthFilesPage() {
+           onPageSizeCommit={commitPageSizeInput}
+           compactMode={compactMode}
+           onCompactModeChange={setCompactMode}
++          showQuotaAge={showQuotaAge}
++          onShowQuotaAgeChange={setShowQuotaAge}
+           deleteLabel={deleteAllButtonLabel}
+           deleteDisabled={disableControls || loading || deletingAll || files.length === 0}
+           deleteLoading={deletingAll}
+@@ -706,6 +714,7 @@ export function AuthFilesPage() {
+                 key={getQuotaCacheKey(file)}
+                 file={file}
+                 compact={compactMode}
++                showQuotaAge={showQuotaAge}
+                 selected={selectedFiles.has(file.name)}
+                 resolvedTheme={resolvedTheme}
+                 disableControls={disableControls}
+@@ -719,6 +728,14 @@ export function AuthFilesPage() {
+                 onShowModels={showModels}
+                 onDownload={handleDownload}
+                 onManualRefresh={handleManualRefresh}
++                onReconnect={(item) => {
++                  const target = makeCodexReconnectTarget(
++                    item,
++                    apiClient.getConnectionRevision(),
++                    useAuthStore.getState().apiBase
++                  );
++                  if (target) navigate('/auth-files/reconnect', { state: target });
++                }}
+                 onCooldownReset={handleCooldownReset}
+                 onOpenPrefixProxyEditor={openPrefixProxyEditor}
+                 onDelete={handleDelete}
+diff --git a/src/features/authFiles/CodexReconnectPage.module.scss b/src/features/authFiles/CodexReconnectPage.module.scss
+new file mode 100644
+index 0000000..d9bc772
+--- /dev/null
++++ b/src/features/authFiles/CodexReconnectPage.module.scss
+@@ -0,0 +1,31 @@
++.card {
++  > p {
++    margin-block: $spacing-md;
++  }
++
++  > :global(.btn) {
++    margin-inline-end: $spacing-sm;
++  }
++}
++
++.title {
++  margin: 0;
++  font-size: 28px;
++}
++
++.flow {
++  display: flex;
++  flex-direction: column;
++  align-items: flex-start;
++  gap: $spacing-md;
++  margin-block: $spacing-md;
++  overflow-wrap: anywhere;
++}
++
++.error {
++  color: $error-color;
++}
++
++.success {
++  color: $success-color;
++}
+diff --git a/src/features/authFiles/CodexReconnectPage.tsx b/src/features/authFiles/CodexReconnectPage.tsx
+new file mode 100644
+index 0000000..459a6ef
+--- /dev/null
++++ b/src/features/authFiles/CodexReconnectPage.tsx
+@@ -0,0 +1,246 @@
++import { useEffect, useRef, useState } from 'react';
++import { useTranslation } from 'react-i18next';
++import { useLocation, useNavigate } from 'react-router-dom';
++import { Button } from '@/components/ui/Button';
++import { Card } from '@/components/ui/Card';
++import { Input } from '@/components/ui/Input';
++import { captureCodexReconnectApi } from '@/services/api/oauth';
++import { apiClient } from '@/services/api/client';
++import { useAuthStore, useQuotaStore } from '@/stores';
++import { copyToClipboard } from '@/utils/clipboard';
++import { getErrorMessage } from '@/utils/helpers';
++import { createOAuthAttempts } from '@/features/oauth/oauthAttempts';
++import { notifyAuthFilesChanged } from './authFilesEvents';
++import { codexReconnectFailure, readCodexReconnectTarget } from './reconnect';
++import styles from './CodexReconnectPage.module.scss';
++
++export function CodexReconnectPage() {
++  const { t } = useTranslation();
++  const location = useLocation();
++  const navigate = useNavigate();
++  const apiBase = useAuthStore((state) => state.apiBase);
++  const [status, setStatus] = useState<'idle' | 'starting' | 'waiting' | 'success' | 'error'>(
++    'idle'
++  );
++  const [login, setLogin] = useState<{ url: string; state: string }>();
++  const [callback, setCallback] = useState('');
++  const [error, setError] = useState('');
++  const [busy, setBusy] = useState(false);
++  const pending = useRef(false);
++  const recoveryApi = useRef<ReturnType<typeof captureCodexReconnectApi> | null>(null);
++  const attempts = useRef(
++    createOAuthAttempts({
++      setTimeout: (fn, delay) => window.setTimeout(fn, delay),
++      clearTimeout: (timer) => window.clearTimeout(timer),
++    })
++  );
++  const target = readCodexReconnectTarget(
++    location.state,
++    apiClient.getConnectionRevision(),
++    apiBase
++  );
++
++  useEffect(() => {
++    const unsubscribe = useAuthStore.subscribe((current, previous) => {
++      if (
++        current.apiBase !== previous.apiBase ||
++        current.managementKey !== previous.managementKey ||
++        current.isAuthenticated !== previous.isAuthenticated
++      ) {
++        attempts.current.invalidateAll();
++        setLogin(undefined);
++        setStatus('idle');
++        setBusy(false);
++        pending.current = false;
++      }
++    });
++    const activeAttempts = attempts.current;
++    return () => {
++      unsubscribe();
++      activeAttempts.invalidateAll();
++    };
++  }, []);
++
++  const complete = () => {
++    attempts.current.invalidateAll();
++    setLogin(undefined);
++    setStatus('success');
++    setBusy(false);
++    pending.current = false;
++    useQuotaStore.getState().clearQuotaCache();
++    notifyAuthFilesChanged();
++  };
++
++  const start = async () => {
++    if (!target || pending.current || login || status === 'success') return;
++    pending.current = true;
++    const attempt = attempts.current.begin('codex');
++    setError('');
++    setStatus('starting');
++    try {
++      const connectionApi = captureCodexReconnectApi();
++      recoveryApi.current = connectionApi;
++      const result = await connectionApi.start(target, attempt.signal);
++      if (!attempt.isCurrent()) return;
++      if (!result.state || !result.url) throw new Error(t('auth_files.reconnect_missing_state'));
++      setLogin({ url: result.url, state: result.state });
++      setStatus('waiting');
++      const poll = () =>
++        attempt.poll(
++          () => connectionApi.status(result.state!, attempt.signal),
++          (response) => {
++            if (response.status === 'ok') {
++              const failure = codexReconnectFailure(response, t('auth_files.reconnect_failed'));
++              if (failure) {
++                attempt.invalidate();
++                setLogin(undefined);
++                setStatus('error');
++                setError(failure);
++                pending.current = false;
++                return false;
++              }
++              complete();
++              return false;
++            }
++            if (response.status === 'error') {
++              attempt.invalidate();
++              setLogin(undefined);
++              setStatus('error');
++              setError(response.error || t('auth_files.reconnect_failed'));
++              return false;
++            }
++            return true;
++          },
++          (failure) => {
++            setStatus('error');
++            setError(getErrorMessage(failure));
++            if (attempt.isCurrent()) poll();
++          },
++          1500
++        );
++      poll();
++    } catch (failure) {
++      if (!attempt.isCurrent()) return;
++      attempt.invalidate();
++      setStatus('error');
++      setError(
++        (failure as { status?: number }).status === 404
++          ? t('auth_files.reconnect_requires_backend')
++          : getErrorMessage(failure)
++      );
++    } finally {
++      if (attempt.isCurrent()) pending.current = false;
++      // Invalidated attempts must not release a newer request's guard.
++      if (!attempts.current.get('codex')) pending.current = false;
++    }
++  };
++
++  const submit = async () => {
++    const attempt = attempts.current.get('codex');
++    if (!login || !attempt?.isCurrent() || pending.current || !callback.trim() || !recoveryApi.current) return;
++    pending.current = true;
++    setBusy(true);
++    try {
++      await recoveryApi.current.submit(callback.trim(), attempt.signal);
++      if (!attempt.isCurrent()) return;
++      setCallback('');
++      setError('');
++    } catch (failure) {
++      if (attempt.isCurrent()) setError(getErrorMessage(failure));
++    } finally {
++      if (attempt.isCurrent()) {
++        pending.current = false;
++        setBusy(false);
++      }
++    }
++  };
++
++  const back = async () => {
++    if (pending.current) return;
++    const attempt = attempts.current.get('codex');
++    if (login && attempt?.isCurrent() && recoveryApi.current) {
++      pending.current = true;
++      setBusy(true);
++      try {
++        const result = await recoveryApi.current.cancel(login.state, attempt.signal);
++        if (!attempt.isCurrent()) return;
++        if (!result.cancelled) {
++          const resultStatus = await recoveryApi.current.status(login.state, attempt.signal);
++          if (!attempt.isCurrent()) return;
++          if (resultStatus.status === 'wait')
++            throw new Error(t('auth_files.reconnect_cancel_failed'));
++          if (resultStatus.status === 'ok') {
++            const failure = codexReconnectFailure(resultStatus, t('auth_files.reconnect_failed'));
++            if (failure) throw new Error(failure);
++            complete();
++          }
++        }
++        attempt.invalidate();
++      } catch (failure) {
++        if (attempt.isCurrent()) {
++          setError(getErrorMessage(failure));
++          pending.current = false;
++          setBusy(false);
++        }
++        return;
++      }
++    }
++    navigate('/auth-files');
++  };
++
++  return (
++    <Card
++      className={styles.card}
++      title={<h1 className={styles.title}>{t('auth_files.reconnect_title')}</h1>}
++    >
++      <p>
++        {target
++          ? t('auth_files.reconnect_hint', { name: target.name })
++          : t('auth_files.reconnect_invalid')}
++      </p>
++      {error && (
++        <p className={styles.error} role="alert">
++          {error}
++        </p>
++      )}
++      {status === 'success' && (
++        <p className={styles.success} role="status">
++          {t('auth_files.reconnect_success')}
++        </p>
++      )}
++      {target && !login && status !== 'success' && (
++        <Button onClick={() => void start()} loading={status === 'starting'}>
++          {t('auth_files.reconnect_button')}
++        </Button>
++      )}
++      {login && (
++        <div className={styles.flow}>
++          <p role="status">{t('auth_files.reconnect_waiting')}</p>
++          <Button onClick={() => window.open(login.url, '_blank', 'noopener,noreferrer')}>
++            {t('auth_files.reconnect_open')}
++          </Button>
++          <Button variant="secondary" onClick={() => void copyToClipboard(login.url)}>
++            {t('auth_files.reconnect_copy')}
++          </Button>
++          <Input
++            label={t('auth_files.reconnect_callback')}
++            value={callback}
++            onChange={(event) => setCallback(event.target.value)}
++            hint={t('auth_files.reconnect_callback_hint')}
++            disabled={busy}
++          />
++          <Button onClick={() => void submit()} loading={busy} disabled={!callback.trim()}>
++            {t('auth_files.reconnect_submit')}
++          </Button>
++        </div>
++      )}
++      <Button
++        variant="secondary"
++        onClick={() => void back()}
++        disabled={status === 'starting' || busy}
++      >
++        {t(login ? 'auth_files.reconnect_cancel' : 'auth_files.reconnect_back')}
++      </Button>
++    </Card>
++  );
++}
+diff --git a/src/features/authFiles/components/AuthFileCard.module.scss b/src/features/authFiles/components/AuthFileCard.module.scss
+index a7dded0..2a9f20d 100644
+--- a/src/features/authFiles/components/AuthFileCard.module.scss
++++ b/src/features/authFiles/components/AuthFileCard.module.scss
+@@ -412,9 +412,7 @@
+ }
+ 
+ .utilityActions {
+-  display: flex;
+-  align-items: center;
+-  gap: 4px;
++  display: contents;
+ }
+ 
+ /* Button 会用 span 包裹 children；将包裹层也设为 flex，避免 SVG 按文本基线偏移。 */
+diff --git a/src/features/authFiles/components/AuthFileCard.tsx b/src/features/authFiles/components/AuthFileCard.tsx
+index 69690d0..8ba911e 100644
+--- a/src/features/authFiles/components/AuthFileCard.tsx
++++ b/src/features/authFiles/components/AuthFileCard.tsx
+@@ -1,5 +1,6 @@
+ import { useState, type CSSProperties } from 'react';
+ import { getAuthFileRefreshKey } from '@/features/authFiles/manualRefresh';
++import { makeCodexReconnectTarget } from '@/features/authFiles/reconnect';
+ import { useTranslation } from 'react-i18next';
+ import { Button } from '@/components/ui/Button';
+ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+@@ -9,7 +10,7 @@ import {
+   IconDownload,
+   IconInfo,
+   IconModelCluster,
+-  IconRefreshCw,
++  IconKey,
+   IconSettings,
+   IconTrash2,
+ } from '@/components/ui/icons';
+@@ -41,6 +42,7 @@ import styles from './AuthFileCard.module.scss';
+ export type AuthFileCardProps = {
+   file: AuthFileItem;
+   compact: boolean;
++  showQuotaAge?: boolean;
+   selected: boolean;
+   resolvedTheme: ResolvedTheme;
+   disableControls: boolean;
+@@ -55,6 +57,7 @@ export type AuthFileCardProps = {
+   onShowModels: (file: AuthFileItem) => void;
+   onDownload: (name: string) => void;
+   onManualRefresh: (file: AuthFileItem) => void;
++  onReconnect?: (file: AuthFileItem) => void;
+   onCooldownReset: (file: AuthFileItem) => void;
+   onOpenPrefixProxyEditor: (file: AuthFileItem) => void;
+   onDelete: (name: string) => void;
+@@ -80,6 +83,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
+     onShowModels,
+     onDownload,
+     onManualRefresh,
++    onReconnect,
+     onCooldownReset,
+     onOpenPrefixProxyEditor,
+     onDelete,
+@@ -120,6 +124,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
+     : '';
+ 
+   // Capture the entrance delay once so subsequent updates do not interrupt it.
++  const [accountRefreshing, setAccountRefreshing] = useState(false);
+   const [mountEntranceDelayMs] = useState<number | null>(entranceDelayMs ?? null);
+   const cardClasses = [
+     styles.card,
+@@ -263,7 +268,13 @@ export function AuthFileCard(props: AuthFileCardProps) {
+       )}
+ 
+       {showQuotaLayout && quotaType && (
+-        <AuthFileQuotaSection file={file} quotaType={quotaType} disableControls={disableControls} />
++        <AuthFileQuotaSection
++          file={file}
++          quotaType={quotaType}
++          showQuotaAge={props.showQuotaAge}
++          disableControls={disableControls || isManualRefreshing}
++          onRefreshingChange={setAccountRefreshing}
++        />
+       )}
+ 
+       <footer className={styles.actions}>
+@@ -282,21 +293,33 @@ export function AuthFileCard(props: AuthFileCardProps) {
+           )}
+           {!isRuntimeOnly && (
+             <div className={styles.utilityActions}>
++              {onReconnect && makeCodexReconnectTarget(file, 0) && (
++                <Button
++                  variant="secondary"
++                  size="sm"
++                  onClick={() => onReconnect(file)}
++                  disabled={disableControls || isManualRefreshing || deleting === file.name}
++                  aria-label={t('auth_files.reconnect_account', { name: file.name })}
++                >
++                  {t('auth_files.reconnect_button')}
++                </Button>
++              )}
+               {showManualRefreshButton && (
+                 <Button
+                   variant="secondary"
+                   size="sm"
+                   onClick={() => onManualRefresh(file)}
+-                  className={styles.iconButton}
+-                  title={t('auth_files.manual_refresh_button')}
++                  title={t('auth_files.credential_refresh_hint')}
+                   disabled={
+                     disableControls ||
+                     file.disabled ||
+                     statusUpdating[getAuthFileRefreshKey(file)] === true ||
+-                    isManualRefreshing
++                    isManualRefreshing ||
++                    accountRefreshing
+                   }
+                 >
+-                  {isManualRefreshing ? <LoadingSpinner size={14} /> : <IconRefreshCw size={15} />}
++                  {isManualRefreshing ? <LoadingSpinner size={14} /> : <IconKey size={14} />}
++                  {t('auth_files.credential_refresh_button')}
+                 </Button>
+               )}
+               <Button
+diff --git a/src/features/authFiles/components/AuthFileQuota.module.scss b/src/features/authFiles/components/AuthFileQuota.module.scss
+index 4b90b07..2535120 100644
+--- a/src/features/authFiles/components/AuthFileQuota.module.scss
++++ b/src/features/authFiles/components/AuthFileQuota.module.scss
+@@ -61,12 +61,47 @@ button.quotaMessageAction {
+ 
+ .quotaCardActions {
+   display: flex;
+-  justify-content: flex-end;
++  justify-content: space-between;
++  flex-wrap: wrap;
++  gap: 6px;
++}
++
++.nativeQuotaBody {
++  display: flex;
++  flex-direction: column;
++  gap: 9px;
++  min-width: 0;
++  container-type: inline-size;
++}
++
++.quotaMeta [data-quota-reset] {
++  display: inline-flex;
++  align-items: baseline;
+   gap: 6px;
+ }
+ 
+-.quotaResetCreditButton {
++@container (max-width: 320px) {
++  .quotaRowHeader:has([data-quota-updated]) {
++    display: grid;
++    grid-template-columns: minmax(0, 1fr) auto;
++    gap: 2px 6px;
++    .quotaMeta {
++      display: contents;
++    }
++    .quotaMeta > :first-child {
++      grid-column: 2;
++      grid-row: 1;
++    }
++    .quotaMeta > :not(:first-child) {
++      grid-column: 1 / -1;
++      justify-self: end;
++    }
++  }
++}
++
++.quotaSection .quotaResetCreditButton {
+   font-size: $quota-font-size;
++  padding: 7px 8px;
+   font-weight: 600;
+   white-space: nowrap;
+ 
+@@ -78,6 +113,10 @@ button.quotaMessageAction {
+   }
+ }
+ 
++.quotaCardActions > :last-child:not(:first-child) {
++  margin-inline-start: auto;
++}
++
+ /* ---------- 配额行（全 provider 通用） ---------- */
+ 
+ .quotaRow {
+diff --git a/src/features/authFiles/components/AuthFileQuotaSection.tsx b/src/features/authFiles/components/AuthFileQuotaSection.tsx
+index 7fb45be..2b0bb49 100644
+--- a/src/features/authFiles/components/AuthFileQuotaSection.tsx
++++ b/src/features/authFiles/components/AuthFileQuotaSection.tsx
+@@ -1,4 +1,9 @@
+-import { useCallback, useState } from 'react';
++import { useTrafficQuota } from '@/features/quota/useTrafficQuota';
++import { mergeTrafficQuota } from '@/features/quota/trafficQuota';
++import { normalizeAuthIndex } from '@/utils/authIndex';
++import { AuthFileObservation } from '@/features/quota/authFileObservation';
++import { withQuotaObservation } from '@/features/quota/observationFormat';
++import { useCallback, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import {
+   captureQuotaCacheGeneration,
+@@ -32,18 +37,23 @@ export type AuthFileQuotaSectionProps = {
+   file: AuthFileItem;
+   quotaType: QuotaProviderType;
+   disableControls: boolean;
++  showQuotaAge?: boolean;
++  onRefreshingChange?: (refreshing: boolean) => void;
+ };
+ 
+ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+-  const { file, quotaType, disableControls } = props;
++  const { file, quotaType, disableControls, onRefreshingChange } = props;
+   const { t } = useTranslation();
+   const showNotification = useNotificationStore((state) => state.showNotification);
+   const showConfirmation = useNotificationStore((state) => state.showConfirmation);
+   const [resettingQuota, setResettingQuota] = useState(false);
++  const [refreshingQuota, setRefreshingQuota] = useState(false);
++  const [refreshError, setRefreshError] = useState('');
++  const pendingRefresh = useRef(false);
+   const adapter = QUOTA_ADAPTERS[quotaType];
+   const cacheKey = getQuotaCacheKey(file);
+ 
+-  const quota = useQuotaStore((state) => {
++  const storedQuota = useQuotaStore((state) => {
+     if (quotaType === 'antigravity')
+       return state.antigravityQuota[cacheKey] as QuotaCardState | undefined;
+     if (quotaType === 'claude') return state.claudeQuota[cacheKey] as QuotaCardState | undefined;
+@@ -55,6 +65,14 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+     if (quotaType === 'xai') return state.xaiQuota[cacheKey] as QuotaCardState | undefined;
+     return assertNever(quotaType);
+   });
++  const quota = storedQuota;
++  const traffic = useTrafficQuota(
++    normalizeAuthIndex(file.auth_index ?? file.authIndex) ?? '',
++    quotaType,
++    file.disabled
++  );
++  const displayQuota = mergeTrafficQuota(quotaType, storedQuota, traffic, t);
++  const hasDisplay = displayQuota?.status === 'success';
+   const retainedClaudeUsage =
+     quotaType === 'claude' && hasClaudeUsageData(quota as ClaudeQuotaState | undefined);
+ 
+@@ -66,37 +84,53 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+     if (disableControls) return;
+     if (isRuntimeOnlyAuthFile(file)) return;
+     if (file.disabled) return;
+-    if (quota?.status === 'loading' || resettingQuota) return;
++    if (resettingQuota || pendingRefresh.current) return;
++    if (quota?.status === 'loading') return;
+ 
+     const cacheGeneration = captureQuotaCacheGeneration(file.name);
++    pendingRefresh.current = true;
++    setRefreshingQuota(true);
++    onRefreshingChange?.(true);
++    setRefreshError('');
+ 
+-    updateQuotaState((prev) => ({
+-      ...prev,
+-      [cacheKey]: adapter.buildLoadingState(),
+-    }));
++    if (quota?.status !== 'success')
++      updateQuotaState((prev) => ({
++        ...prev,
++        [cacheKey]: adapter.buildLoadingState(),
++      }));
+ 
+     try {
+       const data = await adapter.fetchQuota(file, t);
+       commitIfQuotaCacheCurrent(cacheGeneration, () => {
+         updateQuotaState((prev) => ({
+           ...prev,
+-          [cacheKey]: adapter.buildSuccessState(data),
++          [cacheKey]: withQuotaObservation(
++            adapter.buildSuccessState(data),
++            new Date().toISOString()
++          ),
+         }));
+-        showNotification(t('auth_files.quota_refresh_success', { name: file.name }), 'success');
++        showNotification(t('auth_files.account_refresh_success', { name: file.name }), 'success');
+       });
+     } catch (err: unknown) {
+       const message = err instanceof Error ? err.message : t('common.unknown_error');
+       const status = getStatusFromError(err);
+       commitIfQuotaCacheCurrent(cacheGeneration, () => {
+-        updateQuotaState((prev) => ({
+-          ...prev,
+-          [cacheKey]: adapter.buildErrorState(message, status),
+-        }));
++        setRefreshError(message);
++        if (quota?.status !== 'success') {
++          updateQuotaState((prev) => ({
++            ...prev,
++            [cacheKey]: adapter.buildErrorState(message, status),
++          }));
++        }
+         showNotification(
+-          t('auth_files.quota_refresh_failed', { name: file.name, message }),
++          t('auth_files.account_refresh_failed', { name: file.name, message }),
+           'error'
+         );
+       });
++    } finally {
++      pendingRefresh.current = false;
++      setRefreshingQuota(false);
++      onRefreshingChange?.(false);
+     }
+   }, [
+     adapter,
+@@ -105,6 +139,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+     file,
+     quota?.status,
+     resettingQuota,
++    onRefreshingChange,
+     showNotification,
+     t,
+     updateQuotaState,
+@@ -116,6 +151,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+     if (file.disabled) return;
+     if (quota?.status === 'loading') return;
+     if (resettingQuota) return;
++    if (pendingRefresh.current) return;
+ 
+     const resetQuota = adapter.resetQuota;
+     if (!resetQuota) return;
+@@ -126,14 +162,20 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+       confirmText: t('codex_quota.reset_confirm_button'),
+       variant: 'primary',
+       onConfirm: async () => {
++        if (pendingRefresh.current) return;
++        pendingRefresh.current = true;
+         const cacheGeneration = captureQuotaCacheGeneration(file.name);
+         setResettingQuota(true);
++        onRefreshingChange?.(true);
+         try {
+           const data = await resetQuota(file, t);
+           commitIfQuotaCacheCurrent(cacheGeneration, () => {
+             updateQuotaState((prev) => ({
+               ...prev,
+-              [cacheKey]: adapter.buildSuccessState(data),
++              [cacheKey]: withQuotaObservation(
++                adapter.buildSuccessState(data),
++                new Date().toISOString()
++              ),
+             }));
+             showNotification(t('codex_quota.reset_success', { name: file.name }), 'success');
+           });
+@@ -143,7 +185,9 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+             showNotification(t('codex_quota.reset_failed', { name: file.name, message }), 'error');
+           });
+         } finally {
++          pendingRefresh.current = false;
+           setResettingQuota(false);
++          onRefreshingChange?.(false);
+         }
+       },
+     });
+@@ -154,6 +198,7 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+     file,
+     quota?.status,
+     resettingQuota,
++    onRefreshingChange,
+     showConfirmation,
+     showNotification,
+     t,
+@@ -161,11 +206,9 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+   ]);
+ 
+   const quotaStatus = quota?.status ?? 'idle';
+-  const canRefreshQuota = !disableControls && !file.disabled && !resettingQuota;
++  const canRefreshQuota = !disableControls && !file.disabled && !resettingQuota && !refreshingQuota;
+   const canUseResetQuota = canRefreshQuota && quotaStatus !== 'loading';
+-  // Idle state already renders a clickable "click to refresh" prompt; only offer the
+-  // explicit refresh button once quota has been requested so it can be refreshed again.
+-  const showRefreshQuotaAction = quotaStatus !== 'idle';
++  const showRefreshQuotaAction = quotaStatus !== 'idle' || hasDisplay;
+   const showResetQuotaAction = quota !== undefined && Boolean(adapter.canResetQuota?.(quota));
+   const resetQuotaAction =
+     adapter.resetQuota && showResetQuotaAction ? (
+@@ -192,7 +235,16 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+ 
+   return (
+     <div className={styles.quotaSection}>
+-      {quotaStatus === 'loading' ? (
++      {hasDisplay && displayQuota ? (
++        <AuthFileObservation.Provider value={{ ...displayQuota, showAge: props.showQuotaAge }}>
++          <div className={styles.nativeQuotaBody}>
++            <adapter.Body quota={displayQuota} classes={compactQuotaClasses} />
++            {quotaStatus !== 'success' && (
++              <div className={styles.quotaMessage}>{t('quota_traffic.account_missing')}</div>
++            )}
++          </div>
++        </AuthFileObservation.Provider>
++      ) : quotaStatus === 'loading' ? (
+         <div className={styles.quotaMessage}>{t(`${adapter.i18nPrefix}.loading`)}</div>
+       ) : quotaStatus === 'idle' ? (
+         <button
+@@ -210,29 +262,40 @@ export function AuthFileQuotaSection(props: AuthFileQuotaSectionProps) {
+           })}
+         </div>
+       ) : quota && !retainedClaudeUsage ? (
+-        <adapter.Body quota={quota} classes={compactQuotaClasses} />
++        <AuthFileObservation.Provider value={quota}>
++          <div className={styles.nativeQuotaBody}>
++            <adapter.Body quota={quota} classes={compactQuotaClasses} />
++          </div>
++        </AuthFileObservation.Provider>
+       ) : !retainedClaudeUsage ? (
+         <div className={styles.quotaMessage}>{t(`${adapter.i18nPrefix}.idle`)}</div>
+       ) : null}
+-      {retainedClaudeUsage && quota && <adapter.Body quota={quota} classes={compactQuotaClasses} />}
++      {!hasDisplay && retainedClaudeUsage && quota && <AuthFileObservation.Provider value={quota}>
++          <div className={styles.nativeQuotaBody}>
++            <adapter.Body quota={quota} classes={compactQuotaClasses} />
++          </div>
++        </AuthFileObservation.Provider>}
+       {(showRefreshQuotaAction || resetQuotaAction) && (
+         <div className={styles.quotaCardActions}>
++          <Button
++            type="button"
++            variant="secondary"
++            size="sm"
++            className={styles.quotaResetCreditButton}
++            onClick={() => void refreshQuotaForFile()}
++            disabled={!canRefreshQuota || quotaStatus === 'loading' || isRuntimeOnlyAuthFile(file)}
++            loading={refreshingQuota || quotaStatus === 'loading'}
++            title={t('auth_files.account_refresh_hint')}
++          >
++            {!refreshingQuota && quotaStatus !== 'loading' && <IconRefreshCw size={14} />}
++            {t('auth_files.account_refresh_button')}
++          </Button>
+           {resetQuotaAction}
+-          {showRefreshQuotaAction && (
+-            <Button
+-              type="button"
+-              variant="secondary"
+-              size="sm"
+-              className={styles.quotaResetCreditButton}
+-              onClick={() => void refreshQuotaForFile()}
+-              disabled={!canRefreshQuota || quotaStatus === 'loading'}
+-              loading={quotaStatus === 'loading'}
+-              title={t('auth_files.quota_refresh_hint')}
+-            >
+-              {quotaStatus !== 'loading' && <IconRefreshCw size={14} />}
+-              {t('auth_files.quota_refresh_single')}
+-            </Button>
+-          )}
++        </div>
++      )}
++      {(refreshError || (hasDisplay && quotaStatus === 'error' && quotaErrorMessage)) && (
++        <div className={styles.quotaError} role="alert">
++          {t('auth_files.account_refresh_failed', { message: refreshError || quotaErrorMessage })}
+         </div>
+       )}
+     </div>
+diff --git a/src/features/authFiles/components/AuthFilesToolbar.tsx b/src/features/authFiles/components/AuthFilesToolbar.tsx
+index a3fbff4..bed6fc7 100644
+--- a/src/features/authFiles/components/AuthFilesToolbar.tsx
++++ b/src/features/authFiles/components/AuthFilesToolbar.tsx
+@@ -5,14 +5,8 @@ import { Select } from '@/components/ui/Select';
+ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
+ import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+ import { IconSearch, IconSlidersHorizontal, IconTrash2 } from '@/components/ui/icons';
+-import {
+-  MAX_CARD_PAGE_SIZE,
+-  MIN_CARD_PAGE_SIZE,
+-} from '@/features/authFiles/constants';
+-import type {
+-  AuthFilesSortMode,
+-  AuthFilesStatusFilterMode,
+-} from '@/features/authFiles/uiState';
++import { MAX_CARD_PAGE_SIZE, MIN_CARD_PAGE_SIZE } from '@/features/authFiles/constants';
++import type { AuthFilesSortMode, AuthFilesStatusFilterMode } from '@/features/authFiles/uiState';
+ import styles from './AuthFilesToolbar.module.scss';
+ 
+ export type AuthFilesToolbarProps = {
+@@ -28,6 +22,8 @@ export type AuthFilesToolbarProps = {
+   onPageSizeInputChange: (event: ChangeEvent<HTMLInputElement>) => void;
+   onPageSizeCommit: (rawValue: string) => void;
+   compactMode: boolean;
++  showQuotaAge?: boolean;
++  onShowQuotaAgeChange?: (value: boolean) => void;
+   onCompactModeChange: (value: boolean) => void;
+   deleteLabel: string;
+   deleteDisabled: boolean;
+@@ -53,6 +49,8 @@ export function AuthFilesToolbar(props: AuthFilesToolbarProps) {
+     onPageSizeInputChange,
+     onPageSizeCommit,
+     compactMode,
++    showQuotaAge = true,
++    onShowQuotaAgeChange,
+     onCompactModeChange,
+     deleteLabel,
+     deleteDisabled,
+@@ -138,7 +136,7 @@ export function AuthFilesToolbar(props: AuthFilesToolbarProps) {
+           aria-expanded={displaySettingsOpen}
+           aria-controls="auth-files-display-settings"
+           title={t('auth_files.display_options_label')}
+-        onClick={() => setDisplaySettingsOpen((open) => !open)}
++          onClick={() => setDisplaySettingsOpen((open) => !open)}
+         >
+           <IconSlidersHorizontal size={15} />
+           <span>{t('auth_files.display_options_label')}</span>
+@@ -165,6 +163,14 @@ export function AuthFilesToolbar(props: AuthFilesToolbarProps) {
+                 }}
+               />
+             </div>
++            <div className={styles.popoverRow}>
++              <span>{t('quota_traffic.show_age')}</span>
++              <ToggleSwitch
++                checked={showQuotaAge}
++                onChange={(value) => onShowQuotaAgeChange?.(value)}
++                ariaLabel={t('quota_traffic.show_age')}
++              />
++            </div>
+             <div className={styles.popoverRow}>
+               <span>{t('auth_files.compact_mode_label')}</span>
+               <ToggleSwitch
+diff --git a/src/features/authFiles/reconnect.ts b/src/features/authFiles/reconnect.ts
+new file mode 100644
+index 0000000..9003565
+--- /dev/null
++++ b/src/features/authFiles/reconnect.ts
+@@ -0,0 +1,51 @@
++import type { OAuthStatusResponse } from '@/services/api/oauth';
++import type { AuthFileItem } from '@/types';
++
++export interface CodexReconnectTarget {
++  name: string;
++  authIndex: string;
++  connectionRevision: number;
++  apiBase: string;
++}
++
++export function makeCodexReconnectTarget(
++  file: AuthFileItem,
++  connectionRevision: number,
++  apiBase = ''
++): CodexReconnectTarget | null {
++  const runtimeOnly = file.runtimeOnly ?? file['runtime_only'];
++  if (runtimeOnly === true || runtimeOnly === 'true') return null;
++  if (String(file.type ?? file.provider).toLowerCase() !== 'codex') return null;
++  const authIndex = typeof file.authIndex === 'string' ? file.authIndex.trim() : '';
++  if (!authIndex || !file.name || /[/\\]/.test(file.name)) return null;
++  return { name: file.name, authIndex, connectionRevision, apiBase };
++}
++
++export function readCodexReconnectTarget(
++  value: unknown,
++  connectionRevision: number,
++  apiBase = ''
++): CodexReconnectTarget | null {
++  if (!value || typeof value !== 'object') return null;
++  const target = value as Partial<CodexReconnectTarget>;
++  if (
++    typeof target.name !== 'string' ||
++    !target.name.trim() ||
++    /[/\\]/.test(target.name) ||
++    typeof target.authIndex !== 'string' ||
++    !target.authIndex.trim() ||
++    target.connectionRevision !== connectionRevision ||
++    target.apiBase !== apiBase
++  )
++    return null;
++  return target as CodexReconnectTarget;
++}
++
++/** Saved tokens alone do not prove that the running server adopted the account. */
++export function codexReconnectFailure(result: OAuthStatusResponse, fallback: string): string | undefined {
++  if (result.status !== 'ok') return undefined;
++  if (result.saved === false || result.adopted === false || result.requires_sign_in === true || result.verification_error) {
++    return result.adoption_error || result.verification_error || fallback;
++  }
++  return undefined;
++}
+diff --git a/src/features/authFiles/uiState.ts b/src/features/authFiles/uiState.ts
+index 034b809..ef803c6 100644
+--- a/src/features/authFiles/uiState.ts
++++ b/src/features/authFiles/uiState.ts
+@@ -1,10 +1,5 @@
+ export const AUTH_FILES_SORT_MODES = ['default', 'az', 'priority'] as const;
+-export const AUTH_FILES_STATUS_FILTER_MODES = [
+-  'all',
+-  'enabled',
+-  'disabled',
+-  'problem',
+-] as const;
++export const AUTH_FILES_STATUS_FILTER_MODES = ['all', 'enabled', 'disabled', 'problem'] as const;
+ 
+ export type AuthFilesSortMode = (typeof AUTH_FILES_SORT_MODES)[number];
+ export type AuthFilesStatusFilterMode = (typeof AUTH_FILES_STATUS_FILTER_MODES)[number];
+@@ -15,6 +10,7 @@ export type AuthFilesUiState = {
+   disabledOnly?: boolean;
+   statusFilterMode?: AuthFilesStatusFilterMode;
+   compactMode?: boolean;
++  showQuotaAge?: boolean;
+   search?: string;
+   page?: number;
+   pageSize?: number;
+diff --git a/src/features/config/apiKeyNames.ts b/src/features/config/apiKeyNames.ts
+index fe1a621..fe87a0f 100644
+--- a/src/features/config/apiKeyNames.ts
++++ b/src/features/config/apiKeyNames.ts
+@@ -1,5 +1,7 @@
+ import { sha256 } from '@noble/hashes/sha2.js';
+ import { bytesToHex } from '@noble/hashes/utils.js';
++import { apiClient } from '@/services/api/client';
++import { sharedApiKeyNamesApi } from '@/services/api/apiKeyNames';
+ import { obfuscatedStorage } from '@/services/storage/secureStorage';
+ 
+ const STORAGE_PREFIX = 'api-key-names:v1:';
+@@ -43,3 +45,75 @@ export function saveApiKeyName(apiBase: string, apiKey: string, name: string): b
+     return false;
+   }
+ }
++
++export function sharedApiKeyFingerprint(apiKey: string): string {
++  return bytesToHex(sha256(new TextEncoder().encode(apiKey)));
++}
++
++export interface ApiKeyNameState {
++  names: Record<string, string>;
++  shared: boolean;
++}
++
++const assertRevision = (revision: number) => {
++  if (revision !== apiClient.getConnectionRevision()) throw new Error('Connection changed');
++};
++
++export async function loadApiKeyNameState(
++  apiBase: string,
++  apiKeys: string[]
++): Promise<ApiKeyNameState> {
++  const revision = apiClient.getConnectionRevision();
++  const client = apiClient.captureConnection();
++  let names: Record<string, string>;
++  try {
++    names = await sharedApiKeyNamesApi.list(client);
++  } catch (error) {
++    assertRevision(revision);
++    if (!(error instanceof Error) || (error as { status?: number }).status !== 404) throw error;
++    const local = readApiKeyNames(apiBase);
++    return {
++      shared: false,
++      names: Object.fromEntries(
++        apiKeys.map((key) => [
++          sharedApiKeyFingerprint(key),
++          local[apiKeyNameFingerprint(apiBase, key)] ?? '',
++        ])
++      ),
++    };
++  }
++  assertRevision(revision);
++  const local = readApiKeyNames(apiBase);
++  const imports: Record<string, string> = {};
++  for (const key of apiKeys) {
++    const fingerprint = sharedApiKeyFingerprint(key);
++    const name = local[apiKeyNameFingerprint(apiBase, key)];
++    if (name && !Object.prototype.hasOwnProperty.call(names, fingerprint))
++      imports[fingerprint] = name;
++  }
++  if (Object.keys(imports).length) {
++    names = await sharedApiKeyNamesApi.update(imports, true, client);
++    assertRevision(revision);
++  }
++  return { names, shared: true };
++}
++
++export async function loadSharedApiKeyNames(
++  apiBase: string,
++  apiKeys: string[]
++): Promise<Record<string, string>> {
++  return (await loadApiKeyNameState(apiBase, apiKeys)).names;
++}
++
++export async function saveSharedApiKeyName(
++  apiKey: string,
++  name: string
++): Promise<Record<string, string>> {
++  const revision = apiClient.getConnectionRevision();
++  const client = apiClient.captureConnection();
++  const names = await sharedApiKeyNamesApi.update({
++    [sharedApiKeyFingerprint(apiKey)]: name.trim(),
++  }, false, client);
++  assertRevision(revision);
++  return names;
++}
+diff --git a/src/features/config/components/blocks/ApiKeysCardEditor.tsx b/src/features/config/components/blocks/ApiKeysCardEditor.tsx
+index 09a2f57..c546084 100644
+--- a/src/features/config/components/blocks/ApiKeysCardEditor.tsx
++++ b/src/features/config/components/blocks/ApiKeysCardEditor.tsx
+@@ -1,9 +1,14 @@
+-import { memo, useId, useMemo, useState } from 'react';
++import { memo, useId, useMemo, useState, useEffect } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { Button } from '@/components/ui/Button';
+ import { Modal } from '@/components/ui/Modal';
+ import { useAuthStore, useNotificationStore } from '@/stores';
+-import { apiKeyNameFingerprint, readApiKeyNames, saveApiKeyName } from '../../apiKeyNames';
++import {
++  sharedApiKeyFingerprint,
++  loadApiKeyNameState,
++  saveApiKeyName,
++  saveSharedApiKeyName,
++} from '../../apiKeyNames';
+ import { copyToClipboard } from '@/utils/clipboard';
+ import { makeClientId } from '@/types/visualConfig';
+ import { generateSecureApiKey } from '@/utils/apiKey';
+@@ -29,7 +34,12 @@ function ScopedApiKeysCardEditor({
+   onChange,
+   apiBase,
+ }: ApiKeysCardEditorProps & { apiBase: string }) {
+-  const [names, setNames] = useState(() => readApiKeyNames(apiBase));
++  const [names, setNames] = useState<Record<string, string>>({});
++  const [sharedNames, setSharedNames] = useState(true);
++  const [reloadNames, setReloadNames] = useState(0);
++  const [namesReady, setNamesReady] = useState(false);
++  const [savingName, setSavingName] = useState(false);
++  const [namesError, setNamesError] = useState('');
+   const [nameValue, setNameValue] = useState('');
+   const { t } = useTranslation();
+   const showNotification = useNotificationStore((state) => state.showNotification);
+@@ -42,9 +52,28 @@ function ScopedApiKeysCardEditor({
+     [value]
+   );
+   const nameFingerprints = useMemo(
+-    () => apiKeys.map((key) => apiKeyNameFingerprint(apiBase, key)),
+-    [apiBase, apiKeys]
++    () => apiKeys.map((key) => sharedApiKeyFingerprint(key)),
++    [apiKeys]
+   );
++  useEffect(() => {
++    let active = true;
++    setNamesReady(false);
++    loadApiKeyNameState(apiBase, apiKeys)
++      .then((shared) => {
++        if (active) {
++          setNames(shared.names);
++          setSharedNames(shared.shared);
++          setNamesReady(true);
++          setNamesError('');
++        }
++      })
++      .catch(() => {
++        if (active) setNamesError(t('config_management.visual.api_keys.name_save_error'));
++      });
++    return () => {
++      active = false;
++    };
++  }, [apiBase, apiKeys, t, reloadNames]);
+   const [apiKeyIds, setApiKeyIds] = useState(() => apiKeys.map(() => makeClientId()));
+   const renderApiKeyIds = useMemo(() => {
+     if (apiKeyIds.length === apiKeys.length) return apiKeyIds;
+@@ -75,9 +104,7 @@ function ScopedApiKeysCardEditor({
+ 
+   const openEditModal = (apiKeyId: string) => {
+     const editingIndex = renderApiKeyIds.findIndex((id) => id === apiKeyId);
+-    const latestNames = readApiKeyNames(apiBase);
+-    setNames(latestNames);
+-    setNameValue(latestNames[nameFingerprints[editingIndex]] ?? '');
++    setNameValue(names[nameFingerprints[editingIndex]] ?? '');
+     setEditingApiKeyId(apiKeyId);
+     setInputValue(apiKeys[editingIndex] ?? '');
+     setFormError('');
+@@ -102,7 +129,7 @@ function ScopedApiKeysCardEditor({
+     updateApiKeys(apiKeys.filter((_, i) => i !== index));
+   };
+ 
+-  const handleSave = () => {
++  const handleSave = async () => {
+     const trimmed = inputValue.trim();
+     if (!trimmed) {
+       setFormError(t('config_management.visual.api_keys.error_empty'));
+@@ -120,11 +147,20 @@ function ScopedApiKeysCardEditor({
+       editingApiKeyId === null
+         ? [...apiKeys, trimmed]
+         : apiKeys.map((key, idx) => (idx === editingIndex ? trimmed : key));
+-    if (!saveApiKeyName(apiBase, trimmed, nameValue)) {
++    setSavingName(true);
++    try {
++      if (sharedNames) setNames(await saveSharedApiKeyName(trimmed, nameValue));
++      else {
++        if (!saveApiKeyName(apiBase, trimmed, nameValue))
++          throw new Error('Browser storage unavailable');
++        setNames((prev) => ({ ...prev, [sharedApiKeyFingerprint(trimmed)]: nameValue.trim() }));
++      }
++    } catch {
+       setFormError(t('config_management.visual.api_keys.name_save_error'));
++      setSavingName(false);
+       return;
+     }
+-    setNames(readApiKeyNames(apiBase));
++    setSavingName(false);
+     // Retain old fingerprints: configuration edits can still be discarded or fail to save.
+     if (editingApiKeyId === null) {
+       setApiKeyIds([...renderApiKeyIds, makeClientId()]);
+@@ -155,7 +191,7 @@ function ScopedApiKeysCardEditor({
+           </span>
+           <span className={styles.apiKeysHint}>{t('config_management.visual.api_keys.hint')}</span>
+         </div>
+-        <Button size="sm" onClick={openAddModal} disabled={disabled}>
++        <Button size="sm" onClick={openAddModal} disabled={disabled || savingName || !namesReady}>
+           {t('config_management.visual.api_keys.add')}
+         </Button>
+       </div>
+@@ -169,7 +205,7 @@ function ScopedApiKeysCardEditor({
+               <span className={styles.apiKeyIndex}>#{index + 1}</span>
+               <span className={styles.apiKeyMeta}>
+                 <span className={styles.apiKeyName}>
+-                  {names[nameFingerprints[index]] ??
++                  {names[nameFingerprints[index]] ||
+                     t('config_management.visual.api_keys.input_label')}
+                 </span>
+                 <span className={styles.apiKeyValue}>{maskApiKey(String(key || ''))}</span>
+@@ -179,7 +215,7 @@ function ScopedApiKeysCardEditor({
+                   variant="ghost"
+                   size="sm"
+                   onClick={() => handleCopy(key)}
+-                  disabled={disabled}
++                  disabled={disabled || savingName}
+                 >
+                   {t('common.copy')}
+                 </Button>
+@@ -187,7 +223,7 @@ function ScopedApiKeysCardEditor({
+                   variant="ghost"
+                   size="sm"
+                   onClick={() => openEditModal(renderApiKeyIds[index] ?? '')}
+-                  disabled={disabled}
++                  disabled={disabled || savingName || !namesReady}
+                 >
+                   {t('config_management.visual.common.edit')}
+                 </Button>
+@@ -196,7 +232,7 @@ function ScopedApiKeysCardEditor({
+                   size="sm"
+                   className={styles.apiKeyDelete}
+                   onClick={() => handleDelete(renderApiKeyIds[index] ?? '')}
+-                  disabled={disabled}
++                  disabled={disabled || savingName}
+                 >
+                   {t('config_management.visual.common.delete')}
+                 </Button>
+@@ -206,9 +242,18 @@ function ScopedApiKeysCardEditor({
+         </ol>
+       )}
+ 
++      {namesError && (
++        <div className="error-box" role="alert">
++          {namesError}{' '}
++          <Button size="sm" onClick={() => setReloadNames((count) => count + 1)}>
++            {t('config_management.visual.api_keys.name_retry')}
++          </Button>
++        </div>
++      )}
++
+       <Modal
+         open={modalOpen}
+-        onClose={closeModal}
++        onClose={() => { if (!savingName) closeModal(); }}
+         title={
+           editingApiKeyId !== null
+             ? t('config_management.visual.api_keys.edit_title')
+@@ -216,10 +261,14 @@ function ScopedApiKeysCardEditor({
+         }
+         footer={
+           <>
+-            <Button variant="secondary" onClick={closeModal} disabled={disabled}>
++            <Button
++              variant="secondary"
++              onClick={closeModal}
++              disabled={disabled || savingName || !namesReady}
++            >
+               {t('config_management.visual.common.cancel')}
+             </Button>
+-            <Button onClick={handleSave} disabled={disabled}>
++            <Button onClick={handleSave} disabled={disabled || savingName || !namesReady}>
+               {editingApiKeyId !== null
+                 ? t('config_management.visual.common.update')
+                 : t('config_management.visual.common.add')}
+@@ -232,14 +281,19 @@ function ScopedApiKeysCardEditor({
+           <input
+             id={nameInputId}
+             className="input"
++            maxLength={128}
+             value={nameValue}
+             onChange={(event) => setNameValue(event.target.value)}
+             placeholder={t('config_management.visual.api_keys.name_placeholder')}
+             aria-describedby={nameHintId}
+-            disabled={disabled}
++            disabled={disabled || savingName || !namesReady}
+           />
+           <div id={nameHintId} className="hint">
+-            {t('config_management.visual.api_keys.name_hint')}
++            {t(
++              sharedNames
++                ? 'config_management.visual.api_keys.name_hint'
++                : 'config_management.visual.api_keys.name_local_hint'
++            )}
+           </div>
+         </div>
+         <div className="form-group">
+@@ -253,7 +307,7 @@ function ScopedApiKeysCardEditor({
+               placeholder={t('config_management.visual.api_keys.input_placeholder')}
+               value={inputValue}
+               onChange={(e) => setInputValue(e.target.value)}
+-              disabled={disabled}
++              disabled={disabled || savingName || !namesReady}
+               aria-describedby={formError ? `${apiKeyErrorId} ${apiKeyHintId}` : apiKeyHintId}
+               aria-invalid={Boolean(formError)}
+             />
+@@ -262,7 +316,7 @@ function ScopedApiKeysCardEditor({
+               variant="secondary"
+               size="sm"
+               onClick={handleGenerate}
+-              disabled={disabled}
++              disabled={disabled || savingName || !namesReady}
+             >
+               {t('config_management.visual.api_keys.generate')}
+             </Button>
+diff --git a/src/features/quota/QuotaObservedPercent.module.scss b/src/features/quota/QuotaObservedPercent.module.scss
+new file mode 100644
+index 0000000..beca7f7
+--- /dev/null
++++ b/src/features/quota/QuotaObservedPercent.module.scss
+@@ -0,0 +1,49 @@
++.remaining {
++  display: inline-flex;
++  align-items: baseline;
++  gap: 5px;
++  white-space: nowrap;
++}
++.age {
++  display: inline-flex;
++  align-items: center;
++  gap: 3px;
++  padding: 2px 0;
++  border: 0;
++  background: transparent;
++  color: var(--text-tertiary);
++  font: inherit;
++  font-size: 11px;
++  font-weight: 400;
++  white-space: nowrap;
++  cursor: pointer;
++  svg {
++    flex-shrink: 0;
++    stroke-width: 1.6;
++  }
++  &:focus-visible {
++    outline: 2px solid var(--primary-color);
++    outline-offset: 2px;
++    border-radius: 3px;
++  }
++  &[data-stale] {
++    color: var(--warning-text);
++  }
++}
++.tooltip {
++  position: fixed;
++  z-index: 10000;
++  width: 280px;
++  max-width: calc(100vw - 16px);
++  box-sizing: border-box;
++  padding: 10px;
++  border: 1px solid var(--border-color);
++  border-radius: 8px;
++  background: var(--bg-secondary);
++  color: var(--text-primary);
++  font: 12px/1.5 var(--font-family, sans-serif);
++  white-space: pre-line;
++  overflow-wrap: anywhere;
++  box-shadow: 0 4px 20px #0003;
++  pointer-events: none;
++}
+diff --git a/src/features/quota/QuotaObservedPercent.tsx b/src/features/quota/QuotaObservedPercent.tsx
+new file mode 100644
+index 0000000..07ffb6c
+--- /dev/null
++++ b/src/features/quota/QuotaObservedPercent.tsx
+@@ -0,0 +1,132 @@
++import {
++  useContext,
++  useEffect,
++  useId,
++  useRef,
++  useState,
++  useSyncExternalStore,
++  type ReactNode,
++} from 'react';
++import { createPortal } from 'react-dom';
++import { useTranslation } from 'react-i18next';
++import { IconRefreshCw } from '@/components/ui/icons';
++import { createSharedClock } from '@/utils/time/sharedClock';
++import { type QuotaObservation, observationAge } from './observationFormat';
++import { AuthFileObservation } from './authFileObservation';
++import styles from './QuotaObservedPercent.module.scss';
++
++const secondsClock = createSharedClock({
++  intervalMs: 1000,
++  setTimer: (tick, ms) =>
++    setInterval(() => {
++      if (!document.hidden) tick();
++    }, ms),
++});
++const noSubscribe = () => () => {};
++const frozen = Date.now();
++const serverSnapshot = () => frozen;
++
++/** The native percentage remains unchanged; only an Auth Files host adds an age. */
++export function QuotaObservedPercent({
++  className,
++  children,
++  observation: rowObservation,
++}: {
++  className: string;
++  children: ReactNode;
++  observation?: QuotaObservation;
++}) {
++  const inherited = useContext(AuthFileObservation);
++  const observation = rowObservation?.capturedAt ? rowObservation : inherited;
++  const showAge = inherited?.showAge !== false;
++  const { t } = useTranslation();
++  const validCapture = Number.isFinite(Date.parse(observation?.capturedAt ?? ''));
++  const now = useSyncExternalStore(
++    validCapture && showAge ? secondsClock.subscribe : noSubscribe,
++    secondsClock.getSnapshot,
++    serverSnapshot
++  );
++  const age = observationAge(observation?.capturedAt, now);
++  const [open, setOpen] = useState(false);
++  const [position, setPosition] = useState({ left: 0, top: 0 });
++  const anchor = useRef<HTMLButtonElement>(null);
++  const popup = useRef<HTMLSpanElement>(null);
++  const id = useId();
++  useEffect(() => {
++    if (!open || !anchor.current) return;
++    const button = anchor.current;
++    const place = () => {
++      const bounds = button.getBoundingClientRect();
++      const height = popup.current?.getBoundingClientRect().height ?? 110;
++      setPosition({
++        left: Math.max(8, Math.min(bounds.left, window.innerWidth - 288)),
++        top:
++          bounds.bottom + height + 14 <= window.innerHeight
++            ? bounds.bottom + 6
++            : Math.max(8, bounds.top - height - 6),
++      });
++    };
++    const outside = (event: PointerEvent) => {
++      if (!button.contains(event.target as Node)) setOpen(false);
++    };
++    place();
++    document.addEventListener('pointerdown', outside);
++    window.addEventListener('resize', place);
++    window.addEventListener('scroll', place, true);
++    return () => {
++      document.removeEventListener('pointerdown', outside);
++      window.removeEventListener('resize', place);
++      window.removeEventListener('scroll', place, true);
++    };
++  }, [open]);
++  const content = age
++    ? [
++        `${t('quota_updated.updated')}: ${age.timestamp}`,
++        age.relative,
++        `${t('quota_updated.source')}: ${t(`quota_traffic.${observation?.source === 'websocket_event' ? 'websocket' : ['api_response_headers', 'usage_header'].includes(observation?.source ?? '') ? 'traffic' : observation?.source?.startsWith('scheduled') ? 'scheduled' : 'provider'}`)}`,
++        ...(age.stale ? [t('quota_updated.stale')] : []),
++      ].join('\n')
++    : '';
++  if (!age || !showAge) return <span className={className}>{children}</span>;
++  return (
++    <>
++      <span className={styles.remaining}>
++        <span className={className}>{children}</span>
++        {age && (
++          <button
++            ref={anchor}
++            type="button"
++            className={styles.age}
++            data-quota-updated="true"
++            data-stale={age.stale || undefined}
++            aria-label={`${t('quota_updated.updated')}: ${age.relative}`}
++            aria-expanded={open}
++            aria-describedby={open ? id : undefined}
++            onMouseEnter={() => setOpen(true)}
++            onMouseLeave={() => setOpen(false)}
++            onFocus={() => setOpen(true)}
++            onBlur={() => setOpen(false)}
++            onClick={() => setOpen(true)}
++            onKeyDown={(event) => {
++              if (event.key === 'Escape') {
++                event.stopPropagation();
++                setOpen(false);
++              }
++            }}
++          >
++            <IconRefreshCw size={11} aria-hidden="true" />
++            <span>{age.compact}</span>
++          </button>
++        )}
++      </span>
++      {open &&
++        age &&
++        createPortal(
++          <span ref={popup} id={id} role="tooltip" className={styles.tooltip} style={position}>
++            {content}
++          </span>,
++          document.body
++        )}
++    </>
++  );
++}
+diff --git a/src/features/quota/authFileObservation.ts b/src/features/quota/authFileObservation.ts
+new file mode 100644
+index 0000000..2b0da26
+--- /dev/null
++++ b/src/features/quota/authFileObservation.ts
+@@ -0,0 +1,18 @@
++import { createContext, useContext } from 'react';
++import { buildResetDisplay } from '@/utils/quota';
++import { browserResetDisplay, type QuotaObservation } from './observationFormat';
++
++export const AuthFileObservation = createContext<QuotaObservation | undefined>(undefined);
++
++export function useAuthFileResetDisplay() {
++  return useContext(AuthFileObservation) ? browserResetDisplay : buildResetDisplay;
++}
++
++export function useAuthFileTimeZone(at?: string) {
++  const observation = useContext(AuthFileObservation);
++  if (!observation) return undefined;
++  const instant = at && Number.isFinite(Date.parse(at)) ? new Date(at) : new Date();
++  return new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
++    .formatToParts(instant)
++    .find((part) => part.type === 'timeZoneName')?.value;
++}
+diff --git a/src/features/quota/components/QuotaCard.tsx b/src/features/quota/components/QuotaCard.tsx
+index 64538b5..c111465 100644
+--- a/src/features/quota/components/QuotaCard.tsx
++++ b/src/features/quota/components/QuotaCard.tsx
+@@ -1,3 +1,8 @@
++import { useTrafficQuota } from '@/features/quota/useTrafficQuota';
++import { mergeTrafficQuota } from '@/features/quota/trafficQuota';
++import { normalizeAuthIndex } from '@/utils/authIndex';
++import { AuthFileObservation } from '../authFileObservation';
++import { readAuthFilesUiState } from '@/features/authFiles/uiState';
+ /**
+  * Provider quota card: identity, loading/error state, quota body, and actions.
+  * Claude observations remain visible while refreshing or after a failed read.
+@@ -53,6 +58,13 @@ export function QuotaCard(props: QuotaCardProps) {
+   const { t } = useTranslation();
+   const adapter = QUOTA_ADAPTERS[entry.type];
+   const file = entry.file;
++  const traffic = useTrafficQuota(
++    normalizeAuthIndex(file.auth_index ?? file.authIndex) ?? '',
++    entry.type,
++    file.disabled
++  );
++  const displayQuota = mergeTrafficQuota(entry.type, quota, traffic, t);
++  const hasDisplay = displayQuota?.status === 'success';
+   const retainedClaudeUsage =
+     entry.type === 'claude' && hasClaudeUsageData(quota as ClaudeQuotaState | undefined);
+   const displayName = getQuotaDisplayName(file);
+@@ -137,7 +149,19 @@ export function QuotaCard(props: QuotaCardProps) {
+       </header>
+ 
+       <div className={styles.body}>
+-        {status === 'idle' ? (
++        {hasDisplay && displayQuota ? (
++          <AuthFileObservation.Provider value={{ ...displayQuota, showAge: readAuthFilesUiState()?.showQuotaAge ?? true }}>
++            <adapter.Body quota={displayQuota} classes={quotaClasses} planItems={claudePlanItems} afterPlan={claudeAfterPlan} />
++            {status !== 'success' && (
++              <div className={quotaClasses.quotaMessage}>{t('quota_traffic.account_missing')}</div>
++            )}
++            {status === 'error' && (
++              <div className={styles.errorStrip} role="alert">
++                {errorMessage}
++              </div>
++            )}
++          </AuthFileObservation.Provider>
++        ) : status === 'idle' ? (
+           <button
+             type="button"
+             className={styles.idleBody}
+@@ -176,7 +200,7 @@ export function QuotaCard(props: QuotaCardProps) {
+             {t(`${adapter.i18nPrefix}.loading`)}
+           </div>
+         )}
+-        {retainedClaudeUsage && quota && (
++        {!hasDisplay && retainedClaudeUsage && quota && (
+           <adapter.Body
+             quota={quota}
+             classes={quotaClasses}
+@@ -186,7 +210,7 @@ export function QuotaCard(props: QuotaCardProps) {
+         )}
+       </div>
+ 
+-      {status !== 'idle' && (
++      {(status !== 'idle' || hasDisplay) && (
+         <footer className={styles.actionRow}>
+           {entry.type === 'claude' && (
+             <button
+diff --git a/src/features/quota/components/QuotaResetLabel.tsx b/src/features/quota/components/QuotaResetLabel.tsx
+index dc24cd0..b77c9ed 100644
+--- a/src/features/quota/components/QuotaResetLabel.tsx
++++ b/src/features/quota/components/QuotaResetLabel.tsx
+@@ -8,16 +8,25 @@
+ 
+ import type { ResetDisplay } from '@/utils/quota';
+ import type { QuotaClassMap } from '../types';
++import { useContext } from 'react';
++import { AuthFileObservation } from '../authFileObservation';
+ 
+ export interface QuotaResetLabelProps {
+   display: ResetDisplay;
+   classes: QuotaClassMap;
+   /** True on the row that recovers first for this credential. */
+   soon?: boolean;
++  group?: boolean;
+ }
+ 
+-export function QuotaResetLabel({ display, classes, soon = false }: QuotaResetLabelProps) {
+-  return (
++export function QuotaResetLabel({
++  display,
++  classes,
++  soon = false,
++  group = false,
++}: QuotaResetLabelProps) {
++  const observation = useContext(AuthFileObservation);
++  const label = (
+     <>
+       <span className={classes.quotaReset}>{display.absolute}</span>
+       {display.relative && (
+@@ -33,4 +42,5 @@ export function QuotaResetLabel({ display, classes, soon = false }: QuotaResetLa
+       )}
+     </>
+   );
++  return observation && group ? <span data-quota-reset>{label}</span> : label;
+ }
+diff --git a/src/features/quota/hooks/useQuotaActions.ts b/src/features/quota/hooks/useQuotaActions.ts
+index 3a63319..70063c3 100644
+--- a/src/features/quota/hooks/useQuotaActions.ts
++++ b/src/features/quota/hooks/useQuotaActions.ts
+@@ -1,3 +1,4 @@
++import { withQuotaObservation } from '../observationFormat';
+ /**
+  * 单卡额度操作：刷新 + Codex 重置积分。
+  * 流程 1:1 移植旧 QuotaSection（confirm modal、resetting 再入守卫、
+@@ -43,7 +44,10 @@ export function useQuotaActions(disableControls: boolean) {
+       try {
+         const data = await adapter.fetchQuota(file, t);
+         commitIfQuotaCacheCurrent(cacheGeneration, () => {
+-          const successState = adapter.buildSuccessState(data);
++          const successState = withQuotaObservation(
++            adapter.buildSuccessState(data),
++            new Date().toISOString()
++          );
+           setQuota((prev) => ({
+             ...prev,
+             [cacheKey]: successState,
+@@ -92,7 +96,10 @@ export function useQuotaActions(disableControls: boolean) {
+             commitIfQuotaCacheCurrent(cacheGeneration, () => {
+               setQuota((prev) => ({
+                 ...prev,
+-                [cacheKey]: adapter.buildSuccessState(data),
++                [cacheKey]: withQuotaObservation(
++                  adapter.buildSuccessState(data),
++                  new Date().toISOString()
++                ),
+               }));
+               showNotification(t('codex_quota.reset_success', { name: file.name }), 'success');
+             });
+diff --git a/src/features/quota/hooks/useQuotaBatchLoader.ts b/src/features/quota/hooks/useQuotaBatchLoader.ts
+index f9538b1..9cb90ef 100644
+--- a/src/features/quota/hooks/useQuotaBatchLoader.ts
++++ b/src/features/quota/hooks/useQuotaBatchLoader.ts
+@@ -1,3 +1,4 @@
++import { withQuotaObservation } from '../observationFormat';
+ /**
+  * 混合提供商批量额度加载（原 useQuotaLoader 的跨分区泛化）。
+  *
+@@ -23,6 +24,7 @@ interface BatchFetchResult {
+   cacheKey: string;
+   status: 'success' | 'error';
+   data?: unknown;
++  capturedAt?: string;
+   error?: string;
+   errorStatus?: number;
+ }
+@@ -70,7 +72,13 @@ export function useQuotaBatchLoader() {
+                 const cacheKey = getQuotaCacheKey(file);
+                 try {
+                   const data = await adapter.fetchQuota(file, t);
+-                  return { name: file.name, cacheKey, status: 'success', data };
++                  return {
++                    name: file.name,
++                    cacheKey,
++                    status: 'success',
++                    data,
++                    capturedAt: new Date().toISOString(),
++                  };
+                 } catch (err: unknown) {
+                   const message = err instanceof Error ? err.message : t('common.unknown_error');
+                   return {
+@@ -95,7 +103,10 @@ export function useQuotaBatchLoader() {
+                   () => {
+                     nextState[result.cacheKey] =
+                       result.status === 'success'
+-                        ? adapter.buildSuccessState(result.data)
++                        ? withQuotaObservation(
++                            adapter.buildSuccessState(result.data),
++                            result.capturedAt!
++                          )
+                         : adapter.buildErrorState(
+                             result.error || t('common.unknown_error'),
+                             result.errorStatus
+diff --git a/src/features/quota/observationFormat.ts b/src/features/quota/observationFormat.ts
+new file mode 100644
+index 0000000..886cdae
+--- /dev/null
++++ b/src/features/quota/observationFormat.ts
+@@ -0,0 +1,54 @@
++import { buildResetDisplay, formatRelativeInstant, type ResetDisplay } from '@/utils/quota';
++
++export interface QuotaObservation {
++  capturedAt?: string;
++  source?: string;
++  showAge?: boolean;
++}
++
++/** Record a provider response once; reading or enriching the cache never renews it. */
++export function withQuotaObservation<T extends QuotaObservation>(state: T, capturedAt: string): T {
++  return { ...state, capturedAt: state.capturedAt ?? capturedAt, source: 'provider_query' };
++}
++
++export function observationAge(capturedAt: string | undefined, now: number) {
++  const captured = capturedAt ? Date.parse(capturedAt) : NaN;
++  if (!Number.isFinite(captured)) return null;
++  const seconds = Math.max(0, Math.floor((now - captured) / 1000));
++  const unit =
++    seconds < 60 ? 'second' : seconds < 3600 ? 'minute' : seconds < 86400 ? 'hour' : 'day';
++  const value = Math.floor(seconds / { second: 1, minute: 60, hour: 3600, day: 86400 }[unit]);
++  return {
++    captured,
++    compact: new Intl.NumberFormat(undefined, {
++      style: 'unit',
++      unit,
++      unitDisplay: 'narrow',
++      maximumFractionDigits: 0,
++    }).format(value),
++    relative: new Intl.RelativeTimeFormat(undefined, { numeric: 'always' }).format(-value, unit),
++    timestamp: new Intl.DateTimeFormat(undefined, {
++      dateStyle: 'medium',
++      timeStyle: 'long',
++    }).format(captured),
++    stale: seconds > 900,
++  };
++}
++
++/** Auth Files respects browser regional preferences, including 12/24-hour time. */
++export function browserResetDisplay(
++  ...[absolute, atMs, now]: Parameters<typeof buildResetDisplay>
++): ResetDisplay | null {
++  if (typeof atMs !== 'number' || !Number.isFinite(atMs)) {
++    return buildResetDisplay(absolute, atMs, now);
++  }
++  return {
++    absolute: new Intl.DateTimeFormat(undefined, {
++      month: '2-digit',
++      day: '2-digit',
++      hour: '2-digit',
++      minute: '2-digit',
++    }).format(atMs),
++    relative: formatRelativeInstant(atMs, now),
++  };
++}
+diff --git a/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx b/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx
+index 34e3a9f..2568ad2 100644
+--- a/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx
++++ b/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { QuotaObservedPercent } from '../../QuotaObservedPercent';
+ /**
+  * Antigravity 额度渲染体：套餐 chip 行（档位见 cardTier.ts）+ 分组水位条。
+  */
+@@ -202,7 +203,9 @@ export function AntigravityQuotaBody({ quota, classes }: QuotaBodyProps<Antigrav
+                         {bucketLabel}
+                       </span>
+                       <div className={classes.quotaMeta}>
+-                        <span className={classes.quotaPercent}>{percentLabel}</span>
++                        <QuotaObservedPercent className={classes.quotaPercent}>
++                          {percentLabel}
++                        </QuotaObservedPercent>
+                         <span
+                           className={
+                             soon
+diff --git a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
+index 5d16c83..9124354 100644
+--- a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
++++ b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
+@@ -1,3 +1,5 @@
++import { QuotaObservedPercent } from '../../QuotaObservedPercent';
++import { useAuthFileResetDisplay } from '../../authFileObservation';
+ /**
+  * Claude plan windows, extra usage, and separate read-only dollar balances.
+  */
+@@ -5,7 +7,7 @@
+ import { useMemo } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import type { ClaudeQuotaState } from '@/types';
+-import { buildResetDisplay, formatQuotaResetTime, resolveResetMs } from '@/utils/quota';
++import { formatQuotaResetTime, resolveResetMs } from '@/utils/quota';
+ import { useNow } from '@/hooks/useNow';
+ import { planValueClassForTier, resolveClaudeCardTier } from '../../cardTier';
+ import { QuotaMeter } from '../../components/QuotaMeter';
+@@ -20,6 +22,7 @@ export function ClaudeQuotaBody({
+   afterPlan,
+ }: QuotaBodyProps<ClaudeQuotaState>) {
+   const { t, i18n } = useTranslation();
++  const buildResetDisplay = useAuthFileResetDisplay();
+   const now = useNow();
+   const soonestRowId = useMemo(
+     () => pickUrgentRowId(collectQuotaRowInstants('claude', quota), now),
+@@ -186,9 +189,11 @@ export function ClaudeQuotaBody({
+               <div className={classes.quotaRowHeader}>
+                 <span className={classes.quotaModel}>{windowLabel}</span>
+                 <div className={classes.quotaMeta}>
+-                  <span className={classes.quotaPercent}>{percentLabel}</span>
++                  <QuotaObservedPercent className={classes.quotaPercent} observation={window}>
++                    {percentLabel}
++                  </QuotaObservedPercent>
+                   {resetDisplay && (
+-                    <QuotaResetLabel display={resetDisplay} classes={classes} soon={soon} />
++                    <QuotaResetLabel group display={resetDisplay} classes={classes} soon={soon} />
+                   )}
+                 </div>
+               </div>
+diff --git a/src/features/quota/providers/codex/CodexQuotaBody.tsx b/src/features/quota/providers/codex/CodexQuotaBody.tsx
+index 486dc09..f7b04a6 100644
+--- a/src/features/quota/providers/codex/CodexQuotaBody.tsx
++++ b/src/features/quota/providers/codex/CodexQuotaBody.tsx
+@@ -1,3 +1,5 @@
++import { QuotaObservedPercent } from '../../QuotaObservedPercent';
++import { useAuthFileResetDisplay, useAuthFileTimeZone } from '../../authFileObservation';
+ /**
+  * Codex 额度渲染体：套餐 chip 行（档位见 cardTier.ts）、重置积分明细、用量窗口水位条。
+  */
+@@ -11,7 +13,6 @@ import {
+   PRO_CODEX_PLAN_TYPE,
+   PRO_LITE_CODEX_PLAN_TYPES,
+   PRO_MAX_CODEX_PLAN_TYPES,
+-  buildResetDisplay,
+   formatInstantShort,
+   parseIsoToMs,
+   resolveResetMs,
+@@ -27,6 +28,8 @@ import type { QuotaBodyProps } from '../../types';
+ 
+ export function CodexQuotaBody({ quota, classes }: QuotaBodyProps<CodexQuotaState>) {
+   const { t, i18n } = useTranslation();
++  const buildResetDisplay = useAuthFileResetDisplay();
++  const browserTimeZone = useAuthFileTimeZone(quota.rateLimitResetCredits?.[0]?.expiresAt);
+   const now = useNow();
+   const locale = i18n.resolvedLanguage;
+   // Windows and reset credits compete for the same emphasis, but only during
+@@ -121,7 +124,9 @@ export function CodexQuotaBody({ quota, classes }: QuotaBodyProps<CodexQuotaStat
+       {rateLimitResetCredits.length > 0 ? (
+         <div className={classes.codexResetCredits}>
+           <div className={classes.codexResetCreditsTitle}>
+-            {t('codex_quota.reset_credits_expiry_label', { timezone: resolveTimeZoneLabel() })}
++            {t('codex_quota.reset_credits_expiry_label', {
++              timezone: browserTimeZone ?? resolveTimeZoneLabel(),
++            })}
+           </div>
+           {rateLimitResetCredits.map((credit, index) => {
+             const expiresAtMs = parseIsoToMs(credit.expiresAt);
+@@ -189,9 +194,11 @@ export function CodexQuotaBody({ quota, classes }: QuotaBodyProps<CodexQuotaStat
+               <div className={classes.quotaRowHeader}>
+                 <span className={classes.quotaModel}>{windowLabel}</span>
+                 <div className={classes.quotaMeta}>
+-                  <span className={classes.quotaPercent}>{percentLabel}</span>
++                  <QuotaObservedPercent className={classes.quotaPercent} observation={window}>
++                    {percentLabel}
++                  </QuotaObservedPercent>
+                   {resetDisplay && (
+-                    <QuotaResetLabel display={resetDisplay} classes={classes} soon={soon} />
++                    <QuotaResetLabel group display={resetDisplay} classes={classes} soon={soon} />
+                   )}
+                 </div>
+               </div>
+diff --git a/src/features/quota/providers/codex/data.ts b/src/features/quota/providers/codex/data.ts
+index b237dff..f96a846 100644
+--- a/src/features/quota/providers/codex/data.ts
++++ b/src/features/quota/providers/codex/data.ts
+@@ -52,6 +52,7 @@ type CodexResetCreditsData = {
+ };
+ 
+ export type CodexQuotaData = {
++  capturedAt?: string;
+   planType: string | null;
+   subscriptionActiveUntil: string | number | null;
+   creditBalance: string | null;
+@@ -65,7 +66,8 @@ export type CodexQuotaData = {
+ 
+ export const buildCodexQuotaWindows = (
+   payload: CodexUsagePayload,
+-  t: TFunction
++  t: TFunction,
++  observedAtMs = Date.now()
+ ): CodexQuotaWindow[] => {
+   const FIVE_HOUR_SECONDS = 18000;
+   const WEEK_SECONDS = 604800;
+@@ -105,14 +107,14 @@ export const buildCodexQuotaWindows = (
+     allowed?: boolean
+   ) => {
+     if (!window) return;
+-    const resetLabel = formatCodexResetLabel(window);
++    const resetLabel = formatCodexResetLabel(window, observedAtMs);
+     const usedPercentRaw = normalizeNumberValue(window.used_percent ?? window.usedPercent);
+     const isLimitReached = Boolean(limitReached) || allowed === false;
+     const usedPercent = usedPercentRaw ?? (isLimitReached && resetLabel !== '-' ? 100 : null);
+     // Keep the raw instant beside the label — see utils/quota/resetInstants.
+     const resetAtMs =
+       resolveResetMs([window.reset_at, window.resetAt]) ??
+-      parseOffsetSecondsToMs(window.reset_after_seconds ?? window.resetAfterSeconds, Date.now());
++      parseOffsetSecondsToMs(window.reset_after_seconds ?? window.resetAfterSeconds, observedAtMs);
+     const periodHours = periodHoursFromSeconds(
+       window.limit_window_seconds ?? window.limitWindowSeconds
+     );
+@@ -427,13 +429,19 @@ const fetchCodexQuota = async (file: AuthFileItem, t: TFunction): Promise<CodexQ
+   const accountId = resolveCodexChatgptAccountId(file);
+   const requestHeader = buildCodexRequestHeader(file);
+ 
++  let capturedAt: string | undefined;
+   const [result, liveSubscriptionActiveUntil] = await Promise.all([
+-    apiCallApi.request({
+-      authIndex,
+-      method: 'GET',
+-      url: CODEX_USAGE_URL,
+-      header: requestHeader,
+-    }),
++    apiCallApi
++      .request({
++        authIndex,
++        method: 'GET',
++        url: CODEX_USAGE_URL,
++        header: requestHeader,
++      })
++      .then((result) => {
++        capturedAt = new Date().toISOString();
++        return result;
++      }),
+     fetchCodexSubscriptionActiveUntil(authIndex, accountId, requestHeader),
+   ]);
+ 
+@@ -463,8 +471,9 @@ const fetchCodexQuota = async (file: AuthFileItem, t: TFunction): Promise<CodexQ
+     rateLimitResetCreditsAvailableCount;
+   const planType = planTypeFromUsage ?? planTypeFromFile;
+   const subscriptionActiveUntil = liveSubscriptionActiveUntil ?? subscriptionActiveUntilFromFile;
+-  const windows = buildCodexQuotaWindows(payload, t);
++  const windows = buildCodexQuotaWindows(payload, t, Date.parse(capturedAt!));
+   return {
++    capturedAt,
+     planType,
+     subscriptionActiveUntil,
+     creditBalance: accountCredits.balance,
+@@ -556,6 +565,7 @@ export const CODEX_CONFIG: QuotaProviderData<CodexQuotaState, CodexQuotaData> =
+   }),
+   buildSuccessState: (data) => ({
+     status: 'success',
++    capturedAt: data.capturedAt,
+     windows: data.windows,
+     planType: data.planType,
+     subscriptionActiveUntil: data.subscriptionActiveUntil,
+diff --git a/src/features/quota/providers/devin/DevinQuotaBody.tsx b/src/features/quota/providers/devin/DevinQuotaBody.tsx
+index d2329b2..aad501c 100644
+--- a/src/features/quota/providers/devin/DevinQuotaBody.tsx
++++ b/src/features/quota/providers/devin/DevinQuotaBody.tsx
+@@ -1,7 +1,8 @@
++import { QuotaObservedPercent } from '../../QuotaObservedPercent';
++import { useAuthFileResetDisplay } from '../../authFileObservation';
+ import { useTranslation } from 'react-i18next';
+ import type { DevinQuotaState } from '@/types';
+ import { useNow } from '@/hooks/useNow';
+-import { buildResetDisplay } from '@/utils/quota';
+ import { QuotaMeter } from '../../components/QuotaMeter';
+ import { QuotaResetLabel } from '../../components/QuotaResetLabel';
+ import { collectQuotaRowInstants, pickUrgentRowId } from '../../resetSchedule';
+@@ -9,6 +10,7 @@ import type { QuotaBodyProps } from '../../types';
+ 
+ export function DevinQuotaBody({ quota, classes }: QuotaBodyProps<DevinQuotaState>) {
+   const { t, i18n } = useTranslation();
++  const buildResetDisplay = useAuthFileResetDisplay();
+   const now = useNow();
+   const locale = i18n.resolvedLanguage;
+   const urgentRow = pickUrgentRowId(collectQuotaRowInstants('devin', quota), now);
+@@ -41,13 +43,13 @@ export function DevinQuotaBody({ quota, classes }: QuotaBodyProps<DevinQuotaStat
+             <div className={classes.quotaRowHeader}>
+               <span className={classes.quotaModel}>{label}</span>
+               <div className={classes.quotaMeta}>
+-                <span className={classes.quotaPercent}>
++                <QuotaObservedPercent className={classes.quotaPercent}>
+                   {window.remainingPercent === null
+                     ? t('devin_quota.unavailable')
+                     : `${window.remainingPercent}%`}
+-                </span>
++                </QuotaObservedPercent>
+                 {reset ? (
+-                  <QuotaResetLabel display={reset} classes={classes} soon={soon} />
++                  <QuotaResetLabel group display={reset} classes={classes} soon={soon} />
+                 ) : (
+                   <span className={classes.quotaReset}>{t('devin_quota.reset_unknown')}</span>
+                 )}
+diff --git a/src/features/quota/providers/index.ts b/src/features/quota/providers/index.ts
+index 4b4b3a6..e81f812 100644
+--- a/src/features/quota/providers/index.ts
++++ b/src/features/quota/providers/index.ts
+@@ -30,6 +30,8 @@ import { XaiQuotaBody } from './xai/XaiQuotaBody';
+ 
+ /** 所有 provider 额度状态的公共骨架（各 *QuotaState 的结构子集）。 */
+ export interface QuotaCardState {
++  capturedAt?: string;
++  source?: string;
+   status: 'idle' | 'loading' | 'success' | 'error';
+   error?: string;
+   errorStatus?: number;
+diff --git a/src/features/quota/providers/kimi/KimiQuotaBody.tsx b/src/features/quota/providers/kimi/KimiQuotaBody.tsx
+index defa322..cfe9ec0 100644
+--- a/src/features/quota/providers/kimi/KimiQuotaBody.tsx
++++ b/src/features/quota/providers/kimi/KimiQuotaBody.tsx
+@@ -1,3 +1,5 @@
++import { QuotaObservedPercent } from '../../QuotaObservedPercent';
++import { useAuthFileResetDisplay } from '../../authFileObservation';
+ /**
+  * Kimi 额度渲染体：用量行水位条。
+  */
+@@ -5,7 +7,7 @@
+ import { useMemo } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import type { KimiQuotaState } from '@/types';
+-import { buildResetDisplay, formatKimiResetHint } from '@/utils/quota';
++import { formatKimiResetHint } from '@/utils/quota';
+ import { useNow } from '@/hooks/useNow';
+ import { QuotaMeter } from '../../components/QuotaMeter';
+ import { QuotaResetLabel } from '../../components/QuotaResetLabel';
+@@ -15,6 +17,8 @@ import type { QuotaBodyProps } from '../../types';
+ 
+ export function KimiQuotaBody({ quota, classes }: QuotaBodyProps<KimiQuotaState>) {
+   const { t, i18n } = useTranslation();
++  const buildResetDisplay = useAuthFileResetDisplay();
++  // Ahead of the early return below — hooks cannot be conditional.
+   const now = useNow();
+   const soonestRowId = useMemo(
+     () => pickUrgentRowId(collectQuotaRowInstants('kimi', quota), now),
+@@ -65,9 +69,11 @@ export function KimiQuotaBody({ quota, classes }: QuotaBodyProps<KimiQuotaState>
+             <div className={classes.quotaRowHeader}>
+               <span className={classes.quotaModel}>{rowLabel}</span>
+               <div className={classes.quotaMeta}>
+-                <span className={classes.quotaPercent}>{percentLabel}</span>
++                <QuotaObservedPercent className={classes.quotaPercent}>
++                  {percentLabel}
++                </QuotaObservedPercent>
+                 {resetDisplay && (
+-                  <QuotaResetLabel display={resetDisplay} classes={classes} soon={soon} />
++                  <QuotaResetLabel group display={resetDisplay} classes={classes} soon={soon} />
+                 )}
+               </div>
+             </div>
+diff --git a/src/features/quota/providers/meta/MetaQuotaBody.tsx b/src/features/quota/providers/meta/MetaQuotaBody.tsx
+index 6f2dabd..9b89635 100644
+--- a/src/features/quota/providers/meta/MetaQuotaBody.tsx
++++ b/src/features/quota/providers/meta/MetaQuotaBody.tsx
+@@ -1,8 +1,9 @@
++import { QuotaObservedPercent } from '../../QuotaObservedPercent';
++import { useAuthFileResetDisplay } from '../../authFileObservation';
+ import { useMemo } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import type { MetaQuotaState } from '@/types';
+ import { useNow } from '@/hooks/useNow';
+-import { buildResetDisplay } from '@/utils/quota';
+ import { QuotaMeter } from '../../components/QuotaMeter';
+ import { QuotaResetLabel } from '../../components/QuotaResetLabel';
+ import { collectQuotaRowInstants, pickUrgentRowId } from '../../resetSchedule';
+@@ -10,6 +11,7 @@ import type { QuotaBodyProps } from '../../types';
+ 
+ export function MetaQuotaBody({ quota, classes }: QuotaBodyProps<MetaQuotaState>) {
+   const { t, i18n } = useTranslation();
++  const buildResetDisplay = useAuthFileResetDisplay();
+   const now = useNow();
+   const soonestRowId = useMemo(
+     () => pickUrgentRowId(collectQuotaRowInstants('meta', quota), now),
+@@ -51,13 +53,13 @@ export function MetaQuotaBody({ quota, classes }: QuotaBodyProps<MetaQuotaState>
+             <div className={classes.quotaRowHeader}>
+               <span className={classes.quotaModel}>{label}</span>
+               <div className={classes.quotaMeta}>
+-                <span className={classes.quotaPercent}>
++                <QuotaObservedPercent className={classes.quotaPercent}>
+                   {remaining === null
+                     ? t('meta_quota.unknown')
+                     : t('meta_quota.remaining', { percent: Number(remaining.toFixed(1)) })}
+-                </span>
++                </QuotaObservedPercent>
+                 {resetDisplay && (
+-                  <QuotaResetLabel display={resetDisplay} classes={classes} soon={soon} />
++                  <QuotaResetLabel group display={resetDisplay} classes={classes} soon={soon} />
+                 )}
+               </div>
+             </div>
+diff --git a/src/features/quota/providers/xai/XaiQuotaBody.tsx b/src/features/quota/providers/xai/XaiQuotaBody.tsx
+index 3eb8753..ead33c6 100644
+--- a/src/features/quota/providers/xai/XaiQuotaBody.tsx
++++ b/src/features/quota/providers/xai/XaiQuotaBody.tsx
+@@ -1,3 +1,5 @@
++import { QuotaObservedPercent } from '../../QuotaObservedPercent';
++import { useAuthFileResetDisplay } from '../../authFileObservation';
+ /**
+  * xAI 额度渲染体：套餐 chip 行（档位见 cardTier.ts）、
+  * 周/月账单水位条、按量付费余额。
+@@ -6,7 +8,7 @@
+ import { useMemo } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import type { XaiBillingSummary, XaiQuotaState } from '@/types';
+-import { buildResetDisplay, formatQuotaResetTime, parseIsoToMs } from '@/utils/quota';
++import { formatQuotaResetTime, parseIsoToMs } from '@/utils/quota';
+ import { useNow } from '@/hooks/useNow';
+ import {
+   XAI_SUPERGROK_HEAVY_LIMIT_CENTS,
+@@ -62,6 +64,7 @@ const resolveXaiPlanLabelKey = (monthlyLimitCents: number | null): string | null
+ 
+ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>) {
+   const { t, i18n } = useTranslation();
++  const buildResetDisplay = useAuthFileResetDisplay();
+   // Ahead of the early return below — hooks cannot be conditional.
+   const now = useNow();
+   const locale = i18n.resolvedLanguage;
+@@ -191,13 +194,18 @@ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>)
+           <div className={classes.quotaRowHeader}>
+             <span className={classes.quotaModel}>{t('xai_quota.weekly_limit')}</span>
+             <div className={classes.quotaMeta}>
+-              <span className={classes.quotaPercent}>
++              <QuotaObservedPercent className={classes.quotaPercent}>
+                 {weeklyRemaining === null
+                   ? t('xai_quota.usage_unavailable')
+                   : formatXaiPercent(weeklyRemaining)}
+-              </span>
++              </QuotaObservedPercent>
+               {weeklyResetDisplay && (
+-                <QuotaResetLabel display={weeklyResetDisplay} classes={classes} soon={weeklySoon} />
++                <QuotaResetLabel
++                  group
++                  display={weeklyResetDisplay}
++                  classes={classes}
++                  soon={weeklySoon}
++                />
+               )}
+             </div>
+           </div>
+@@ -225,7 +233,9 @@ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>)
+           <div className={classes.quotaRowHeader}>
+             <span className={classes.quotaModel}>{t('xai_quota.pay_as_you_go_label')}</span>
+             <div className={classes.quotaMeta}>
+-              <span className={classes.quotaPercent}>{onDemandPercentLabel}</span>
++              <QuotaObservedPercent className={classes.quotaPercent}>
++                {onDemandPercentLabel}
++              </QuotaObservedPercent>
+               <span className={classes.quotaAmount}>{onDemandAmountLabel}</span>
+             </div>
+           </div>
+@@ -237,10 +247,12 @@ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>)
+           <div className={classes.quotaRowHeader}>
+             <span className={classes.quotaModel}>{t('xai_quota.monthly_credits')}</span>
+             <div className={classes.quotaMeta}>
+-              <span className={classes.quotaPercent}>{percentLabel}</span>
++              <QuotaObservedPercent className={classes.quotaPercent}>
++                {percentLabel}
++              </QuotaObservedPercent>
+               <span className={classes.quotaAmount}>{amountLabel}</span>
+               {monthlyResetDisplay && (
+-                <QuotaResetLabel display={monthlyResetDisplay} classes={classes} />
++                <QuotaResetLabel group display={monthlyResetDisplay} classes={classes} />
+               )}
+             </div>
+           </div>
+diff --git a/src/features/quota/quotaEnrichment.ts b/src/features/quota/quotaEnrichment.ts
+index 79d9a6b..63bed7c 100644
+--- a/src/features/quota/quotaEnrichment.ts
++++ b/src/features/quota/quotaEnrichment.ts
+@@ -29,7 +29,14 @@ export async function enrichQuotaInBackground(
+       const setQuota = useQuotaStore.getState()[adapter.storeSetter] as QuotaMapUpdater;
+       setQuota((prev) => {
+         if (prev[cacheKey] !== expectedState) return prev;
+-        return { ...prev, [cacheKey]: adapter.buildSuccessState(enriched) };
++        return {
++          ...prev,
++          [cacheKey]: {
++            ...adapter.buildSuccessState(enriched),
++            capturedAt: expectedState.capturedAt,
++            source: expectedState.source,
++          },
++        };
+       });
+     });
+   } catch {
+diff --git a/src/features/quota/trafficQuota.ts b/src/features/quota/trafficQuota.ts
+new file mode 100644
+index 0000000..f25336f
+--- /dev/null
++++ b/src/features/quota/trafficQuota.ts
+@@ -0,0 +1,165 @@
++import type { TFunction } from 'i18next';
++import { hasClaudeUsageData } from './providers/claude/data';
++import type {
++  CodexQuotaWindow,
++  ClaudeQuotaWindow,
++  CodexQuotaState,
++  ClaudeQuotaState,
++} from '@/types';
++import type { QuotaCardState } from './providers';
++import type { QuotaObservation } from './observationFormat';
++
++export interface TrafficQuota {
++  auth_index: string;
++  provider: string;
++  window: string;
++  headers: Record<string, string[]>;
++  observed_at: string;
++  source: string;
++}
++export type ObservedWindow = CodexQuotaWindow & QuotaObservation;
++const normalizeName = (name: string) =>
++  name
++    .trim()
++    .toLowerCase()
++    .replace(/[^a-z0-9]+/g, '-')
++    .replace(/^-+|-+$/g, '');
++const instant = (value: string | undefined): number | null => {
++  if (!value?.trim()) return null;
++  const numeric = Number(value);
++  const ms = Number.isFinite(numeric) ? numeric * 1000 : Date.parse(value);
++  return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? ms : null;
++};
++
++/** Traffic supplies window measurements only. Never manufacture account metadata. */
++export function trafficQuotaWindow(item: TrafficQuota, t: TFunction): ObservedWindow | null {
++  const captured = Date.parse(item.observed_at);
++  if (!Number.isFinite(captured)) return null;
++  const entries = Object.entries(item.headers);
++  const value = (suffix: string) =>
++    entries.find(([key]) => key.toLowerCase().endsWith(suffix))?.[1]?.[0];
++  const number = (suffix: string) => {
++    const raw = value(suffix);
++    return raw?.trim() && Number.isFinite(Number(raw)) ? Number(raw) : null;
++  };
++  const raw = number(item.provider === 'claude' ? '-utilization' : '-used-percent');
++  const usedPercent = raw === null ? null : raw * (item.provider === 'claude' ? 100 : 1);
++  if (usedPercent === null || usedPercent < 0 || usedPercent > 100) return null;
++  const after = number('-reset-after-seconds');
++  const resetAtMs =
++    instant(value('-reset-at') ?? value('-reset')) ??
++    (after !== null && after >= 0 && Math.abs(captured + after * 1000) <= 8.64e15
++      ? captured + after * 1000
++      : null);
++  let id: string;
++  let labelKey: string;
++  let labelParams: Record<string, string | number> | undefined;
++  let hours: number;
++  if (item.provider === 'codex') {
++    const minutes = number('-window-minutes');
++    // Order is not a duration: primary may be weekly. Missing durations cannot
++    // safely identify a native row, so do not invent a secondary/5-hour limit.
++    if (minutes === null || minutes <= 0) return null;
++    hours = minutes / 60;
++    const period =
++      hours === 5
++        ? 'five-hour'
++        : hours === 168
++          ? 'weekly'
++          : hours >= 672 && hours <= 744
++            ? 'monthly'
++            : `minutes-${minutes}`;
++    const name = value('-limit-name');
++    const review = item.window.startsWith('x-codex-code-review-');
++    const prefix = review ? 'code-review-' : name ? `${normalizeName(name)}-` : '';
++    id = prefix + period;
++    labelKey =
++      hours === 5
++        ? 'codex_quota.primary_window'
++        : hours === 168
++          ? 'codex_quota.secondary_window'
++          : period === 'monthly'
++            ? 'codex_quota.team_secondary_window'
++            : 'quota_traffic.custom_window';
++    if (review && !period.startsWith('minutes-'))
++      labelKey = `codex_quota.code_review_${hours === 5 ? 'primary_window' : period === 'monthly' ? 'team_secondary_window' : 'secondary_window'}`;
++    if (name && !review && !period.startsWith('minutes-')) {
++      labelKey = `codex_quota.additional_${hours === 5 ? 'primary_window' : period === 'monthly' ? 'team_secondary_window' : 'secondary_window'}`;
++      labelParams = { name };
++    } else if (period.startsWith('minutes-'))
++      labelParams = { minutes, name: name ? `${name} · ` : '' };
++  } else if (item.provider === 'claude') {
++    const names: Record<string, [string, string, number]> = {
++      'claude-5h': ['five-hour', 'five_hour', 5],
++      'claude-7d': ['seven-day', 'seven_day', 168],
++      'claude-7d-opus': ['seven-day-opus', 'seven_day_opus', 168],
++      'claude-7d-sonnet': ['seven-day-sonnet', 'seven_day_sonnet', 168],
++    };
++    const meta = names[item.window];
++    if (!meta) return null;
++    [id, labelKey, hours] = meta;
++    labelKey = `claude_quota.${labelKey}`;
++  } else return null;
++  return {
++    id,
++    label: t(labelKey, labelParams),
++    labelKey,
++    labelParams,
++    usedPercent,
++    resetAtMs,
++    resetLabel: resetAtMs === null ? '-' : new Date(resetAtMs).toISOString(),
++    periodHours: hours,
++    capturedAt: item.observed_at,
++    source: item.source,
++  };
++}
++
++const windowIdentity = (window: CodexQuotaWindow | ClaudeQuotaWindow) =>
++  window.id.replace(/-(five-hour|weekly|monthly)-\d+$/, '-$1');
++
++/** Per-window recency merge. Preserve every native field and unmatched row. */
++export function mergeTrafficQuota(
++  provider: string,
++  stored: QuotaCardState | undefined,
++  items: TrafficQuota[],
++  t: TFunction
++): QuotaCardState | undefined {
++  if (provider !== 'codex' && provider !== 'claude') return stored;
++  const native = stored as CodexQuotaState | ClaudeQuotaState | undefined;
++  const hasAccount = native?.status === 'success' ||
++    (provider === 'claude' && hasClaudeUsageData(native as ClaudeQuotaState | undefined));
++  const windows: ObservedWindow[] =
++    (hasAccount ? native?.windows : [])?.map((window) => ({
++      ...window,
++      capturedAt: stored?.capturedAt,
++      source: stored?.source,
++    })) ?? [];
++  let changed = false;
++  for (const item of items) {
++    if (item.provider !== provider) continue;
++    const incoming = trafficQuotaWindow(item, t);
++    if (!incoming) continue;
++    const index = windows.findIndex((window) => windowIdentity(window) === incoming.id);
++    const prior = index < 0 ? stored?.capturedAt : windows[index].capturedAt;
++    // Equal/late samples never replace a more complete account observation.
++    if (
++      Number.isFinite(Date.parse(prior ?? '')) &&
++      Date.parse(incoming.capturedAt!) <= Date.parse(prior!)
++    )
++      continue;
++    if (index < 0) windows.push(incoming);
++    else
++      windows[index] = {
++        ...windows[index],
++        usedPercent: incoming.usedPercent,
++        ...(incoming.resetAtMs !== null
++          ? { resetAtMs: incoming.resetAtMs, resetLabel: incoming.resetLabel }
++          : {}),
++        capturedAt: incoming.capturedAt,
++        source: incoming.source,
++      };
++    changed = true;
++  }
++  if (!changed) return stored;
++  return { ...(hasAccount ? stored : {}), status: 'success', windows } as CodexQuotaState;
++}
+diff --git a/src/features/quota/useTrafficQuota.ts b/src/features/quota/useTrafficQuota.ts
+new file mode 100644
+index 0000000..c957d86
+--- /dev/null
++++ b/src/features/quota/useTrafficQuota.ts
+@@ -0,0 +1,68 @@
++import { useSyncExternalStore } from 'react';
++import { useAuthStore } from '@/stores/useAuthStore';
++import { apiClient } from '@/services/api/client';
++import { startQuotaPolling } from '@/utils/quotaPolling';
++import type { TrafficQuota } from './trafficQuota';
++
++const empty: TrafficQuota[] = [];
++let items = empty;
++const listeners = new Set<() => void>();
++let stop: (() => void) | undefined;
++let unsubscribeAuth: (() => void) | undefined;
++let revision = -1;
++const emit = () => listeners.forEach((listener) => listener());
++function connect() {
++  stop?.();
++  stop = undefined;
++  items = empty;
++  revision = apiClient.getConnectionRevision();
++  emit();
++  if (
++    !useAuthStore.getState().isAuthenticated ||
++    useAuthStore.getState().connectionStatus !== 'connected'
++  )
++    return;
++  stop = startQuotaPolling(async (signal) => {
++    const startedRevision = revision;
++    const response = await apiClient.get<{ items: TrafficQuota[] }>('/quota/observations', {
++      signal,
++    });
++    if (signal.aborted || startedRevision !== apiClient.getConnectionRevision()) return;
++    items = Array.isArray(response.items) ? response.items : empty;
++    emit();
++  });
++}
++export function subscribeTrafficQuota(listener: () => void) {
++  listeners.add(listener);
++  if (listeners.size === 1) {
++    unsubscribeAuth = useAuthStore.subscribe((state, previous) => {
++      if (
++        state.isAuthenticated !== previous.isAuthenticated ||
++        state.connectionStatus !== previous.connectionStatus ||
++        revision !== apiClient.getConnectionRevision()
++      )
++        connect();
++    });
++    connect();
++  }
++  return () => {
++    listeners.delete(listener);
++    if (!listeners.size) {
++      stop?.();
++      stop = undefined;
++      unsubscribeAuth?.();
++      unsubscribeAuth = undefined;
++      items = empty;
++    }
++  };
++}
++export function useTrafficQuota(index: string, provider: string, disabled?: boolean) {
++  const snapshot = useSyncExternalStore(
++    subscribeTrafficQuota,
++    () => items,
++    () => empty
++  );
++  return disabled
++    ? empty
++    : snapshot.filter((item) => item.auth_index === index && item.provider === provider);
++}
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index 4d97873..7477ed4 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -222,6 +222,27 @@
+     "routing_strategy_fill_first": "fill-first (prioritize)"
+   },
+   "auth_files": {
++    "reconnect_button": "Reconnect",
++    "reconnect_account": "Reconnect {{name}}",
++    "reconnect_title": "Reconnect Codex account",
++    "reconnect_hint": "Sign in again to the same Codex account for {{name}}. Your existing settings and usage history will be retained. You do not need to delete the credential.",
++    "reconnect_invalid": "Select an existing Codex account from Auth Files to reconnect. The connection may have changed.",
++    "reconnect_success": "Account reconnected. The existing credential and tracking identity were retained.",
++    "reconnect_waiting": "Waiting for sign-in. Use the same Codex account.",
++    "reconnect_open": "Open sign-in",
++    "reconnect_copy": "Copy sign-in link",
++    "reconnect_callback": "Redirect URL",
++    "reconnect_callback_hint": "If the browser cannot reach the callback, paste the full redirect URL here.",
++    "reconnect_submit": "Submit redirect URL",
++    "reconnect_cancel": "Cancel and return to Auth Files",
++    "reconnect_back": "Back to Auth Files",
++    "reconnect_requires_backend": "Reconnect requires a backend with account reconnect support. The existing credential has not been changed.",
++    "reconnect_missing_state": "The server did not return a sign-in session.",
++    "reconnect_failed": "Reconnect failed.",
++    "reconnect_cancel_failed": "The sign-in is still pending; cancellation could not be confirmed.",
++    "reauth_explanation": "The provider refresh token expired or was reused.",
++    "reauth_required": "The provider refresh token expired or was reused. Sign in again through OAuth Login.",
++    "reauth_login": "OAuth Login",
+     "title": "Auth Files Management",
+     "meta_total": "{{count}} credentials",
+     "meta_active": "{{count}} active",
+@@ -440,7 +461,13 @@
+     "quota_refresh_single": "Refresh quota",
+     "quota_refresh_hint": "Refresh quota only for this credential",
+     "quota_refresh_success": "Quota refreshed for \"{{name}}\"",
+-    "quota_refresh_failed": "Failed to refresh quota for \"{{name}}\": {{message}}"
++    "quota_refresh_failed": "Failed to refresh quota for \"{{name}}\": {{message}}",
++    "account_refresh_button": "Refresh account data",
++    "account_refresh_hint": "Reload plan, renewal, credits, limits and reset times without resetting quota.",
++    "account_refresh_failed": "Account data refresh failed: {{message}}",
++    "credential_refresh_button": "Refresh credentials",
++    "credential_refresh_hint": "Renew OAuth credentials without reloading account or quota data.",
++    "account_refresh_success": "Account data refreshed for \"{{name}}\""
+   },
+   "antigravity_subscription": {
+     "plan_unknown": "Unknown",
+@@ -1494,8 +1521,8 @@
+         "input_placeholder": "Paste your API key",
+         "name_label": "Name / description (optional)",
+         "name_placeholder": "For example: Alice's laptop",
+-        "name_hint": "Saved immediately in this browser only, separately for each server. Not included in server configuration. Clear this field to remove the name.",
+-        "name_save_error": "Could not save the name in browser storage. Check your browser storage settings.",
++        "name_hint": "Saved immediately on the server and shared with Keeper. Existing browser names are imported once; server names take priority. Clear to remove the name.",
++        "name_save_error": "Could not load or save the shared key names. Check the management connection and try again.",
+         "input_hint": "Changes take effect after saving the configuration. Upstream provider keys are managed separately.",
+         "error_empty": "Please enter an API key",
+         "error_invalid": "API key contains invalid characters",
+@@ -1506,7 +1533,9 @@
+           "fair": "Fair",
+           "good": "Good",
+           "strong": "Strong"
+-        }
++        },
++        "name_retry": "Retry",
++        "name_local_hint": "Saved immediately in this browser only, separately for each server. Not included in server configuration. Clear this field to remove the name."
+       },
+       "payload_rules": {
+         "rule": "Rule",
+@@ -2423,5 +2452,20 @@
+     "error": "Binding failed. Please start over.",
+     "unsupported": "This backend does not support SIWC binding.",
+     "expired": "The binding session expired. Please start over."
++  },
++  "quota_updated": {
++    "updated": "Last updated",
++    "source": "Source",
++    "provider_query": "Provider quota query",
++    "stale": "Stale observation"
++  },
++  "quota_traffic": {
++    "show_age": "Show usage refresh icon and age",
++    "account_missing": "Usage limits are available. Refresh account data to load plan, credits and other account details.",
++    "traffic": "API response headers",
++    "websocket": "WebSocket event",
++    "scheduled": "Scheduled provider query",
++    "provider": "Provider quota query",
++    "custom_window": "{{name}}{{minutes}}-minute limit"
+   }
+ }
+diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
+index 0342f37..b516606 100644
+--- a/src/i18n/locales/ko.json
++++ b/src/i18n/locales/ko.json
+@@ -222,6 +222,24 @@
+     "routing_strategy_fill_first": "fill-first (우선 채우기)"
+   },
+   "auth_files": {
++    "reconnect_button": "다시 로그인",
++    "reconnect_account": "다시 로그인 {{name}}",
++    "reconnect_title": "Codex 계정 다시 로그인",
++    "reconnect_hint": "{{name}}에 해당하는 동일한 Codex 계정으로 다시 로그인하세요. 기존 설정과 사용 기록이 유지됩니다. 자격 증명을 삭제할 필요가 없습니다.",
++    "reconnect_invalid": "Select an existing Codex account from Auth Files to reconnect. The connection may have changed.",
++    "reconnect_success": "Account reconnected. The existing credential and tracking identity were retained.",
++    "reconnect_waiting": "Waiting for sign-in. Use the same Codex account.",
++    "reconnect_open": "Open sign-in",
++    "reconnect_copy": "Copy sign-in link",
++    "reconnect_callback": "Redirect URL",
++    "reconnect_callback_hint": "If the browser cannot reach the callback, paste the full redirect URL here.",
++    "reconnect_submit": "Submit redirect URL",
++    "reconnect_cancel": "Cancel and return to Auth Files",
++    "reconnect_back": "Back to Auth Files",
++    "reconnect_requires_backend": "Reconnect requires a backend with account reconnect support. The existing credential has not been changed.",
++    "reconnect_missing_state": "The server did not return a sign-in session.",
++    "reconnect_failed": "Reconnect failed.",
++    "reconnect_cancel_failed": "The sign-in is still pending; cancellation could not be confirmed.",
+     "title": "인증 파일 관리",
+     "meta_total": "자격 증명 {{count}}개",
+     "meta_active": "활성 {{count}}개",
+@@ -440,7 +458,16 @@
+     "quota_refresh_single": "할당량 새로 고침",
+     "quota_refresh_hint": "이 자격 증명의 할당량만 새로 고침합니다",
+     "quota_refresh_success": "\"{{name}}\"의 할당량을 새로 고쳤습니다",
+-    "quota_refresh_failed": "\"{{name}}\"의 할당량 새로 고침 실패: {{message}}"
++    "quota_refresh_failed": "\"{{name}}\"의 할당량 새로 고침 실패: {{message}}",
++    "reauth_explanation": "제공업체의 새로 고침 토큰이 만료되었거나 재사용되었습니다.",
++    "reauth_required": "제공업체의 새로 고침 토큰이 만료되었거나 재사용되었습니다. OAuth 로그인으로 다시 로그인하세요.",
++    "reauth_login": "OAuth 로그인",
++    "account_refresh_button": "계정 데이터 새로 고침",
++    "account_refresh_hint": "할당량을 초기화하지 않고 요금제, 갱신일, 크레딧, 한도 및 초기화 시간을 다시 불러옵니다.",
++    "account_refresh_failed": "계정 데이터 새로 고침 실패: {{message}}",
++    "credential_refresh_button": "인증 정보 새로 고침",
++    "credential_refresh_hint": "계정 또는 할당량 데이터를 다시 불러오지 않고 OAuth 인증 정보를 갱신합니다.",
++    "account_refresh_success": "\"{{name}}\"의 계정 데이터를 새로 고쳤습니다"
+   },
+   "antigravity_subscription": {
+     "plan_unknown": "알 수 없음",
+@@ -1506,7 +1533,9 @@
+           "fair": "보통",
+           "good": "좋음",
+           "strong": "강함"
+-        }
++        },
++        "name_retry": "다시 시도",
++        "name_local_hint": "이 브라우저에 서버별로 즉시 저장됩니다. 서버 설정에는 포함되지 않습니다. 이름을 삭제하려면 이 필드를 비우세요."
+       },
+       "payload_rules": {
+         "rule": "규칙",
+@@ -2423,5 +2452,20 @@
+     "error": "바인딩에 실패했습니다. 다시 시작하세요.",
+     "unsupported": "이 서버는 SIWC 바인딩을 지원하지 않습니다.",
+     "expired": "바인딩 세션이 만료되었습니다. 다시 시작하세요."
++  },
++  "quota_updated": {
++    "updated": "마지막 업데이트",
++    "source": "출처",
++    "provider_query": "제공업체 할당량 조회",
++    "stale": "오래된 관측값"
++  },
++  "quota_traffic": {
++    "show_age": "사용량 새로 고침 아이콘과 경과 시간 표시",
++    "account_missing": "사용량 한도를 확인할 수 있습니다. 계정 데이터를 새로 고쳐 요금제, 크레딧 및 기타 계정 정보를 불러오세요.",
++    "traffic": "API 응답 헤더",
++    "websocket": "WebSocket 이벤트",
++    "scheduled": "예약된 제공업체 조회",
++    "provider": "제공업체 할당량 조회",
++    "custom_window": "{{name}}{{minutes}}분 한도"
+   }
+ }
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index 62f21a0..9b1d990 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -221,6 +221,27 @@
+     "routing_strategy_fill_first": "fill-first (приоритет)"
+   },
+   "auth_files": {
++    "reconnect_button": "Войти снова",
++    "reconnect_account": "Повторный вход: {{name}}",
++    "reconnect_title": "Повторный вход в аккаунт Codex",
++    "reconnect_hint": "Войдите снова в тот же аккаунт Codex для {{name}}. Настройки и история использования сохранятся. Удалять учётные данные не нужно.",
++    "reconnect_invalid": "Выберите существующий аккаунт Codex в разделе файлов авторизации. Возможно, подключение изменилось.",
++    "reconnect_success": "Вход выполнен. Учётные данные и идентификатор отслеживания сохранены.",
++    "reconnect_waiting": "Ожидание входа. Используйте тот же аккаунт Codex.",
++    "reconnect_open": "Открыть страницу входа",
++    "reconnect_copy": "Копировать ссылку входа",
++    "reconnect_callback": "URL перенаправления",
++    "reconnect_callback_hint": "Если браузер не может открыть обратный вызов, вставьте полный URL перенаправления.",
++    "reconnect_submit": "Отправить URL",
++    "reconnect_cancel": "Отменить и вернуться к файлам авторизации",
++    "reconnect_back": "К файлам авторизации",
++    "reconnect_requires_backend": "Сервер должен поддерживать повторный вход в существующий аккаунт. Учётные данные не изменены.",
++    "reconnect_missing_state": "Сервер не вернул сеанс входа.",
++    "reconnect_failed": "Не удалось войти снова.",
++    "reconnect_cancel_failed": "Вход ещё ожидается; отмена не подтверждена.",
++    "reauth_explanation": "Токен обновления провайдера истёк или был использован повторно.",
++    "reauth_required": "Токен обновления провайдера истёк или был использован повторно. Войдите снова через OAuth.",
++    "reauth_login": "Вход OAuth",
+     "title": "Управление файлами авторизации",
+     "meta_total": "{{count}} учётных данных",
+     "meta_active": "{{count}} активно",
+@@ -443,7 +464,13 @@
+     "quota_refresh_single": "Обновить квоту",
+     "quota_refresh_hint": "Обновить квоту только для этих учётных данных",
+     "quota_refresh_success": "Квота для \"{{name}}\" обновлена",
+-    "quota_refresh_failed": "Не удалось обновить квоту для \"{{name}}\": {{message}}"
++    "quota_refresh_failed": "Не удалось обновить квоту для \"{{name}}\": {{message}}",
++    "account_refresh_button": "Обновить данные аккаунта",
++    "account_refresh_hint": "Обновить тариф, подписку, кредиты, лимиты и время сброса без сброса квоты.",
++    "account_refresh_failed": "Не удалось обновить данные аккаунта: {{message}}",
++    "credential_refresh_button": "Обновить учётные данные",
++    "credential_refresh_hint": "Обновить учётные данные OAuth без загрузки данных аккаунта или квоты.",
++    "account_refresh_success": "Данные аккаунта «{{name}}» обновлены"
+   },
+   "antigravity_subscription": {
+     "plan_unknown": "Неизвестно",
+@@ -1497,8 +1524,8 @@
+         "input_placeholder": "Вставьте API-ключ",
+         "name_label": "Имя / описание (необязательно)",
+         "name_placeholder": "Например: ноутбук Анны",
+-        "name_hint": "Имя сразу сохраняется только в этом браузере, отдельно для каждого сервера, и не включается в конфигурацию сервера. Очистите поле, чтобы удалить имя.",
+-        "name_save_error": "Не удалось сохранить имя в хранилище браузера. Проверьте настройки хранилища.",
++        "name_hint": "Сохраняется сразу на сервере и используется в Keeper. Имена из браузера импортируются один раз; имена на сервере имеют приоритет. Очистите поле, чтобы удалить имя.",
++        "name_save_error": "Не удалось загрузить или сохранить общие имена ключей. Проверьте подключение к серверу и повторите попытку.",
+         "input_hint": "Изменения вступают в силу после сохранения конфигурации. Ключи провайдеров управляются отдельно.",
+         "error_empty": "Введите API-ключ",
+         "error_invalid": "API-ключ содержит недопустимые символы",
+@@ -1509,7 +1536,9 @@
+           "fair": "Средний",
+           "good": "Хороший",
+           "strong": "Надёжный"
+-        }
++        },
++        "name_retry": "Повторить",
++        "name_local_hint": "Имя сразу сохраняется только в этом браузере, отдельно для каждого сервера, и не включается в конфигурацию сервера. Очистите поле, чтобы удалить имя."
+       },
+       "payload_rules": {
+         "rule": "Правило",
+@@ -2417,5 +2446,20 @@
+     "error": "Привязка не удалась. Начните заново.",
+     "unsupported": "Этот сервер не поддерживает привязку SIWC.",
+     "expired": "Сеанс привязки истёк. Начните заново."
++  },
++  "quota_updated": {
++    "updated": "Последнее обновление",
++    "source": "Источник",
++    "provider_query": "Запрос квоты провайдера",
++    "stale": "Устаревшие данные"
++  },
++  "quota_traffic": {
++    "show_age": "Показывать значок и время обновления использования",
++    "account_missing": "Лимиты использования доступны. Обновите данные аккаунта, чтобы загрузить тариф, кредиты и другие сведения.",
++    "traffic": "Заголовки ответа API",
++    "websocket": "Событие WebSocket",
++    "scheduled": "Плановый запрос провайдера",
++    "provider": "Запрос квоты провайдера",
++    "custom_window": "{{name}}Лимит на {{minutes}} минут"
+   }
+ }
+diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
+index c64a7fc..be13040 100644
+--- a/src/i18n/locales/tr.json
++++ b/src/i18n/locales/tr.json
+@@ -440,7 +440,34 @@
+     "quota_refresh_single": "Kotayı Yenile",
+     "quota_refresh_hint": "Yalnızca Bu Kimlik Bilgisinin Kotasını Yenile",
+     "quota_refresh_success": "“{{name}}” için Kota Yenilendi",
+-    "quota_refresh_failed": "“{{name}}” için Kota Yenilenemedi: {{message}}"
++    "quota_refresh_failed": "“{{name}}” için Kota Yenilenemedi: {{message}}",
++    "reconnect_button": "Yeniden bağlan",
++    "reconnect_account": "{{name}} hesabına yeniden bağlan",
++    "reconnect_title": "Codex hesabına yeniden bağlan",
++    "reconnect_hint": "{{name}} için aynı Codex hesabıyla tekrar giriş yapın. Mevcut ayarlarınız ve kullanım geçmişiniz korunur. Kimlik bilgisini silmeniz gerekmez.",
++    "reconnect_invalid": "Yeniden bağlanmak için Kimlik Dosyaları bölümünden mevcut bir Codex hesabı seçin. Bağlantı değişmiş olabilir.",
++    "reconnect_success": "Hesap yeniden bağlandı. Mevcut kimlik bilgisi ve izleme kimliği korundu.",
++    "reconnect_waiting": "Giriş bekleniyor. Aynı Codex hesabını kullanın.",
++    "reconnect_open": "Giriş sayfasını aç",
++    "reconnect_copy": "Giriş bağlantısını kopyala",
++    "reconnect_callback": "Yönlendirme URL’si",
++    "reconnect_callback_hint": "Tarayıcı geri çağrıya ulaşamazsa yönlendirilen tam URL’yi buraya yapıştırın.",
++    "reconnect_submit": "Yönlendirme URL’sini gönder",
++    "reconnect_cancel": "İptal et ve Kimlik Dosyaları bölümüne dön",
++    "reconnect_back": "Kimlik Dosyaları bölümüne dön",
++    "reconnect_requires_backend": "Yeniden bağlanma için hesap kurtarmayı destekleyen bir sunucu gerekir. Mevcut kimlik bilgisi değiştirilmedi.",
++    "reconnect_missing_state": "Sunucu bir giriş oturumu döndürmedi.",
++    "reconnect_failed": "Yeniden bağlanma başarısız.",
++    "reconnect_cancel_failed": "Giriş hâlâ bekliyor; iptal doğrulanamadı.",
++    "reauth_explanation": "Sağlayıcının yenileme belirtecinin süresi doldu veya belirteç tekrar kullanıldı.",
++    "reauth_required": "Sağlayıcının yenileme belirtecinin süresi doldu veya belirteç tekrar kullanıldı. OAuth Girişi üzerinden yeniden giriş yapın.",
++    "reauth_login": "OAuth Girişi",
++    "account_refresh_button": "Hesap verilerini yenile",
++    "account_refresh_hint": "Kotayı sıfırlamadan plan, yenileme, kredi, limit ve sıfırlama zamanlarını yeniden yükle.",
++    "account_refresh_failed": "Hesap verileri yenilenemedi: {{message}}",
++    "credential_refresh_button": "Kimlik bilgilerini yenile",
++    "credential_refresh_hint": "Hesap veya kota verilerini yeniden yüklemeden OAuth kimlik bilgilerini yenile.",
++    "account_refresh_success": "\"{{name}}\" için hesap verileri yenilendi"
+   },
+   "antigravity_subscription": {
+     "plan_unknown": "Bilinmiyor",
+@@ -1506,7 +1533,9 @@
+           "fair": "Orta",
+           "good": "İyi",
+           "strong": "Güçlü"
+-        }
++        },
++        "name_retry": "Tekrar dene",
++        "name_local_hint": "Bu tarayıcıda her sunucu için ayrı olarak hemen kaydedilir. Sunucu yapılandırmasına eklenmez. Adı kaldırmak için bu alanı boşaltın."
+       },
+       "payload_rules": {
+         "rule": "Kural",
+@@ -2423,5 +2452,20 @@
+     "error": "Bağlama Başarısız Oldu. Lütfen Yeniden Başla.",
+     "unsupported": "Bu Arka Uç SIWC Bağlamayı Desteklemiyor.",
+     "expired": "Bağlama Oturumunun Süresi Doldu. Lütfen Yeniden Başla."
++  },
++  "quota_updated": {
++    "updated": "Son güncelleme",
++    "source": "Kaynak",
++    "provider_query": "Sağlayıcı kota sorgusu",
++    "stale": "Eski gözlem"
++  },
++  "quota_traffic": {
++    "show_age": "Kullanım yenileme simgesini ve yaşını göster",
++    "account_missing": "Kullanım limitleri hazır. Planı, kredileri ve diğer hesap ayrıntılarını yüklemek için hesap verilerini yenileyin.",
++    "traffic": "API yanıt başlıkları",
++    "websocket": "WebSocket olayı",
++    "scheduled": "Zamanlanmış sağlayıcı sorgusu",
++    "provider": "Sağlayıcı kota sorgusu",
++    "custom_window": "{{name}}{{minutes}} dakikalık limit"
+   }
+ }
+diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
+index d7663a3..4107e18 100644
+--- a/src/i18n/locales/vi.json
++++ b/src/i18n/locales/vi.json
+@@ -222,6 +222,24 @@
+     "routing_strategy_fill_first": "fill-first (ưu tiên lấp đầy)"
+   },
+   "auth_files": {
++    "reconnect_button": "Đăng nhập lại",
++    "reconnect_account": "Đăng nhập lại {{name}}",
++    "reconnect_title": "Đăng nhập lại tài khoản Codex",
++    "reconnect_hint": "Đăng nhập lại bằng cùng tài khoản Codex cho {{name}}. Cài đặt và lịch sử sử dụng hiện có được giữ nguyên. Bạn không cần xóa thông tin xác thực.",
++    "reconnect_invalid": "Select an existing Codex account from Auth Files to reconnect. The connection may have changed.",
++    "reconnect_success": "Account reconnected. The existing credential and tracking identity were retained.",
++    "reconnect_waiting": "Waiting for sign-in. Use the same Codex account.",
++    "reconnect_open": "Open sign-in",
++    "reconnect_copy": "Copy sign-in link",
++    "reconnect_callback": "Redirect URL",
++    "reconnect_callback_hint": "If the browser cannot reach the callback, paste the full redirect URL here.",
++    "reconnect_submit": "Submit redirect URL",
++    "reconnect_cancel": "Cancel and return to Auth Files",
++    "reconnect_back": "Back to Auth Files",
++    "reconnect_requires_backend": "Reconnect requires a backend with account reconnect support. The existing credential has not been changed.",
++    "reconnect_missing_state": "The server did not return a sign-in session.",
++    "reconnect_failed": "Reconnect failed.",
++    "reconnect_cancel_failed": "The sign-in is still pending; cancellation could not be confirmed.",
+     "title": "Quản lý File xác thực",
+     "meta_total": "{{count}} credential",
+     "meta_active": "{{count}} đang hoạt động",
+@@ -440,7 +458,16 @@
+     "policy_rules_hint": "Các quy tắc tùy chỉnh được ưu tiên theo thứ tự danh sách. Kế thừa hoặc danh sách trống sẽ sử dụng quy tắc kế thừa; điều này không vô hiệu hóa chúng. Mẫu biểu thức chính quy (Regex) dùng cú pháp của Go.",
+     "policy_retry_invalid": "Nhập một số nguyên an toàn không âm, hoặc chọn Kế thừa.",
+     "policy_aliases_invalid": "Nhập tên model và bí danh không để trống cho mỗi hàng mới hoặc đã chỉnh sửa.",
+-    "policy_rules_invalid": "Hoàn thành mỗi quy tắc đã chỉnh sửa với mã trạng thái dương, một hành động và ít nhất một điều kiện khớp không để trống."
++    "policy_rules_invalid": "Hoàn thành mỗi quy tắc đã chỉnh sửa với mã trạng thái dương, một hành động và ít nhất một điều kiện khớp không để trống.",
++    "reauth_explanation": "Token làm mới của nhà cung cấp đã hết hạn hoặc được sử dụng lại.",
++    "reauth_required": "Token làm mới của nhà cung cấp đã hết hạn hoặc được sử dụng lại. Hãy đăng nhập lại qua OAuth.",
++    "reauth_login": "Đăng nhập OAuth",
++    "account_refresh_button": "Làm mới dữ liệu tài khoản",
++    "account_refresh_hint": "Tải lại gói, ngày gia hạn, tín dụng, giới hạn và thời gian đặt lại mà không đặt lại hạn mức.",
++    "account_refresh_failed": "Không thể làm mới dữ liệu tài khoản: {{message}}",
++    "credential_refresh_button": "Làm mới thông tin xác thực",
++    "credential_refresh_hint": "Gia hạn thông tin xác thực OAuth mà không tải lại dữ liệu tài khoản hoặc hạn mức.",
++    "account_refresh_success": "Đã làm mới dữ liệu tài khoản cho \"{{name}}\""
+   },
+   "antigravity_subscription": {
+     "plan_unknown": "Không rõ",
+@@ -1298,7 +1325,9 @@
+         "name_label": "Tên / mô tả (tùy chọn)",
+         "name_placeholder": "Ví dụ: Laptop của Alice",
+         "name_hint": "Được lưu ngay trong trình duyệt này, riêng cho từng máy chủ. Không bao gồm trong cấu hình máy chủ. Xóa trường này để xóa tên.",
+-        "name_save_error": "Không thể lưu tên vào bộ lưu trữ trình duyệt. Vui lòng kiểm tra cài đặt lưu trữ của trình duyệt."
++        "name_save_error": "Không thể lưu tên vào bộ lưu trữ trình duyệt. Vui lòng kiểm tra cài đặt lưu trữ của trình duyệt.",
++        "name_retry": "Thử lại",
++        "name_local_hint": "Được lưu ngay trong trình duyệt này, riêng cho từng máy chủ. Không nằm trong cấu hình máy chủ. Xóa trường này để bỏ tên."
+       },
+       "payload_rules": {
+         "rule": "Quy tắc",
+@@ -2429,5 +2458,20 @@
+     "error": "Liên kết thất bại. Hãy bắt đầu lại.",
+     "unsupported": "Máy chủ này không hỗ trợ liên kết SIWC.",
+     "expired": "Phiên liên kết đã hết hạn. Hãy bắt đầu lại."
++  },
++  "quota_updated": {
++    "updated": "Cập nhật lần cuối",
++    "source": "Nguồn",
++    "provider_query": "Truy vấn hạn mức nhà cung cấp",
++    "stale": "Dữ liệu quan sát đã cũ"
++  },
++  "quota_traffic": {
++    "show_age": "Hiển thị biểu tượng làm mới và thời gian dữ liệu sử dụng",
++    "account_missing": "Đã có giới hạn sử dụng. Làm mới dữ liệu tài khoản để tải gói, tín dụng và thông tin tài khoản khác.",
++    "traffic": "Header phản hồi API",
++    "websocket": "Sự kiện WebSocket",
++    "scheduled": "Truy vấn nhà cung cấp theo lịch",
++    "provider": "Truy vấn hạn mức nhà cung cấp",
++    "custom_window": "Giới hạn {{name}}{{minutes}} phút"
+   }
+ }
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index 6e76801..63f943a 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -222,6 +222,27 @@
+     "routing_strategy_fill_first": "fill-first (优先填充)"
+   },
+   "auth_files": {
++    "reconnect_button": "重新登录",
++    "reconnect_account": "重新登录 {{name}}",
++    "reconnect_title": "重新登录 Codex 账号",
++    "reconnect_hint": "请使用 {{name}} 对应的同一个 Codex 账号重新登录。现有设置和使用历史将保留，无需删除凭据。",
++    "reconnect_invalid": "请从认证文件中选择现有 Codex 账号。连接可能已更改。",
++    "reconnect_success": "重新登录成功，现有凭据和跟踪标识已保留。",
++    "reconnect_waiting": "正在等待登录，请使用同一个 Codex 账号。",
++    "reconnect_open": "打开登录页面",
++    "reconnect_copy": "复制登录链接",
++    "reconnect_callback": "重定向 URL",
++    "reconnect_callback_hint": "如果浏览器无法访问回调地址，请在此粘贴完整的重定向 URL。",
++    "reconnect_submit": "提交重定向 URL",
++    "reconnect_cancel": "取消并返回认证文件",
++    "reconnect_back": "返回认证文件",
++    "reconnect_requires_backend": "后端需要支持现有账号重新登录。现有凭据未更改。",
++    "reconnect_missing_state": "服务器未返回登录会话。",
++    "reconnect_failed": "重新登录失败。",
++    "reconnect_cancel_failed": "登录仍在等待，无法确认取消。",
++    "reauth_explanation": "提供商刷新令牌已过期或被重复使用。",
++    "reauth_required": "提供商刷新令牌已过期或被重复使用。请通过 OAuth 登录重新授权。",
++    "reauth_login": "OAuth 登录",
+     "title": "认证文件管理",
+     "meta_total": "{{count}} 个凭证",
+     "meta_active": "{{count}} 个启用",
+@@ -438,7 +459,13 @@
+     "quota_refresh_single": "刷新额度",
+     "quota_refresh_hint": "仅刷新该认证文件的额度",
+     "quota_refresh_success": "已刷新 \"{{name}}\" 的额度",
+-    "quota_refresh_failed": "刷新 \"{{name}}\" 的额度失败：{{message}}"
++    "quota_refresh_failed": "刷新 \"{{name}}\" 的额度失败：{{message}}",
++    "account_refresh_button": "刷新账号数据",
++    "account_refresh_hint": "刷新套餐、续期、余额、额度和重置时间，不重置额度。",
++    "account_refresh_failed": "账号数据刷新失败：{{message}}",
++    "credential_refresh_button": "刷新凭据",
++    "credential_refresh_hint": "更新 OAuth 凭据，不刷新账号或额度数据。",
++    "account_refresh_success": "已刷新“{{name}}”的账号数据"
+   },
+   "antigravity_subscription": {
+     "plan_unknown": "未知",
+@@ -1493,8 +1520,8 @@
+         "input_placeholder": "粘贴你的 API 密钥",
+         "name_label": "名称 / 说明（可选）",
+         "name_placeholder": "例如：小明的笔记本",
+-        "name_hint": "名称立即保存在当前浏览器中，按服务器隔离，不写入服务器配置。清空此字段可移除名称。",
+-        "name_save_error": "无法将名称保存到浏览器存储，请检查浏览器存储设置。",
++        "name_hint": "名称立即保存在服务器上并与 Keeper 共享。浏览器中的旧名称仅导入一次；服务器名称优先。清空此字段可移除名称。",
++        "name_save_error": "无法加载或保存共享密钥名称。请检查管理连接并重试。",
+         "input_hint": "保存配置后生效。上游提供商密钥独立管理，不受此处修改影响。",
+         "error_empty": "请输入 API 密钥",
+         "error_invalid": "API 密钥包含无效字符",
+@@ -1505,7 +1532,9 @@
+           "fair": "一般",
+           "good": "良好",
+           "strong": "很强"
+-        }
++        },
++        "name_retry": "重试",
++        "name_local_hint": "名称立即保存在当前浏览器中，并按服务器分别保存，不会写入服务器配置。清空此字段可移除名称。"
+       },
+       "payload_rules": {
+         "rule": "规则",
+@@ -2422,5 +2451,20 @@
+     "error": "绑定失败，请重新开始。",
+     "unsupported": "当前后端不支持 SIWC 绑定。",
+     "expired": "绑定会话已过期，请重新开始。"
++  },
++  "quota_updated": {
++    "updated": "最后更新",
++    "source": "来源",
++    "provider_query": "服务商额度查询",
++    "stale": "数据已过期"
++  },
++  "quota_traffic": {
++    "show_age": "显示用量刷新图标和时间",
++    "account_missing": "用量限额已可用。请刷新账户数据以加载套餐、积分和其他账户详情。",
++    "traffic": "API 响应标头",
++    "websocket": "WebSocket 事件",
++    "scheduled": "定时提供商查询",
++    "provider": "提供商配额查询",
++    "custom_window": "{{name}}{{minutes}} 分钟限额"
+   }
+ }
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index 9d60d8d..a3c32e6 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -222,6 +222,27 @@
+     "routing_strategy_fill_first": "fill-first（優先填充）"
+   },
+   "auth_files": {
++    "reconnect_button": "重新登入",
++    "reconnect_account": "重新登入 {{name}}",
++    "reconnect_title": "重新登入 Codex 帳號",
++    "reconnect_hint": "請使用 {{name}} 對應的同一個 Codex 帳號重新登入。現有設定和使用歷史將保留，無需刪除憑證。",
++    "reconnect_invalid": "請從認證檔案中選擇現有 Codex 帳號。連線可能已變更。",
++    "reconnect_success": "重新登入成功，現有憑證和追蹤識別碼已保留。",
++    "reconnect_waiting": "正在等待登入，請使用同一個 Codex 帳號。",
++    "reconnect_open": "開啟登入頁面",
++    "reconnect_copy": "複製登入連結",
++    "reconnect_callback": "重新導向 URL",
++    "reconnect_callback_hint": "如果瀏覽器無法存取回呼位址，請在此貼上完整的重新導向 URL。",
++    "reconnect_submit": "提交重新導向 URL",
++    "reconnect_cancel": "取消並返回認證檔案",
++    "reconnect_back": "返回認證檔案",
++    "reconnect_requires_backend": "後端需要支援現有帳號重新登入。現有憑證未變更。",
++    "reconnect_missing_state": "伺服器未傳回登入工作階段。",
++    "reconnect_failed": "重新登入失敗。",
++    "reconnect_cancel_failed": "登入仍在等待，無法確認取消。",
++    "reauth_explanation": "供應商重新整理權杖已過期或被重複使用。",
++    "reauth_required": "供應商重新整理權杖已過期或被重複使用。請透過 OAuth 登入重新授權。",
++    "reauth_login": "OAuth 登入",
+     "title": "驗證檔案管理",
+     "meta_total": "{{count}} 個憑證",
+     "meta_active": "{{count}} 個啟用",
+@@ -438,7 +459,13 @@
+     "quota_refresh_single": "重新整理配額",
+     "quota_refresh_hint": "僅重新整理該驗證檔案的配額",
+     "quota_refresh_success": "已重新整理「{{name}}」的配額",
+-    "quota_refresh_failed": "重新整理「{{name}}」的配額失敗：{{message}}"
++    "quota_refresh_failed": "重新整理「{{name}}」的配額失敗：{{message}}",
++    "account_refresh_button": "重新整理帳號資料",
++    "account_refresh_hint": "重新整理方案、續期、餘額、額度與重設時間，不重設額度。",
++    "account_refresh_failed": "帳號資料重新整理失敗：{{message}}",
++    "credential_refresh_button": "重新整理憑證",
++    "credential_refresh_hint": "更新 OAuth 憑證，不重新整理帳號或額度資料。",
++    "account_refresh_success": "已重新整理「{{name}}」的帳號資料"
+   },
+   "antigravity_subscription": {
+     "plan_unknown": "未知",
+@@ -1521,8 +1548,8 @@
+         "input_placeholder": "貼上你的 API 金鑰",
+         "name_label": "名稱 / 說明（選填）",
+         "name_placeholder": "例如：小明的筆記型電腦",
+-        "name_hint": "名稱立即儲存在目前瀏覽器中，依伺服器隔離，不寫入伺服器設定。清空此欄位可移除名稱。",
+-        "name_save_error": "無法將名稱儲存至瀏覽器儲存空間，請檢查瀏覽器儲存設定。",
++        "name_hint": "名稱立即儲存在伺服器上並與 Keeper 共用。瀏覽器中的舊名稱僅匯入一次；伺服器名稱優先。清空此欄位可移除名稱。",
++        "name_save_error": "無法載入或儲存共用金鑰名稱。請檢查管理連線並重試。",
+         "input_hint": "儲存設定後生效。上游提供商金鑰獨立管理，不受此處修改影響。",
+         "error_empty": "請輸入 API 金鑰",
+         "error_invalid": "API 金鑰包含無效字元",
+@@ -1533,7 +1560,9 @@
+           "fair": "一般",
+           "good": "良好",
+           "strong": "很強"
+-        }
++        },
++        "name_retry": "重試",
++        "name_local_hint": "名稱立即儲存在目前瀏覽器中，並依伺服器分別儲存，不會寫入伺服器設定。清空此欄位可移除名稱。"
+       },
+       "payload_rules": {
+         "rule": "規則",
+@@ -2450,5 +2479,20 @@
+     "error": "綁定失敗，請重新開始。",
+     "unsupported": "目前後端不支援 SIWC 綁定。",
+     "expired": "綁定工作階段已過期，請重新開始。"
++  },
++  "quota_updated": {
++    "updated": "最後更新",
++    "source": "來源",
++    "provider_query": "服務商額度查詢",
++    "stale": "資料已過期"
++  },
++  "quota_traffic": {
++    "show_age": "顯示用量重新整理圖示和時間",
++    "account_missing": "用量限額已可用。請重新整理帳戶資料以載入方案、點數和其他帳戶詳情。",
++    "traffic": "API 回應標頭",
++    "websocket": "WebSocket 事件",
++    "scheduled": "排程提供者查詢",
++    "provider": "提供者配額查詢",
++    "custom_window": "{{name}}{{minutes}} 分鐘限額"
+   }
+ }
+diff --git a/src/router/MainRoutes.tsx b/src/router/MainRoutes.tsx
+index e6eca2b..9d16d8a 100644
+--- a/src/router/MainRoutes.tsx
++++ b/src/router/MainRoutes.tsx
+@@ -2,6 +2,7 @@ import { Navigate, useRoutes, type Location } from 'react-router-dom';
+ import { DashboardPage } from '@/features/dashboard/DashboardPage';
+ import { ProvidersWorkbenchPage } from '@/features/providers/ProvidersWorkbenchPage';
+ import { AuthFilesPage } from '@/features/authFiles/AuthFilesPage';
++import { CodexReconnectPage } from '@/features/authFiles/CodexReconnectPage';
+ import { AuthFilesOAuthExcludedEditPage } from '@/pages/AuthFilesOAuthExcludedEditPage';
+ import { AuthFilesOAuthModelAliasEditPage } from '@/pages/AuthFilesOAuthModelAliasEditPage';
+ import { OAuthPage } from '@/features/oauth/OAuthPage';
+@@ -25,6 +26,7 @@ const createMainRoutes = (supportsPlugin: boolean) => [
+   { path: '/ai-providers', element: <ProvidersWorkbenchPage /> },
+   { path: '/ai-providers/*', element: <Navigate to="/ai-providers" replace /> },
+   { path: '/auth-files', element: <AuthFilesPage /> },
++  { path: '/auth-files/reconnect', element: <CodexReconnectPage /> },
+   { path: '/auth-files/oauth-excluded', element: <AuthFilesOAuthExcludedEditPage /> },
+   { path: '/auth-files/oauth-model-alias', element: <AuthFilesOAuthModelAliasEditPage /> },
+   { path: '/oauth', element: <OAuthPage /> },
+diff --git a/src/services/api/apiKeyNames.ts b/src/services/api/apiKeyNames.ts
+new file mode 100644
+index 0000000..e1ee5e0
+--- /dev/null
++++ b/src/services/api/apiKeyNames.ts
+@@ -0,0 +1,42 @@
++import { apiClient } from './client';
++
++export function normalizeSharedApiKeyNames(payload: unknown): Record<string, string> {
++  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
++    throw new Error('Invalid key name metadata');
++  }
++  const names = (payload as { names?: unknown }).names;
++  if (!names || typeof names !== 'object' || Array.isArray(names)) {
++    throw new Error('Invalid key name metadata');
++  }
++  const entries = Object.entries(names);
++  if (
++    entries.length > 10_000 ||
++    entries.some(
++      ([fingerprint, name]) =>
++        !/^[a-f0-9]{64}$/.test(fingerprint) ||
++        typeof name !== 'string' ||
++        Array.from(name).length > 128 ||
++        /[\p{Cc}\p{Cf}]/u.test(name)
++    )
++  )
++    throw new Error('Invalid key name metadata');
++  return Object.fromEntries(entries);
++}
++
++export const sharedApiKeyNamesApi = {
++  async list(client = apiClient.captureConnection()): Promise<Record<string, string>> {
++    return normalizeSharedApiKeyNames(await client.get('/access/api-key-names'));
++  },
++  async update(
++    names: Record<string, string>,
++    onlyIfAbsent = false,
++    client = apiClient.captureConnection()
++  ): Promise<Record<string, string>> {
++    return normalizeSharedApiKeyNames(
++      await client.patch('/access/api-key-names', {
++        names,
++        ...(onlyIfAbsent ? { only_if_absent: true } : {}),
++      })
++    );
++  },
++};
+diff --git a/src/services/api/authFiles.ts b/src/services/api/authFiles.ts
+index 5b320f5..78550e7 100644
+--- a/src/services/api/authFiles.ts
++++ b/src/services/api/authFiles.ts
+@@ -292,6 +292,9 @@ const normalizeAuthFileEntry = (
+     useSiwc: entry.use_siwc === true,
+     siwcBound: entry.siwc_bound === true,
+     siwcExpiresAt: readTextField(entry, 'siwc_expires_at') || undefined,
++    reauthRequired:
++      entry.reauth_required === true &&
++      ['refresh_token_expired', 'refresh_token_reused', 'refresh_token_invalidated', 'token_revoked', 'invalid_client'].includes(String(entry.reauth_reason)),
+     cooldownSnapshot: normalizeAuthFileCooldowns(entry.cooldowns, observedAt, receivedAtMs),
+     runtimeOnly: readRuntimeOnlyField(entry),
+     authIndex: normalizeRecentRequestAuthIndex(entry['auth_index'] ?? entry.authIndex),
+@@ -512,6 +515,7 @@ export interface AuthFileRefreshResult {
+   id: string;
+   success: boolean;
+   error?: string;
++  reauthRequired?: boolean;
+ }
+ 
+ export const normalizeAuthFileRefreshResults = (payload: unknown): AuthFileRefreshResult[] => {
+@@ -532,6 +536,12 @@ export const normalizeAuthFileRefreshResults = (payload: unknown): AuthFileRefre
+       id: entry.id,
+       success: entry.success,
+       ...(!entry.success && typeof entry.error === 'string' ? { error: entry.error } : {}),
++      ...(!entry.success &&
++      entry.error_code === 'provider_reauthentication_required' &&
++      entry.reauth_required === true &&
++      ['refresh_token_expired', 'refresh_token_reused', 'refresh_token_invalidated', 'token_revoked', 'invalid_client'].includes(String(entry.reason))
++        ? { reauthRequired: true }
++        : {}),
+     };
+   });
+ };
+diff --git a/src/services/api/client.ts b/src/services/api/client.ts
+index 5377483..17c46ed 100644
+--- a/src/services/api/client.ts
++++ b/src/services/api/client.ts
+@@ -16,11 +16,14 @@ import {
+ import { computeApiUrl } from '@/utils/connection';
+ import { parseApiErrorResponse } from './apiError';
+ 
++type RevisionConfig = AxiosRequestConfig & { connectionRevision?: number };
++
+ class ApiClient {
+   private instance: AxiosInstance;
+   private apiBase: string = '';
+   private managementKey: string = '';
+   private connectionRevision = 0;
++  private reportedUnauthorizedRevision = -1;
+ 
+   constructor(private readonly emitEvents: () => boolean = () => true) {
+     this.instance = axios.create({
+@@ -125,6 +128,7 @@ class ApiClient {
+       (config) => {
+         // Set baseURL
+         config.baseURL = this.apiBase;
++        (config as RevisionConfig).connectionRevision = this.connectionRevision;
+ 
+         // Add authorization header
+         if (this.managementKey) {
+@@ -183,8 +187,40 @@ class ApiClient {
+       apiError.details = responseData;
+       apiError.data = responseData;
+ 
+-      // Dispatch logout for unauthorized responses
+-      if (this.emitEvents() && error.response?.status === 401) {
++      // 401 未授权 - 触发登出事件
++      const requestRevision = (error.config as RevisionConfig | undefined)?.connectionRevision;
++      if (this.emitEvents() && error.response?.status === 401 && requestRevision === this.connectionRevision) {
++        if (this.reportedUnauthorizedRevision !== requestRevision) {
++          this.reportedUnauthorizedRevision = requestRevision;
++          // Static route names only: never log headers, bodies, query strings or credential names.
++          const url = error.config?.url?.split(/[?#]/)[0];
++          const route = [
++            '/credentials',
++            '/credentials/refresh',
++            '/credentials/download',
++            '/quota/observations',
++            '/key-names',
++            '/config',
++            '/models',
++          ].includes(url ?? '')
++            ? url
++            : 'other-management-route';
++          console.warn('CPAMC management authentication rejected', {
++            timestamp: new Date().toISOString(),
++            status: 401,
++            method: ['get', 'post', 'put', 'patch', 'delete'].includes(error.config?.method ?? '')
++              ? error.config?.method
++              : 'unknown',
++            route,
++            connectionRevision: requestRevision,
++            reason:
++              parsedError.message === 'missing management key'
++                ? 'missing_management_key'
++                : parsedError.message === 'invalid management key'
++                  ? 'invalid_management_key'
++                  : 'unspecified_unauthorized',
++          });
++        }
+         window.dispatchEvent(new Event('unauthorized'));
+       }
+ 
+diff --git a/src/services/api/oauth.ts b/src/services/api/oauth.ts
+index 32cb109..99076e0 100644
+--- a/src/services/api/oauth.ts
++++ b/src/services/api/oauth.ts
+@@ -19,6 +19,16 @@ export interface OAuthStartResponse {
+   expires_in?: number;
+ }
+ 
++export interface OAuthStatusResponse {
++  status: 'ok' | 'wait' | 'error';
++  error?: string;
++  saved?: boolean;
++  adopted?: boolean;
++  adoption_error?: string;
++  verification_error?: string;
++  requires_sign_in?: boolean;
++}
++
+ export interface OAuthCallbackResponse {
+   status: 'ok';
+ }
+@@ -50,6 +60,11 @@ export const oauthApi = {
+   startSiwcBind: (name: string, signal?: AbortSignal) =>
+     apiClient.post<SiwcBindResponse>('/oauth/siwc/bind', { name }, signal ? { signal } : undefined),
+ 
++  reconnectCodex: (target: { name: string; authIndex: string }, signal?: AbortSignal) =>
++    apiClient.get<OAuthStartResponse>('/credentials/reconnect', {
++      params: { name: target.name, auth_index: target.authIndex, is_webui: true },
++      ...(signal ? { signal } : {}),
++    }),
+   startAuth: (provider: string, signal?: AbortSignal) => {
+     const providerKey = normalizeProviderForManagementPath(provider);
+     const params: Record<string, string | boolean> = { provider: providerKey };
+@@ -63,7 +78,7 @@ export const oauthApi = {
+   },
+ 
+   getAuthStatus: (state: string, signal?: AbortSignal) =>
+-    apiClient.get<{ status: 'ok' | 'wait' | 'error'; error?: string }>(`/oauth/status`, {
++    apiClient.get<OAuthStatusResponse>(`/oauth/status`, {
+       params: { state },
+       ...(signal ? { signal } : {}),
+     }),
+@@ -92,3 +107,20 @@ export function captureSiwcBindingApi() {
+     cancel: (state: string) => client.delete('/oauth/session', { params: { state } }),
+   };
+ }
++
++/** Every request belonging to a recovery attempt stays on its original server. */
++export function captureCodexReconnectApi() {
++  const client = apiClient.captureConnection();
++  return {
++    start: (target: { name: string; authIndex: string }, signal: AbortSignal) =>
++      client.get<OAuthStartResponse>('/credentials/reconnect', {
++        params: { name: target.name, auth_index: target.authIndex, is_webui: true }, signal,
++      }),
++    status: (state: string, signal: AbortSignal) =>
++      client.get<OAuthStatusResponse>('/oauth/status', { params: { state }, signal }),
++    cancel: (state: string, signal: AbortSignal) =>
++      client.delete<OAuthCancelResponse>('/oauth/session', { params: { state }, signal }),
++    submit: (redirectUrl: string, signal: AbortSignal) =>
++      client.post<OAuthCallbackResponse>('/oauth/callback', { provider: 'codex', redirect_url: redirectUrl }, { signal }),
++  };
++}
+diff --git a/src/types/authFile.ts b/src/types/authFile.ts
+index 847ddb7..fe93e60 100644
+--- a/src/types/authFile.ts
++++ b/src/types/authFile.ts
+@@ -67,6 +67,7 @@ export interface AuthFileItem {
+   unavailable?: boolean;
+   status?: string;
+   statusMessage?: string;
++  reauthRequired?: boolean;
+   lastRefresh?: string | number;
+   modified?: number;
+   priority?: number;
+diff --git a/src/types/quota.ts b/src/types/quota.ts
+index bacb831..cbfdf97 100644
+--- a/src/types/quota.ts
++++ b/src/types/quota.ts
+@@ -195,6 +195,8 @@ export interface ClaudeProfileResponse {
+ }
+ 
+ export interface ClaudeQuotaWindow {
++  capturedAt?: string;
++  source?: string;
+   id: string;
+   label: string;
+   labelKey?: string;
+@@ -281,6 +283,8 @@ export interface PluginQuotaState extends AntigravityQuotaState {
+ }
+ 
+ export interface CodexQuotaWindow {
++  capturedAt?: string;
++  source?: string;
+   id: string;
+   label: string;
+   labelKey?: string;
+@@ -294,6 +298,8 @@ export interface CodexQuotaWindow {
+ }
+ 
+ export interface CodexQuotaState {
++  capturedAt?: string;
++  source?: string;
+   status: 'idle' | 'loading' | 'success' | 'error';
+   windows: CodexQuotaWindow[];
+   planType?: string | null;
+diff --git a/src/utils/quota/formatters.ts b/src/utils/quota/formatters.ts
+index a3d05cb..134f0bb 100644
+--- a/src/utils/quota/formatters.ts
++++ b/src/utils/quota/formatters.ts
+@@ -21,7 +21,10 @@ export function formatUnixSeconds(value: number | null): string {
+   return formatInstantShort(ms);
+ }
+ 
+-export function formatCodexResetLabel(window?: CodexUsageWindow | null): string {
++export function formatCodexResetLabel(
++  window?: CodexUsageWindow | null,
++  observedAtMs = Date.now()
++): string {
+   if (!window) return '-';
+   const resetAt = normalizeNumberValue(window.reset_at ?? window.resetAt);
+   if (resetAt !== null && resetAt > 0) {
+@@ -29,7 +32,7 @@ export function formatCodexResetLabel(window?: CodexUsageWindow | null): string
+   }
+   const resetAfter = normalizeNumberValue(window.reset_after_seconds ?? window.resetAfterSeconds);
+   if (resetAfter !== null && resetAfter > 0) {
+-    const targetSeconds = Math.floor(Date.now() / 1000 + resetAfter);
++    const targetSeconds = Math.floor(observedAtMs / 1000 + resetAfter);
+     return formatUnixSeconds(targetSeconds);
+   }
+   return '-';
+diff --git a/src/utils/quotaPolling.ts b/src/utils/quotaPolling.ts
+new file mode 100644
+index 0000000..0566811
+--- /dev/null
++++ b/src/utils/quotaPolling.ts
+@@ -0,0 +1,40 @@
++export function startQuotaPolling(
++  refresh: (signal: AbortSignal) => Promise<unknown>,
++  interval = 10_000
++) {
++  let stopped = false;
++  let visibleRefreshPending = false;
++  let controller: AbortController | null = null;
++  const run = async () => {
++    if (stopped || document.hidden || controller) return;
++    const current = new AbortController();
++    controller = current;
++    try {
++      await refresh(current.signal);
++    } catch {
++      /* callers present errors; retain last good data */
++    } finally {
++      if (controller === current) controller = null;
++      if (visibleRefreshPending && !stopped && !document.hidden) {
++        visibleRefreshPending = false;
++        void run();
++      }
++    }
++  };
++  const visibility = () => {
++    if (document.hidden) controller?.abort();
++    else {
++      if (controller) visibleRefreshPending = true;
++      else void run();
++    }
++  };
++  const timer = window.setInterval(() => void run(), interval);
++  document.addEventListener('visibilitychange', visibility);
++  void run();
++  return () => {
++    stopped = true;
++    window.clearInterval(timer);
++    document.removeEventListener('visibilitychange', visibility);
++    controller?.abort();
++  };
++}
+diff --git a/tests/authDiagnostics.test.tsx b/tests/authDiagnostics.test.tsx
+new file mode 100644
+index 0000000..baf7e7a
+--- /dev/null
++++ b/tests/authDiagnostics.test.tsx
+@@ -0,0 +1,149 @@
++import { expect, test, spyOn } from 'bun:test';
++import { AxiosError, type InternalAxiosRequestConfig } from 'axios';
++import { apiClient } from '../src/services/api/client';
++import {
++  normalizeAuthFileRefreshResults,
++  normalizeAuthFilesResponse,
++} from '../src/services/api/authFiles';
++
++test('aggregate terminal errors are normalized without token fields', () => {
++  const results = normalizeAuthFileRefreshResults({
++    ok: true,
++    results: [
++      {
++        id: 'codex.json',
++        success: false,
++        error_code: 'provider_reauthentication_required',
++        reauth_required: true,
++        reason: 'refresh_token_expired',
++        metadata: { token: 'secret-fixture' },
++      },
++    ],
++  });
++  expect(results).toEqual([{ id: 'codex.json', success: false, reauthRequired: true }]);
++  expect(
++    normalizeAuthFileRefreshResults({
++      ok: true,
++      results: [
++        { id: 'codex.json', success: false, reauth_required: true, reason: 'access_token_expired' },
++      ],
++    })[0].reauthRequired
++  ).toBeUndefined();
++});
++
++test('credential cards require a recognized terminal refresh reason', () => {
++  const files = normalizeAuthFilesResponse({
++    files: [
++      { name: 'terminal.json', reauth_required: true, reauth_reason: 'refresh_token_expired' },
++      { name: 'temporary.json', reauth_required: true, reauth_reason: 'access_token_expired' },
++    ],
++  }).files;
++  expect(files.find((file) => file.name === 'terminal.json')?.reauthRequired).toBe(true);
++  expect(files.find((file) => file.name === 'temporary.json')?.reauthRequired).toBe(false);
++});
++
++test('an in-flight old connection 401 cannot log out a newer connection; current 401 is safely diagnosed once', async () => {
++  const originalWindow = globalThis.window;
++  const target = new EventTarget();
++  globalThis.window = target as unknown as Window & typeof globalThis;
++  let unauthorized = 0;
++  target.addEventListener('unauthorized', () => unauthorized++);
++  const warning = spyOn(console, 'warn').mockImplementation(() => {});
++  // Use the real request/response interceptors with a local adapter: no network traffic.
++  let rejectOld: (() => void) | undefined;
++  let started: (() => void) | undefined;
++  const requestStarted = new Promise<void>((resolve) => {
++    started = resolve;
++  });
++  try {
++    apiClient.setConfig({ apiBase: 'http://fixture-a', managementKey: 'secret-fixture' });
++    const old = apiClient
++      .get('/credentials', {
++        adapter: (config) =>
++          new Promise((_, reject) => {
++            rejectOld = () =>
++              reject(
++                new AxiosError('rejected', 'ERR_BAD_REQUEST', config, undefined, {
++                  status: 401,
++                  data: { error: 'invalid management key' },
++                  headers: {},
++                  config,
++                  statusText: 'Unauthorized',
++                })
++              );
++            started!();
++          }),
++      })
++      .catch(() => {});
++    await requestStarted;
++    apiClient.setConfig({ apiBase: 'http://fixture-b', managementKey: 'other-secret' });
++    apiClient.setConfig({ apiBase: 'http://fixture-a', managementKey: 'secret-fixture' });
++    expect(rejectOld).toBeDefined();
++    rejectOld!();
++    await old;
++    expect(unauthorized).toBe(0);
++    await apiClient.post(
++      '/api-call',
++      {},
++      {
++        adapter: async (config) => ({
++          status: 200,
++          data: { status_code: 401, body: 'provider rejected' },
++          headers: {},
++          config,
++          statusText: 'OK',
++        }),
++      }
++    );
++    await apiClient
++      .post(
++        '/credentials/refresh',
++        {},
++        {
++          adapter: async (config) => {
++            throw new AxiosError('provider expired', 'ERR_BAD_RESPONSE', config, undefined, {
++              status: 500,
++              data: { error: 'provider_reauthentication_required' },
++              headers: {},
++              config,
++              statusText: 'Error',
++            });
++          },
++        }
++      )
++      .catch(() => {});
++    expect(unauthorized).toBe(0);
++    const adapter = async (config: InternalAxiosRequestConfig) => {
++      throw new AxiosError('rejected', 'ERR_BAD_REQUEST', config, undefined, {
++        status: 401,
++        data: { secret: 'body-secret' },
++        headers: {},
++        config,
++        statusText: 'Unauthorized',
++      });
++    };
++    for (let i = 0; i < 2; i++)
++      await apiClient
++        .get('/credentials/download?name=private@example.com&token=query-secret', { adapter })
++        .catch(() => {});
++    expect(unauthorized).toBe(2);
++    expect(warning).toHaveBeenCalledTimes(1);
++    const diagnostic = JSON.stringify(warning.mock.calls);
++    for (const value of ['private@', 'secret', 'Bearer', 'http://fixture'])
++      expect(diagnostic).not.toContain(value);
++    expect(diagnostic).toContain('401');
++  } finally {
++    warning.mockRestore();
++    globalThis.window = originalWindow;
++    apiClient.setConfig({ apiBase: '', managementKey: '' });
++  }
++});
++
++for (const reason of ['refresh_token_expired', 'refresh_token_reused', 'refresh_token_invalidated', 'token_revoked', 'invalid_client']) {
++  test(`terminal renewal reason ${reason} is recognized without propagating credential fields`, () => {
++    const file = normalizeAuthFilesResponse({ files: [{ name: 'codex.json', reauth_required: true, reauth_reason: reason }] }).files[0];
++    expect(file.reauthRequired).toBe(true);
++    const results = normalizeAuthFileRefreshResults({ ok: true, results: [{ id: 'codex.json', success: false, error_code: 'provider_reauthentication_required', reauth_required: true, reason, refresh_token: 'fixture-secret' }] });
++    expect(results).toEqual([{ id: 'codex.json', success: false, reauthRequired: true }]);
++  });
++}
+diff --git a/tests/authFileCooldowns.test.ts b/tests/authFileCooldowns.test.ts
+index 58d2915..9d8244b 100644
+--- a/tests/authFileCooldowns.test.ts
++++ b/tests/authFileCooldowns.test.ts
+@@ -225,7 +225,7 @@ describe('cooldown section rendering', () => {
+ 
+     const available = render(snapshot, { onReset: () => {} });
+     expect(available).toContain(i18n.t('auth_files.cooldown_reset_button'));
+-    expect(available).toContain(i18n.t('auth_files.cooldown_reset_hint'));
++    expect(available).toContain(i18n.t('auth_files.cooldown_reset_hint').replaceAll("'", '&#x27;'));
+     expect(available).not.toContain('disabled=""');
+ 
+     const pending = render(snapshot, { onReset: () => {}, resetting: true });
+diff --git a/tests/claudeOAuthUsage.test.ts b/tests/claudeOAuthUsage.test.ts
+index f407234..12a8efe 100644
+--- a/tests/claudeOAuthUsage.test.ts
++++ b/tests/claudeOAuthUsage.test.ts
+@@ -405,17 +405,16 @@ describe('Claude usage snapshot rendering and retention', () => {
+       new URL('../src/features/authFiles/components/AuthFileQuotaSection.tsx', import.meta.url),
+       'utf8'
+     );
+-    // Idle quota is refreshed via the clickable idle prompt; avoid a duplicate button.
+-    expect(source).toContain("const showRefreshQuotaAction = quotaStatus !== 'idle';");
+-    expect(source).toContain('{showRefreshQuotaAction && (');
++    expect(source).toContain("const showRefreshQuotaAction = quotaStatus !== 'idle' || hasDisplay;");
++    expect(source).toContain('{(showRefreshQuotaAction || resetQuotaAction) && (');
+     expect(source).toContain('<div className={styles.quotaCardActions}>');
+     expect(source).toContain('onClick={() => void refreshQuotaForFile()}');
+-    expect(source).toContain("disabled={!canRefreshQuota || quotaStatus === 'loading'}");
+-    expect(source).toContain("loading={quotaStatus === 'loading'}");
+-    expect(source).toContain("{t('auth_files.quota_refresh_single')}");
+-    expect(source).toContain("if (quota?.status === 'loading' || resettingQuota) return;");
++    expect(source).toContain("disabled={!canRefreshQuota || quotaStatus === 'loading' || isRuntimeOnlyAuthFile(file)}");
++    expect(source).toContain("loading={refreshingQuota || quotaStatus === 'loading'}");
++    expect(source).toContain("{t('auth_files.account_refresh_button')}");
++    expect(source).toContain("if (resettingQuota || pendingRefresh.current) return;");
+     expect(source).toContain(
+-      'const canRefreshQuota = !disableControls && !file.disabled && !resettingQuota;'
++      'const canRefreshQuota = !disableControls && !file.disabled && !resettingQuota && !refreshingQuota;'
+     );
+     expect(source).toContain('{resetQuotaAction}');
+     expect(CLAUDE_CONFIG).not.toHaveProperty('resetQuota');
+diff --git a/tests/codexReconnect.test.ts b/tests/codexReconnect.test.ts
+new file mode 100644
+index 0000000..4813731
+--- /dev/null
++++ b/tests/codexReconnect.test.ts
+@@ -0,0 +1,85 @@
++import { describe, expect, spyOn, test } from 'bun:test';
++import {
++  codexReconnectFailure,
++  makeCodexReconnectTarget,
++  readCodexReconnectTarget,
++} from '../src/features/authFiles/reconnect';
++import { oauthApi } from '../src/services/api/oauth';
++import { apiClient } from '../src/services/api/client';
++
++describe('Codex reconnect identity', () => {
++  const file = { name: 'codex-existing.json', type: 'codex', authIndex: 'stable-index' };
++  test('uses the selected existing identity even when the credential is disabled', () => {
++    expect(makeCodexReconnectTarget({ ...file, disabled: true }, 3)).toEqual({
++      name: file.name,
++      authIndex: 'stable-index',
++      connectionRevision: 3,
++      apiBase: '',
++    });
++  });
++  test('rejects unsupported, runtime-only and unidentified credentials', () => {
++    for (const unsupported of [
++      { ...file, type: 'claude' },
++      { ...file, runtimeOnly: true },
++      { ...file, runtime_only: 'true' },
++      { ...file, authIndex: null },
++      { ...file, name: '../outside.json' },
++    ])
++      expect(makeCodexReconnectTarget(unsupported, 3)).toBeNull();
++  });
++  test('does not reuse a target after a connection change or direct navigation', () => {
++    const target = makeCodexReconnectTarget(file, 3);
++    expect(readCodexReconnectTarget(target, 3)).toEqual(target);
++    expect(readCodexReconnectTarget(target, 4)).toBeNull();
++    expect(readCodexReconnectTarget(target, 3, 'https://other.example.test')).toBeNull();
++    expect(readCodexReconnectTarget(null, 3)).toBeNull();
++    expect(readCodexReconnectTarget({ name: 'a', connectionRevision: 3 }, 3)).toBeNull();
++  });
++});
++
++describe('Codex reconnect API', () => {
++  test('uses an account-bound endpoint and forwards cancellation', async () => {
++    const signal = new AbortController().signal;
++    const get = spyOn(apiClient, 'get').mockResolvedValue({
++      url: 'https://auth.example.test',
++      state: 'fixture-state',
++    });
++    try {
++      await oauthApi.reconnectCodex(
++        { name: 'codex-existing.json', authIndex: 'stable-index' },
++        signal
++      );
++      expect(get).toHaveBeenCalledWith('/credentials/reconnect', {
++        params: { name: 'codex-existing.json', auth_index: 'stable-index', is_webui: true },
++        signal,
++      });
++    } finally {
++      get.mockRestore();
++    }
++  });
++  test('never falls back to creating an account on an older backend', async () => {
++    const error = Object.assign(new Error('not found'), { status: 404 });
++    const get = spyOn(apiClient, 'get').mockRejectedValue(error);
++    try {
++      await expect(
++        oauthApi.reconnectCodex({ name: 'codex-existing.json', authIndex: 'stable-index' })
++      ).rejects.toBe(error);
++      expect(get).toHaveBeenCalledTimes(1);
++    } finally {
++      get.mockRestore();
++    }
++  });
++});
++
++describe('Codex reconnect adoption outcomes', () => {
++  test('requires runtime adoption before claiming success', () => {
++    expect(codexReconnectFailure({ status: 'ok', saved: true, adopted: false, adoption_error: 'Runtime adoption failed' }, 'Reconnect failed')).toBe('Runtime adoption failed');
++    expect(codexReconnectFailure({ status: 'ok', saved: false }, 'Reconnect failed')).toBe('Reconnect failed');
++    expect(codexReconnectFailure({ status: 'ok', saved: true, adopted: true, requires_sign_in: true }, 'Reconnect failed')).toBe('Reconnect failed');
++    expect(codexReconnectFailure({ status: 'ok', verification_error: 'Verification pending' }, 'Reconnect failed')).toBe('Verification pending');
++  });
++  test('accepts successful modern adoption and compatible older status responses', () => {
++    expect(codexReconnectFailure({ status: 'ok', saved: true, adopted: true }, 'Reconnect failed')).toBeUndefined();
++    expect(codexReconnectFailure({ status: 'ok' }, 'Reconnect failed')).toBeUndefined();
++  });
++});
+diff --git a/tests/nativeQuotaObservation.test.tsx b/tests/nativeQuotaObservation.test.tsx
+new file mode 100644
+index 0000000..f4dd769
+--- /dev/null
++++ b/tests/nativeQuotaObservation.test.tsx
+@@ -0,0 +1,170 @@
++import { afterEach, beforeEach, expect, setSystemTime, test } from 'bun:test';
++import { createElement } from 'react';
++import { renderToStaticMarkup } from 'react-dom/server';
++import i18n from '../src/i18n';
++import {
++  observationAge,
++  browserResetDisplay,
++  withQuotaObservation,
++} from '../src/features/quota/observationFormat';
++import { AuthFileObservation } from '../src/features/quota/authFileObservation';
++import { CodexQuotaBody } from '../src/features/quota/providers/codex/CodexQuotaBody';
++import { CODEX_CONFIG } from '../src/features/quota/providers/codex/data';
++import { apiCallApi, type ApiCallResult } from '../src/services/api';
++import type { TFunction } from 'i18next';
++import { CODEX_USAGE_URL, CODEX_RATE_LIMIT_RESET_CREDITS_URL } from '../src/utils/quota';
++import { QUOTA_CLASS_KEYS, type QuotaClassMap } from '../src/features/quota/types';
++import type { CodexQuotaState } from '../src/types';
++
++const originalRequest = apiCallApi.request;
++let originalLanguage: string;
++beforeEach(async () => {
++  originalLanguage = i18n.language;
++  await i18n.changeLanguage('en');
++});
++afterEach(async () => {
++  apiCallApi.request = originalRequest;
++  setSystemTime();
++  await i18n.changeLanguage(originalLanguage);
++});
++
++test('age uses the captured instant, preserves missing observations and clamps future clocks', () => {
++  const captured = '2026-01-01T00:00:00.000Z';
++  const now = Date.parse(captured) + 24_000;
++  expect(observationAge(undefined, now)).toBeNull();
++  expect(observationAge('invalid', now)).toBeNull();
++  expect(observationAge(captured, now)?.compact).toBe(
++    new Intl.NumberFormat(undefined, {
++      style: 'unit',
++      unit: 'second',
++      unitDisplay: 'narrow',
++    }).format(24)
++  );
++  expect(observationAge(captured, now)?.relative).toBe(
++    new Intl.RelativeTimeFormat(undefined, { numeric: 'always' }).format(-24, 'second')
++  );
++  expect(observationAge(captured, now)?.timestamp).toBe(
++    new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'long' }).format(
++      Date.parse(captured)
++    )
++  );
++  expect(observationAge(captured, now + 901_000)?.stale).toBe(true);
++  expect(observationAge(captured, now - 100_000)?.compact).toBe(
++    new Intl.NumberFormat(undefined, {
++      style: 'unit',
++      unit: 'second',
++      unitDisplay: 'narrow',
++    }).format(0)
++  );
++  expect(withQuotaObservation({ capturedAt: captured }, '2026-01-02T00:00:00Z').capturedAt).toBe(
++    captured
++  );
++});
++
++test('reset dates follow browser regional time preferences instead of a cached formatted label', () => {
++  const at = Date.parse('2026-11-02T18:35:00Z');
++  const display = browserResetDisplay('old display', at, at - 86_400_000, 'zh-CN');
++  expect(display?.absolute).toBe(
++    new Intl.DateTimeFormat(undefined, {
++      month: '2-digit',
++      day: '2-digit',
++      hour: '2-digit',
++      minute: '2-digit',
++    }).format(at)
++  );
++  expect(display?.relative).toBe(
++    new Intl.RelativeTimeFormat(undefined, { numeric: 'always' }).format(1, 'day')
++  );
++  expect(browserResetDisplay('unknown instant', null, at)?.absolute).toBe('unknown instant');
++});
++
++test('quota usage capture precedes slower metadata reads and survives later cache access', async () => {
++  const captured = '2026-01-01T00:00:00.000Z';
++  setSystemTime(new Date(captured));
++  apiCallApi.request = async (request) => {
++    if (request.url === CODEX_USAGE_URL)
++      return {
++        statusCode: 200,
++        body: {
++          plan_type: 'pro',
++          credits: { balance: '12.5' },
++          rate_limit: {
++            primary_window: {
++              used_percent: 14,
++              limit_window_seconds: 604800,
++              reset_after_seconds: 3600,
++            },
++          },
++        },
++      } as ApiCallResult;
++    if (request.url === CODEX_RATE_LIMIT_RESET_CREDITS_URL) {
++      setSystemTime(new Date('2026-01-01T00:00:10Z'));
++      return { statusCode: 200, body: { available_count: 1, credits: [] } } as ApiCallResult;
++    }
++    throw new Error('Unexpected fixture request');
++  };
++  const data = await CODEX_CONFIG.fetchQuota(
++    { name: 'fixture.json', auth_index: 'fixture:1', type: 'codex' },
++    ((key: string) => key) as TFunction
++  );
++  const state = CODEX_CONFIG.buildSuccessState(data);
++  expect(state.capturedAt).toBe(captured);
++  expect(state.windows[0].resetAtMs).toBe(Date.parse(captured) + 3600_000);
++  expect(withQuotaObservation(state, new Date().toISOString()).capturedAt).toBe(captured);
++  expect(state.creditBalance).toBe('12.5');
++  expect(CODEX_CONFIG.canResetQuota?.(state)).toBe(true);
++});
++
++test('inline age keeps native plan, credits, manual-reset expiry and provider windows', () => {
++  const classes = Object.fromEntries(
++    QUOTA_CLASS_KEYS.map((key) => [key, key])
++  ) as unknown as QuotaClassMap;
++  const quota: CodexQuotaState = {
++    status: 'success',
++    planType: 'pro',
++    creditBalance: '12.5',
++    subscriptionActiveUntil: '2026-11-01T12:00:00Z',
++    capturedAt: new Date().toISOString(),
++    source: 'provider_query',
++    rateLimitResetCreditsAvailableCount: 1,
++    rateLimitResetCredits: [
++      {
++        id: 'reset',
++        status: 'available',
++        grantedAt: '2026-01-01T00:00:00Z',
++        expiresAt: '2026-10-29T12:00:00Z',
++      },
++    ],
++    windows: [
++      {
++        id: 'weekly',
++        label: 'Weekly limit',
++        usedPercent: 14,
++        resetAtMs: Date.parse('2026-10-09T12:00:00Z'),
++        resetLabel: '',
++        periodHours: 168,
++      },
++    ],
++  };
++  const native = renderToStaticMarkup(createElement(CodexQuotaBody, { quota, classes }));
++  const inline = renderToStaticMarkup(
++    createElement(
++      AuthFileObservation.Provider,
++      { value: quota },
++      createElement(CodexQuotaBody, { quota, classes })
++    )
++  );
++  for (const content of [
++    'Pro 200',
++    '12.5',
++    'Manual resets',
++    'Manual reset expiry',
++    'Weekly limit',
++    '86%',
++  ])
++    expect(inline).toContain(content);
++  expect(inline).toContain('aria-label="Last updated:');
++  expect(native).not.toContain('aria-label="Last updated:');
++  expect(inline).not.toContain('secondary');
++  expect(inline.match(/<svg/g)?.length).toBe(1);
++});
+diff --git a/tests/quotaClassContract.test.ts b/tests/quotaClassContract.test.ts
+index a9a652c..8d723cc 100644
+--- a/tests/quotaClassContract.test.ts
++++ b/tests/quotaClassContract.test.ts
+@@ -27,7 +27,7 @@ describe('quota class contract', () => {
+     test(`${host} gives standalone amounts the same size as quota metadata`, async () => {
+       const css = await readHost(path);
+       const amount = css.match(/\.quotaAmount\s*\{([^}]+)\}/)?.[1] ?? '';
+-      const meta = css.match(/\.quotaMeta\s*\{([^}]+)\}/)?.[1] ?? '';
++      const meta = css.match(/^\.quotaMeta\s*\{([^}]+)\}/m)?.[1] ?? '';
+       const size = amount.match(/font-size:\s*([^;]+);/)?.[1];
+       expect(size).toBeDefined();
+       expect(size).toBe(meta.match(/font-size:\s*([^;]+);/)?.[1]);
+diff --git a/tests/sharedApiKeyNames.test.ts b/tests/sharedApiKeyNames.test.ts
+new file mode 100644
+index 0000000..569a065
+--- /dev/null
++++ b/tests/sharedApiKeyNames.test.ts
+@@ -0,0 +1,133 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test';
++import { createHash } from 'node:crypto';
++import { apiClient } from '../src/services/api/client';
++import {
++  loadApiKeyNameState,
++  loadSharedApiKeyNames,
++  saveSharedApiKeyName,
++  saveApiKeyName,
++  sharedApiKeyFingerprint,
++} from '../src/features/config/apiKeyNames';
++
++const originalGet = apiClient.get;
++const originalCapture = apiClient.captureConnection;
++const originalPatch = apiClient.patch;
++const originalRevision = apiClient.getConnectionRevision;
++const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
++let names: Record<string, string>;
++type NameUpdate = { names: Record<string, string>; only_if_absent?: boolean };
++let writes: NameUpdate[];
++let revision: number;
++beforeEach(() => {
++  apiClient.captureConnection = () => apiClient;
++  names = {};
++  writes = [];
++  revision = 1;
++  const values = new Map<string, string>();
++  Object.defineProperty(globalThis, 'localStorage', {
++    configurable: true,
++    value: {
++      getItem: (key: string) => values.get(key) ?? null,
++      setItem: (key: string, value: string) => values.set(key, value),
++      removeItem: (key: string) => values.delete(key),
++    },
++  });
++  apiClient.getConnectionRevision = () => revision;
++  apiClient.get = (async () => ({ names: { ...names } })) as typeof apiClient.get;
++  apiClient.patch = (async (path: string, body: NameUpdate) => {
++    expect(path).toBe('/access/api-key-names');
++    writes.push(body);
++    for (const [key, value] of Object.entries(body.names))
++      if (!body.only_if_absent || !Object.hasOwn(names, key)) names[key] = value as string;
++    return { names: { ...names } };
++  }) as typeof apiClient.patch;
++});
++afterEach(() => {
++  apiClient.captureConnection = originalCapture;
++  apiClient.get = originalGet;
++  apiClient.patch = originalPatch;
++  apiClient.getConnectionRevision = originalRevision;
++  if (originalStorage) Object.defineProperty(globalThis, 'localStorage', originalStorage);
++  else Reflect.deleteProperty(globalThis, 'localStorage');
++});
++test('fingerprints match CPA and Keeper independently of browser address', () => {
++  expect(sharedApiKeyFingerprint('fixture-key')).toBe(
++    createHash('sha256').update('fixture-key').digest('hex')
++  );
++});
++test('imports missing local names once and preserves shared names and clear tombstones', async () => {
++  for (const key of ['one', 'two', 'three']) saveApiKeyName('server', key, 'Local ' + key);
++  names[sharedApiKeyFingerprint('two')] = 'Shared Team';
++  names[sharedApiKeyFingerprint('three')] = '';
++  const result = await loadSharedApiKeyNames('server', ['one', 'two', 'three']);
++  expect(result[sharedApiKeyFingerprint('one')]).toBe('Local one');
++  expect(result[sharedApiKeyFingerprint('two')]).toBe('Shared Team');
++  expect(result[sharedApiKeyFingerprint('three')]).toBe('');
++  expect(writes).toHaveLength(1);
++  expect(writes[0].only_if_absent).toBe(true);
++  await loadSharedApiKeyNames('server', ['one', 'two', 'three']);
++  expect(writes).toHaveLength(1);
++  expect(JSON.stringify(writes)).not.toContain('"one"');
++});
++test('renames and clears shared names without replacing other keys', async () => {
++  names[sharedApiKeyFingerprint('other')] = 'Other';
++  await saveSharedApiKeyName('one', ' Team ✓ ');
++  expect(names[sharedApiKeyFingerprint('one')]).toBe('Team ✓');
++  await saveSharedApiKeyName('one', '');
++  expect(names[sharedApiKeyFingerprint('one')]).toBe('');
++  expect(names[sharedApiKeyFingerprint('other')]).toBe('Other');
++});
++test('connection changes prevent importing names into another server', async () => {
++  saveApiKeyName('server', 'one', 'Local');
++  apiClient.get = (async () => {
++    revision++;
++    return { names: {} };
++  }) as typeof apiClient.get;
++  await expect(loadSharedApiKeyNames('server', ['one'])).rejects.toThrow('Connection changed');
++  expect(writes).toHaveLength(0);
++});
++test('management failure is surfaced without claiming local save success', async () => {
++  apiClient.patch = (async () => {
++    throw new Error('offline');
++  }) as typeof apiClient.patch;
++  await expect(saveSharedApiKeyName('one', 'Team')).rejects.toThrow('offline');
++});
++
++test('older servers keep browser-local names editable without importing them', async () => {
++  saveApiKeyName('server', 'one', 'Local');
++  apiClient.get = (async () => {
++    throw Object.assign(new Error('not found'), { status: 404 });
++  }) as typeof apiClient.get;
++  const result = await loadApiKeyNameState('server', ['one']);
++  expect(result.shared).toBe(false);
++  expect(result.names[sharedApiKeyFingerprint('one')]).toBe('Local');
++  expect(writes).toHaveLength(0);
++  saveApiKeyName('server', 'one', 'Edited');
++  expect((await loadApiKeyNameState('server', ['one'])).names[sharedApiKeyFingerprint('one')]).toBe(
++    'Edited'
++  );
++});
++
++test('server failures do not downgrade shared metadata to browser-local writes', async () => {
++  apiClient.get = (async () => {
++    throw Object.assign(new Error('unavailable'), { status: 503 });
++  }) as typeof apiClient.get;
++  await expect(loadApiKeyNameState('server', ['one'])).rejects.toThrow('unavailable');
++  expect(writes).toHaveLength(0);
++});
++
++test('late old-server errors after a connection change cannot select local fallback', async () => {
++  apiClient.get = (async () => {
++    revision++;
++    throw Object.assign(new Error('not found'), { status: 404 });
++  }) as typeof apiClient.get;
++  await expect(loadApiKeyNameState('server', ['one'])).rejects.toThrow('Connection changed');
++});
++
++test('late successful writes cannot update a new connection', async () => {
++  apiClient.patch = (async () => {
++    revision++;
++    return { names: {} };
++  }) as typeof apiClient.patch;
++  await expect(saveSharedApiKeyName('one', 'Team')).rejects.toThrow('Connection changed');
++});
+diff --git a/tests/sharedApiKeyNamesConnection.test.ts b/tests/sharedApiKeyNamesConnection.test.ts
+new file mode 100644
+index 0000000..c400920
+--- /dev/null
++++ b/tests/sharedApiKeyNamesConnection.test.ts
+@@ -0,0 +1,54 @@
++import { expect, test } from 'bun:test';
++import axios from 'axios';
++import { apiClient } from '../src/services/api/client';
++import { saveSharedApiKeyName, sharedApiKeyFingerprint } from '../src/features/config/apiKeyNames';
++import { captureCodexReconnectApi } from '../src/services/api/oauth';
++
++test('a shared-name write is pinned before the async Axios request interceptor runs', async () => {
++  const adapter = axios.defaults.adapter;
++  const originalWindow = globalThis.window;
++  globalThis.window = new EventTarget() as unknown as Window & typeof globalThis;
++  const requests: Array<{ baseURL?: string; authorization: unknown }> = [];
++  axios.defaults.adapter = async (config) => {
++    requests.push({ baseURL: config.baseURL, authorization: config.headers.Authorization });
++    return { config, status: 200, statusText: 'OK', headers: {}, data: { names: { [sharedApiKeyFingerprint('synthetic-key')]: 'Team' } } };
++  };
++  try {
++    apiClient.setConfig({ apiBase: 'http://fixture-original', managementKey: 'original-test-key' });
++    const result = saveSharedApiKeyName('synthetic-key', 'Team');
++    apiClient.setConfig({ apiBase: 'http://fixture-other', managementKey: 'other-test-key' });
++    await expect(result).rejects.toThrow('Connection changed');
++    expect(requests).toEqual([{ baseURL: 'http://fixture-original/v8/management', authorization: 'Bearer original-test-key' }]);
++  } finally {
++    axios.defaults.adapter = adapter;
++    globalThis.window = originalWindow;
++    apiClient.setConfig({ apiBase: '', managementKey: '' });
++  }
++});
++
++test('recovery start, callback and cancellation use the connection captured for that attempt', async () => {
++  const adapter = axios.defaults.adapter;
++  const originalWindow = globalThis.window;
++  globalThis.window = new EventTarget() as unknown as Window & typeof globalThis;
++  const requests: Array<{ baseURL?: string; url?: string; authorization: unknown }> = [];
++  axios.defaults.adapter = async (config) => {
++    requests.push({ baseURL: config.baseURL, url: config.url, authorization: config.headers.Authorization });
++    return { config, status: 200, statusText: 'OK', headers: {}, data: { status: 'ok', cancelled: true } };
++  };
++  try {
++    apiClient.setConfig({ apiBase: 'http://fixture-original', managementKey: 'original-test-key' });
++    const recovery = captureCodexReconnectApi();
++    apiClient.setConfig({ apiBase: 'http://fixture-other', managementKey: 'other-test-key' });
++    const signal = new AbortController().signal;
++    await recovery.start({ name: 'existing.json', authIndex: 'stable-index' }, signal);
++    await recovery.status('synthetic-state', signal);
++    await recovery.submit('http://localhost/callback?state=synthetic-state&code=synthetic', signal);
++    await recovery.cancel('synthetic-state', signal);
++    expect(requests.map((request) => request.url)).toEqual(['/credentials/reconnect', '/oauth/status', '/oauth/callback', '/oauth/session']);
++    expect(requests.every((request) => request.baseURL === 'http://fixture-original/v8/management' && request.authorization === 'Bearer original-test-key')).toBe(true);
++  } finally {
++    axios.defaults.adapter = adapter;
++    globalThis.window = originalWindow;
++    apiClient.setConfig({ apiBase: '', managementKey: '' });
++  }
++});
+diff --git a/tests/sharedApiKeyNamesPayload.test.ts b/tests/sharedApiKeyNamesPayload.test.ts
+new file mode 100644
+index 0000000..269cb00
+--- /dev/null
++++ b/tests/sharedApiKeyNamesPayload.test.ts
+@@ -0,0 +1,21 @@
++import { expect, test } from 'bun:test';
++import { normalizeSharedApiKeyNames } from '../src/services/api/apiKeyNames';
++
++test('accepts server tombstones and valid names but rejects malformed metadata', () => {
++  const fingerprint = 'a'.repeat(64);
++  expect(normalizeSharedApiKeyNames({ names: { [fingerprint]: '' } })).toEqual({
++    [fingerprint]: '',
++  });
++  for (const payload of [
++    null,
++    {},
++    { names: [] },
++    { names: { token: 'Name' } },
++    { names: { [fingerprint]: 1 } },
++    { names: { [fingerprint]: 'a'.repeat(129) } },
++    { names: { [fingerprint]: 'hidden\u200bname' } },
++    { names: { [fingerprint]: 'line\nname' } },
++  ]) {
++    expect(() => normalizeSharedApiKeyNames(payload)).toThrow('Invalid key name metadata');
++  }
++});
+diff --git a/tests/trafficNativeQuota.test.tsx b/tests/trafficNativeQuota.test.tsx
+new file mode 100644
+index 0000000..a41f883
+--- /dev/null
++++ b/tests/trafficNativeQuota.test.tsx
+@@ -0,0 +1,81 @@
++import { expect, test } from 'bun:test';
++import { createElement } from 'react';
++import { renderToStaticMarkup } from 'react-dom/server';
++import i18n from '../src/i18n';
++import { mergeTrafficQuota, trafficQuotaWindow, type TrafficQuota } from '../src/features/quota/trafficQuota';
++import { CodexQuotaBody } from '../src/features/quota/providers/codex/CodexQuotaBody';
++import { AuthFileObservation } from '../src/features/quota/authFileObservation';
++import { QUOTA_CLASS_KEYS, type QuotaClassMap } from '../src/features/quota/types';
++import type { CodexQuotaState } from '../src/types';
++import { CODEX_CONFIG } from '../src/features/quota/providers/codex/data';
++
++const t = i18n.getFixedT('en');
++const at = '2026-10-05T10:00:00Z';
++const sample: TrafficQuota = {auth_index:'fixture', provider:'codex',window:'x-codex-primary',observed_at:'2026-10-05T10:00:10Z',source:'websocket_event',headers:{'X-Codex-Primary-Used-Percent':['42'],'X-Codex-Primary-Window-Minutes':['10080'],'X-Codex-Primary-Reset-After-Seconds':['600']}};
++const native: CodexQuotaState = {status:'success',capturedAt:at,source:'provider_query',planType:'pro',creditBalance:'12.5',subscriptionActiveUntil:'2026-11-01T12:00:00Z',rateLimitResetCreditsAvailableCount:2,rateLimitResetCreditsApplicableAvailableCount:1,rateLimitResetCredits:[{id:'credit',status:'available',grantedAt:at,expiresAt:'2026-11-02T12:00:00Z'}],windows:[{id:'weekly',label:'Weekly',labelKey:'codex_quota.secondary_window',usedPercent:10,resetLabel:'old',periodHours:168,resetAtMs:Date.parse(at)+900000},{id:'gpt-reserve-weekly-0',label:'Reserve weekly',usedPercent:0,resetLabel:'-',periodHours:168}]};
++test('traffic updates matching native windows while preserving all account fields, reset eligibility and unrelated limits',()=>{
++ const merged=mergeTrafficQuota('codex',native,[sample],t) as CodexQuotaState;
++ expect(native.windows[0].usedPercent).toBe(10);
++ expect(merged.windows).toHaveLength(2);
++ expect(merged.windows[0]).toMatchObject({id:'weekly',usedPercent:42,capturedAt:sample.observed_at,source:'websocket_event',resetAtMs:Date.parse(sample.observed_at)+600000});
++ expect(merged.windows[1]).toMatchObject({usedPercent:0,capturedAt:at,source:'provider_query'});
++ for(const key of ['planType','creditBalance','subscriptionActiveUntil','rateLimitResetCredits','rateLimitResetCreditsApplicableAvailableCount'] as const) expect(merged[key]).toEqual(native[key]);
++ expect(merged.capturedAt).toBe(at);
++ expect(CODEX_CONFIG.canResetQuota?.(merged)).toBe(true);
++});
++test('late, equal, wrong-provider and invalid observations cannot overwrite native account data',()=>{
++ for(const bad of [{...sample,observed_at:at},{...sample,observed_at:'2026-10-05T09:00:00Z'},{...sample,provider:'claude'},{...sample,headers:{'x-codex-primary-used-percent':['NaN']}},{...sample,observed_at:'invalid'}]) expect(mergeTrafficQuota('codex',native,[bad],t)).toBe(native);
++});
++test('duration identifies a weekly primary; reserve windows match independently of their list index',()=>{
++ const reserve={...sample,window:'x-codex-additional-gpt-reserve-secondary',headers:{'X-Codex-Additional-gpt-reserve-Secondary-Used-Percent':['8'],'X-Codex-Additional-gpt-reserve-Secondary-Window-Minutes':['10080'],'X-Codex-Additional-gpt-reserve-Limit-Name':['gpt-reserve']}};
++ const merged=mergeTrafficQuota('codex',native,[reserve,sample],t) as CodexQuotaState;
++ expect(merged.windows).toHaveLength(2);
++ expect(merged.windows[1]).toMatchObject({id:'gpt-reserve-weekly-0',usedPercent:8});
++ expect(trafficQuotaWindow({...sample,headers:{'x-codex-primary-used-percent':['8']}},t)).toBeNull();
++ expect(trafficQuotaWindow({...sample,headers:{...sample.headers,'X-Codex-Primary-Window-Minutes':['90']}},t)?.label).toBe('90-minute limit');
++});
++test('traffic-only success never invents a plan, credits or reset action; metadata later survives further traffic',()=>{
++ const partial=mergeTrafficQuota('codex',undefined,[sample],t) as CodexQuotaState;
++ expect(partial.status).toBe('success');expect(partial.planType).toBeUndefined();expect(partial.creditBalance).toBeUndefined();
++ expect(CODEX_CONFIG.canResetQuota?.(partial)).toBe(false);
++ expect(partial.windows).toHaveLength(1);
++ const rendered=render(partial,true);
++ expect(rendered).toContain('quotaBar');expect(rendered).not.toContain('codexPlan');
++});
++function render(quota:CodexQuotaState,showAge:boolean){
++ const classes=Object.fromEntries(QUOTA_CLASS_KEYS.map(key=>[key,key])) as unknown as QuotaClassMap;
++ return renderToStaticMarkup(createElement(AuthFileObservation.Provider,{value:{...quota,showAge}},createElement(CodexQuotaBody,{quota,classes})));
++}
++test('native rendering retains metadata and meters; hiding age only removes the refresh icon and age',()=>{
++ const merged=mergeTrafficQuota('codex',native,[sample],t) as CodexQuotaState;
++ const visible=render(merged,true);const hidden=render(merged,false);
++ for(const html of [visible,hidden]){expect(html).toContain('12.5');expect(html).toContain('codexResetCreditRow');expect(html).toContain('58%');expect(html).toContain('quotaBar');expect(html).not.toContain('<progress');}
++ expect(visible).toContain('data-quota-updated');expect(hidden).not.toContain('data-quota-updated');
++});
++test('Claude usage observations preserve account plan and extra usage',()=>{
++ const base={status:'success' as const,capturedAt:at,planType:'plan_max',extraUsage:{is_enabled:true,monthly_limit:20000,used_credits:1200,utilization:6},windows:[{id:'seven-day',label:'Weekly',usedPercent:12,resetLabel:'-',periodHours:168}]};
++ const incoming={...sample,provider:'claude',window:'claude-7d',headers:{'anthropic-ratelimit-unified-7d-utilization':['0.5'],'anthropic-ratelimit-unified-7d-reset':['2026-10-06T10:00:00Z']}};
++ expect(mergeTrafficQuota('claude',base,[incoming],t)).toMatchObject({planType:'plan_max',extraUsage:base.extraUsage,windows:[{id:'seven-day',usedPercent:50}]});
++});
++
++
++test('Claude refresh states retain account balances and unrelated windows during newer traffic', () => {
++  const incoming = { ...sample, provider: 'claude', window: 'claude-7d', headers: {
++    'anthropic-ratelimit-unified-7d-utilization': ['0.5'],
++    'anthropic-ratelimit-unified-7d-reset': ['2026-10-06T10:00:00Z'],
++  } };
++  for (const status of ['loading', 'error'] as const) {
++    const stored = { status, capturedAt: at, planType: 'plan_max',
++      extraUsage: { is_enabled: true, monthly_limit: 20000, used_credits: 1200, utilization: 6 },
++      dollarWindows: [], windows: [
++        { id: 'seven-day', label: 'Weekly', usedPercent: 12, resetLabel: '-', periodHours: 168 },
++        { id: 'five-hour', label: 'Short', usedPercent: 22, resetLabel: '-', periodHours: 5 },
++      ] };
++    const merged = mergeTrafficQuota('claude', stored, [incoming], t);
++    expect(merged).toMatchObject({ status: 'success', planType: 'plan_max',
++      extraUsage: stored.extraUsage, windows: [
++        { id: 'seven-day', usedPercent: 50 }, { id: 'five-hour', usedPercent: 22 },
++      ] });
++    expect(stored.windows[0].usedPercent).toBe(12);
++  }
++});

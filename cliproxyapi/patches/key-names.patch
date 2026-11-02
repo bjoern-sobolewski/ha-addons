@@ -189,7 +189,7 @@ index 00000000..b53f17ed
 +	request(fmt.Sprintf(`{"names":{"%s":"New"}}`, fingerprint), 500)
 +}
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index 25eb1301..bbf1ba32 100644
+index 20db2dd6..22514aef 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
 @@ -18,6 +18,8 @@ func (s *Server) registerManagementV8Routes() {

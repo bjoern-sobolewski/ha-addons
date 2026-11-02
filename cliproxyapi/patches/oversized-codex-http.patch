@@ -237,7 +237,7 @@ index 00000000..7734f2d2
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_websockets_executor.go b/internal/runtime/executor/codex_websockets_executor.go
-index 65ec499c..3029275d 100644
+index b7a2c832..86a59292 100644
 --- a/internal/runtime/executor/codex_websockets_executor.go
 +++ b/internal/runtime/executor/codex_websockets_executor.go
 @@ -75,7 +75,7 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
@@ -355,10 +355,10 @@ index 00000000..f10ad8a7
 +	}
 +}
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
-index 2b5ab5e0..e0c12b41 100644
+index 71b849f9..3cbdd20b 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket.go
-@@ -303,6 +303,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -390,6 +390,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  	wsDone := make(chan struct{})
  	defer close(wsDone)
  	var codexDuplexStream atomic.Bool
@@ -367,7 +367,7 @@ index 2b5ab5e0..e0c12b41 100644
  
  	if h != nil && h.AuthManager != nil {
  		type upstreamDisconnectSubscriber interface {
-@@ -321,7 +323,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -408,7 +410,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  						case <-wsDone:
  							return
  						case disconnectErr := <-disconnectCh:
@@ -376,7 +376,7 @@ index 2b5ab5e0..e0c12b41 100644
  								// Only the selected credential's duplex stream owns closure:
  								// drain its acknowledgements and pending events in order.
  								// OAuth-only steering still leaves API keys in normal mode.
-@@ -391,6 +393,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -478,6 +480,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  	upstreamModeForAuth := func(auth *coreauth.Auth) string {
  		if auth != nil && websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
  			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
@@ -386,7 +386,7 @@ index 2b5ab5e0..e0c12b41 100644
  			if provider == "codex" || provider == "xai" {
  				return responsesWebsocketUpstreamModeWS
  			}
-@@ -507,6 +512,24 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -632,6 +637,24 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  				useUpstreamWebsocketPassthrough = provider == "codex" || provider == "xai"
  			}
  		}
@@ -411,7 +411,7 @@ index 2b5ab5e0..e0c12b41 100644
  		nativeWebsocketPassthrough := !routeOverridesModelResolution && responsesWebsocketNativePassthroughAllowed(
  			upstreamMode,
  			useUpstreamWebsocketPassthrough,
-@@ -661,6 +684,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -786,6 +809,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  			continue
  		}
  
@@ -430,17 +430,17 @@ index 2b5ab5e0..e0c12b41 100644
  		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
  		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
  
-@@ -706,6 +741,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
- 		pinnedAuthAttempted := false
+@@ -833,6 +868,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  		cliCtx, cliCancel := h.GetContextWithCancel(h, c, executionParent)
  		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+ 		cliCtx = cliproxyexecutor.WithWebsocketInputEpoch(cliCtx, &inputEpoch, msgEpoch)
 +		if forceCodexHTTP {
 +			cliCtx = cliproxyexecutor.WithRequiredUpstreamHTTP(cliCtx)
 +		}
  		if duplexInput != nil {
  			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
  			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
-@@ -884,6 +922,10 @@ func responsesWebsocketHTTPReplayRequiredError() error {
+@@ -1059,6 +1097,10 @@ func responsesWebsocketHTTPReplayRequiredError() error {
  	return cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
  }
  

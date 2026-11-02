@@ -2,46 +2,13 @@ FROM alpine:3.20 AS source
 RUN apk add --no-cache git
 WORKDIR /src
 RUN git init && git remote add origin https://github.com/willxup/cpa-usage-keeper.git \
-    && git fetch --depth 1 origin 71a41cc2d1cce8d75b42473adf31f2616ad8085e \
+    && git fetch --depth 1 origin 7b2b670f631335c0e2223af769c5abc04d731d8a \
     && git checkout --detach FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = 71a41cc2d1cce8d75b42473adf31f2616ad8085e
-COPY patches/viewer-quota.patch /tmp/viewer-quota.patch
-RUN git apply --check /tmp/viewer-quota.patch && git apply /tmp/viewer-quota.patch
-COPY patches/read-only-overview.patch /tmp/read-only-overview.patch
-RUN git apply --check /tmp/read-only-overview.patch && git apply /tmp/read-only-overview.patch
+    && test "$(git rev-parse HEAD)" = 7b2b670f631335c0e2223af769c5abc04d731d8a
+# Maintained viewer, quota analytics, shared names and ranking on the frozen v2 main tree.
+COPY patches/ha-v2.patch /tmp/ha-v2.patch
+RUN git apply --check /tmp/ha-v2.patch && git apply /tmp/ha-v2.patch
 
-COPY patches/key-names.patch /tmp/key-names.patch
-RUN git apply --check /tmp/key-names.patch && git apply /tmp/key-names.patch
-COPY patches/persistent-read-only-sessions.patch /tmp/persistent-read-only-sessions.patch
-RUN git apply --check /tmp/persistent-read-only-sessions.patch && git apply /tmp/persistent-read-only-sessions.patch
-COPY patches/overview-refresh.patch /tmp/overview-refresh.patch
-RUN git apply --check /tmp/overview-refresh.patch && git apply /tmp/overview-refresh.patch
-COPY patches/overview-layout.patch /tmp/overview-layout.patch
-RUN git apply --check /tmp/overview-layout.patch && git apply /tmp/overview-layout.patch
-COPY patches/release-review.patch /tmp/release-review.patch
-RUN git apply --check /tmp/release-review.patch && git apply /tmp/release-review.patch
-COPY patches/consolidation.patch /tmp/consolidation.patch
-RUN git apply --check /tmp/consolidation.patch && git apply /tmp/consolidation.patch
-COPY patches/upstream-service-tier.patch /tmp/upstream-service-tier.patch
-RUN git apply --check /tmp/upstream-service-tier.patch && git apply /tmp/upstream-service-tier.patch
-COPY patches/quota-age-clock.patch /tmp/quota-age-clock.patch
-RUN git apply --check /tmp/quota-age-clock.patch && git apply /tmp/quota-age-clock.patch
-COPY patches/weekly-quota-value.patch /tmp/weekly-quota-value.patch
-RUN git apply --check /tmp/weekly-quota-value.patch && git apply /tmp/weekly-quota-value.patch
-COPY patches/weekly-trends.patch /tmp/weekly-trends.patch
-RUN git apply --check /tmp/weekly-trends.patch && git apply /tmp/weekly-trends.patch
-COPY patches/weekly-cycle-rate.patch /tmp/weekly-cycle-rate.patch
-RUN git apply --check /tmp/weekly-cycle-rate.patch && git apply /tmp/weekly-cycle-rate.patch
-COPY patches/account-performance.patch /tmp/account-performance.patch
-RUN git apply --check /tmp/account-performance.patch && git apply /tmp/account-performance.patch
-COPY patches/upstream-compatibility.patch /tmp/upstream-compatibility.patch
-RUN git apply --check /tmp/upstream-compatibility.patch && git apply /tmp/upstream-compatibility.patch
-COPY patches/streaming-speed-selector.patch /tmp/streaming-speed-selector.patch
-RUN git apply --check /tmp/streaming-speed-selector.patch && git apply /tmp/streaming-speed-selector.patch
-COPY patches/analytics-navigation.patch /tmp/analytics-navigation.patch
-RUN git apply --check /tmp/analytics-navigation.patch && git apply /tmp/analytics-navigation.patch
-COPY patches/remaining-history.patch /tmp/remaining-history.patch
-RUN git apply --check /tmp/remaining-history.patch && git apply /tmp/remaining-history.patch
 FROM node:24-alpine AS web-builder
 WORKDIR /src/web
 COPY --from=source /src/web/package*.json ./
@@ -58,11 +25,10 @@ COPY --from=source /src/cmd/ ./cmd/
 COPY --from=source /src/internal/ ./internal/
 COPY --from=source /src/web/static.go ./web/static.go
 COPY --from=web-builder /src/web/dist ./web/dist
-RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/cpa/test ./internal/repository/test ./internal/ranking/test -run "TestSharedKeyName|TestLocalRanking.*Profile" && go test ./internal/app/test ./internal/service/test ./internal/quota ./internal/api/test ./internal/config/test ./internal/auth/test ./internal/quota/test ./internal/cpa/dto/apicall/test
-RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/pricing/test ./internal/entities/test ./internal/repository/test ./internal/repository/migration/test
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=1.15.11-ha.10" -o /out/cpa-usage-keeper ./cmd/server/main.go
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/...
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=2.0.3-main.7b2b670-ha.1" -o /out/cpa-usage-keeper ./cmd/server/main.go
 
-FROM ghcr.io/willxup/cpa-usage-keeper:1.15.11@sha256:e7e295e4c302ba72d170830b6847c879056d52b55bb45fd80e7a1ba22fb87a69
+FROM ghcr.io/willxup/cpa-usage-keeper:2.0.3@sha256:e56daad41fea07eff80045b0efb41f4c80f092ab3e87090a4089e0446cfe6855
 USER root
 RUN apk add --no-cache python3 nginx
 COPY --from=go-builder /out/cpa-usage-keeper /app/cpa-usage-keeper
@@ -71,7 +37,7 @@ COPY run.sh bootstrap.py nginx.conf viewer-locations.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 ENV WORK_DIR=/data TZ=Europe/Berlin
 EXPOSE 8082
-ARG BUILD_VERSION=0.1.36
+ARG BUILD_VERSION=0.2.0
 LABEL io.hass.name="CPA Usage Keeper" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

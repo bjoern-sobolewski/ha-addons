@@ -192,6 +192,13 @@ def main():
             assert request(viewer_gateway + viewer_path + '/api/v1/read-only/key-quota', opener=read_only_opener)[0] == 200
             for secret in (key, management, password, read_only_password, 'fake-upstream-test-key', 'auth_index', 'base_url'):
                 assert secret.encode() not in readonly_body
+            # The v2 startup gate must work through the restricted gateway.
+            startup_url = viewer_gateway + viewer_path + '/api/v1/startup/status'
+            startup_status, startup_body = request(startup_url)
+            assert startup_status == 200 and json.loads(startup_body)['phase'] == 'ready'
+            assert set(json.loads(startup_body)) <= {'phase', 'message', 'progress'}
+            for method in ('HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'):
+                assert request(startup_url, body={}, method=method)[0] == 404
             # The app enforces the role even without the restricted gateway.
             direct_read_only = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
             assert request(keeper + '/api/v1/auth/read-only-login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'password': read_only_password}, opener=direct_read_only)[0] == 204
@@ -226,8 +233,9 @@ def main():
             assert request(names_url, management_auth, body=name_body, method='PATCH')[0] == 200
             eventually(lambda: 'Shared Team' in request(shared_keys_url, opener=read_only_opener)[1].decode())
             print('PASS: shared name import, admin edits, session labels, charts, events, exports, clear tombstones and role isolation', flush=True)
-            for method, path in (('GET', '/usage/overview'), ('GET', '/auth/sessions'), ('PATCH', '/auth-files/status'), ('DELETE', '/auth-files'), ('POST', '/quota/reset'), ('PUT', '/pricing'), ('POST', '/usage/identities/1/stats/reset')):
-                assert request(keeper + '/api/v1' + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={} if method != 'GET' else None, method=method, opener=direct_read_only)[0] == 403
+            for method, path in (('GET', '/usage/overview'), ('GET', '/auth/sessions'), ('PATCH', '/credentials/status'), ('DELETE', '/credentials'), ('POST', '/quota/reset'), ('PUT', '/pricing/models'), ('POST', '/pricing/recalculations'), ('POST', '/usage/identities/1/stats/reset')):
+                status = request(keeper + '/api/v1' + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={} if method != 'GET' else None, method=method, opener=direct_read_only)[0]
+                assert status == 403, (method, path, status)
                 assert request(viewer_gateway + viewer_path + '/api/v1' + path, headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={} if method != 'GET' else None, method=method, opener=read_only_opener)[0] == 404
             for method in ('POST', 'PATCH', 'PUT', 'DELETE'):
                 assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={}, method=method, opener=read_only_opener)[0] == 404

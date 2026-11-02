@@ -43,6 +43,10 @@ for model, mode, small_count, large_count, small_ms, large_ms in [('performance-
             table = 'usage_events_archive' if i % 2 else 'usage_events'
             c.execute('INSERT INTO '+table+' (id,event_key,api_group_key,provider,auth_type,auth_index,model,upstream_service_tier,timestamp,input_tokens,output_tokens,total_tokens,failed,generate,stream,latency_ms,ttft_ms,reasoning_effort,executor_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                       (event_id,'synthetic-performance-'+str(event_id),'synthetic-private-client-key','codex','oauth','synthetic-performance-auth',model,mode,stamp(now-timedelta(hours=1)),input_tokens,100,input_tokens+100,0,1,1,latency,300,'low','codex-websocket'))
+# v2 stores request costs. Explicitly seed the same known one-dollar events;
+# unmatched performance models remain honestly unpriced.
+for table in ('usage_events', 'usage_events_archive'):
+    c.execute('UPDATE '+table+' SET cost_usd=CASE WHEN model="weekly-test-model" THEN 1 ELSE 0 END, cost_available=(model="weekly-test-model")')
 c.commit()
 '''
 

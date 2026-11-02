@@ -1,8 +1,8 @@
 diff --git a/internal/api/handlers/management/auth_files_crud.go b/internal/api/handlers/management/auth_files_crud.go
-index 73476434..df73f160 100644
+index ddecf8ce..8f62d27b 100644
 --- a/internal/api/handlers/management/auth_files_crud.go
 +++ b/internal/api/handlers/management/auth_files_crud.go
-@@ -131,6 +131,8 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
+@@ -140,6 +140,8 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
  
  // Delete auth files: single by name or all
  func (h *Handler) DeleteAuthFile(c *gin.Context) {
@@ -12,10 +12,10 @@ index 73476434..df73f160 100644
  		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
  		return
 diff --git a/internal/api/handlers/management/auth_files_fields.go b/internal/api/handlers/management/auth_files_fields.go
-index 27496777..021ee257 100644
+index 698ed934..47168ba9 100644
 --- a/internal/api/handlers/management/auth_files_fields.go
 +++ b/internal/api/handlers/management/auth_files_fields.go
-@@ -1000,6 +1000,9 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
+@@ -1107,6 +1107,9 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
  				}
  			}
  		}
@@ -26,10 +26,10 @@ index 27496777..021ee257 100644
  			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
  		}
 diff --git a/internal/api/handlers/management/auth_files_provider_oauth.go b/internal/api/handlers/management/auth_files_provider_oauth.go
-index 48fc4ef4..6cc7803e 100644
+index c0bc67de..b40421b3 100644
 --- a/internal/api/handlers/management/auth_files_provider_oauth.go
 +++ b/internal/api/handlers/management/auth_files_provider_oauth.go
-@@ -196,6 +196,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
+@@ -208,6 +208,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
  }
  
  func (h *Handler) RequestCodexToken(c *gin.Context) {
@@ -40,8 +40,19 @@ index 48fc4ef4..6cc7803e 100644
  	ctx := context.Background()
  	ctx = PopulateAuthContext(ctx, c)
  
-@@ -339,9 +343,24 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
- 		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
+@@ -244,6 +248,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
+ 
+ 	RegisterOAuthSessionWithProxy(state, "codex", sessionProxyURL)
+ 	sessionTarget, hasSessionTarget := oauthSessionTargetFromContext(c)
++	if reconnect != nil {
++		sessionTarget = oauthRecoveryTarget{AuthID: reconnect.id, FileName: reconnect.name, Path: reconnect.path, Provider: "codex", AccountID: reconnect.accountID}
++		hasSessionTarget = true
++	}
+ 	if hasSessionTarget {
+ 		SetOAuthSessionTarget(state, sessionTarget)
+ 	}
+@@ -382,9 +390,24 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
+ 		if errGuard := claimOAuthSessionCommit(state, "codex"); errGuard != nil {
  			return
  		}
 -		savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -52,8 +63,8 @@ index 48fc4ef4..6cc7803e 100644
 +		} else {
 +			savedPath, errSave = h.saveTokenRecord(ctx, record)
 +		}
- 		if errSave != nil {
--			SetOAuthSessionError(state, "Failed to save authentication tokens")
+ 		if errSave != nil && strings.TrimSpace(savedPath) == "" {
+-			FailOAuthSessionCommit(state, "Failed to save authentication tokens")
 +			message := "Failed to save authentication tokens"
 +			if reconnect != nil {
 +				message = "Reconnect failed; the existing credential was retained"
@@ -63,7 +74,7 @@ index 48fc4ef4..6cc7803e 100644
 +					message = "Credentials saved, but runtime synchronization failed; reload the credential list"
 +				}
 +			}
-+			SetOAuthSessionError(state, message)
++			FailOAuthSessionCommit(state, message)
  			log.Errorf("Failed to save authentication tokens: %v", errSave)
  			return
  		}
@@ -507,18 +518,18 @@ index 00000000..f67dd5b9
 +	}
 +}
 diff --git a/internal/api/handlers/management/oauth_sessions.go b/internal/api/handlers/management/oauth_sessions.go
-index 336f9bbc..e3e429c6 100644
+index deadf188..8b5925a9 100644
 --- a/internal/api/handlers/management/oauth_sessions.go
 +++ b/internal/api/handlers/management/oauth_sessions.go
-@@ -38,6 +38,7 @@ type oauthSession struct {
- 	Source    string
- 	Metadata  map[string]any
- 	Completed bool
+@@ -72,6 +72,7 @@ type oauthSession struct {
+ 	Completed       bool
+ 	CreatedAt       time.Time
+ 	ExpiresAt       time.Time
 +	Persisted bool
- 	CreatedAt time.Time
- 	ExpiresAt time.Time
  }
-@@ -220,7 +221,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
+ 
+ type oauthSessionStore struct {
+@@ -403,7 +404,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
  	if !ok {
  		return false
  	}
@@ -527,29 +538,29 @@ index 336f9bbc..e3e429c6 100644
  		return false
  	}
  	if provider == "" {
-@@ -243,7 +244,7 @@ func (s *oauthSessionStore) Cancel(state string) bool {
+@@ -425,7 +426,7 @@ func (s *oauthSessionStore) claimCommit(state, provider string) bool {
  
  	s.purgeExpiredLocked(now)
  	session, ok := s.sessions[state]
--	if !ok || session.Completed || session.Status != "" {
-+	if !ok || session.Completed || session.Persisted || session.Status != "" {
+-	if !ok || session.Completed || session.Status != "" || session.Committing || session.SIWCCommitting {
++	if !ok || session.Completed || session.Persisted || session.Status != "" || session.Committing || session.SIWCCommitting {
  		return false
  	}
- 	delete(s.sessions, state)
+ 	if provider != "" && !strings.EqualFold(session.Provider, provider) {
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index bbf1ba32..c2d573a7 100644
+index 22514aef..ba1f836b 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
-@@ -51,6 +51,7 @@ func (s *Server) registerManagementV8Routes() {
- 	v8.PATCH("/credentials/status", s.mgmt.PatchAuthFileStatus)
+@@ -54,6 +54,7 @@ func (s *Server) registerManagementV8Routes() {
  	v8.PATCH("/credentials/fields", s.mgmt.PatchAuthFileFields)
  	v8.POST("/credentials/refresh", s.mgmt.RefreshAuthFiles)
+ 	v8.POST("/credentials/verify", s.mgmt.VerifyAuthFileV8)
 +	v8.GET("/credentials/reconnect", s.mgmt.ReconnectCodexAuthFile)
  	v8.POST("/oauth/import", s.mgmt.ImportOAuthV8)
  	v8.GET("/oauth/auth-url", s.mgmt.StartOAuthV8)
- 	v8.GET("/oauth/status", s.mgmt.GetAuthStatus)
+ 	v8.POST("/oauth/auth-url", s.mgmt.StartOAuthV8)
 diff --git a/internal/api/server_management_v8_test.go b/internal/api/server_management_v8_test.go
-index 09c20b18..9b8a0201 100644
+index b59ad2b0..dc9eeaf9 100644
 --- a/internal/api/server_management_v8_test.go
 +++ b/internal/api/server_management_v8_test.go
 @@ -45,7 +45,7 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
@@ -577,11 +588,11 @@ index 09c20b18..9b8a0201 100644
  				}
  			}
  		})
-@@ -89,6 +94,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
- 		"GET /v0/management/debug", "PUT /v0/management/request-retry", "GET /v0/management/auth-files",
+@@ -90,6 +95,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
  		"GET /v8/management/observability/logs", "GET /v8/management/observability/usage/queue",
- 		"GET /v8/management/credentials", "POST /v8/management/credentials",
+ 		"GET /v8/management/credentials", "POST /v8/management/credentials", "POST /v8/management/credentials/verify",
+ 		"GET /v8/management/oauth/auth-url", "POST /v8/management/oauth/auth-url", "POST /v8/management/oauth/import", "POST /v8/management/oauth/callback",
 +		"GET /v8/management/credentials/reconnect",
- 		"GET /v8/management/oauth/auth-url", "POST /v8/management/oauth/import", "POST /v8/management/oauth/callback",
  		"POST /v8/management/routing/cooldown/reset",
- 		"GET /v8/management/plugins/:id/quota", "POST /v8/management/plugins/:id/quota", "DELETE /v8/management/plugins/:id/quota",
+ 		"POST /v8/management/routing/model-definitions/refresh",
+ 		"POST /v8/management/models/refresh",

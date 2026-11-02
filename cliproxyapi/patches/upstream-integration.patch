@@ -1,0 +1,286 @@
+diff --git a/internal/api/handlers/management/auth_files_reconnect.go b/internal/api/handlers/management/auth_files_reconnect.go
+index 3c8fef03..7f514a2e 100644
+--- a/internal/api/handlers/management/auth_files_reconnect.go
++++ b/internal/api/handlers/management/auth_files_reconnect.go
+@@ -29,10 +29,15 @@ type codexReconnectTarget struct {
+ // ReconnectCodexAuthFile starts a fresh OAuth flow bound to an existing file.
+ // A separate endpoint makes older backends fail safely instead of ignoring the target.
+ func (h *Handler) ReconnectCodexAuthFile(c *gin.Context) {
+-	if h == nil || h.cfg == nil || h.authManager == nil {
++	if h == nil || h.authManager == nil {
+ 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+ 		return
+ 	}
++	cfg := h.configSnapshot()
++	if cfg == nil {
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
++		return
++	}
+ 	name, index := strings.TrimSpace(c.Query("name")), strings.TrimSpace(c.Query("auth_index"))
+ 	if name == "" || index == "" || filepath.Base(name) != name || strings.ContainsAny(name, "/\\") {
+ 		c.JSON(http.StatusBadRequest, gin.H{"error": "an existing credential name and auth_index are required"})
+@@ -47,7 +52,7 @@ func (h *Handler) ReconnectCodexAuthFile(c *gin.Context) {
+ 		c.JSON(http.StatusBadRequest, gin.H{"error": "reconnect supports Codex OAuth files only"})
+ 		return
+ 	}
+-	path, errPath := filepath.Abs(filepath.Join(h.cfg.AuthDir, name))
++	path, errPath := filepath.Abs(filepath.Join(cfg.AuthDir, name))
+ 	if errPath != nil {
+ 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential path"})
+ 		return
+@@ -175,15 +180,22 @@ func (s *atomicCodexReconnectStorage) SaveTokenToFile(path string) error {
+ 	if errClose := file.Close(); errClose != nil {
+ 		return fmt.Errorf("close reconnect credentials: %w", errClose)
+ 	}
+-	_, raw, errRead := readCodexReconnectFile(path)
+-	if errRead != nil || sha256.Sum256(raw) != s.expected {
+-		return errCodexReconnectChanged
+-	}
+-	return persistCodexReconnectSession(s.state, func() error {
+-		if errRename := os.Rename(temporary, path); errRename != nil {
+-			return fmt.Errorf("replace reconnect credentials: %w", errRename)
++	// Match ordinary Codex persistence: refresh and settings writers share this
++	// process/inter-process file lock. Check expected bytes only after acquiring
++	// it, so a renewal cannot slip between the last read and replacement.
++	// Lock order is file then OAuth session; claimOAuthSessionCommit releases
++	// its session lock before calling persistence.
++	return codex.WithFileLock(path, func() error {
++		_, raw, errRead := readCodexReconnectFile(path)
++		if errRead != nil || sha256.Sum256(raw) != s.expected {
++			return errCodexReconnectChanged
+ 		}
+-		return nil
++		return persistCodexReconnectSession(s.state, func() error {
++			if errRename := os.Rename(temporary, path); errRename != nil {
++				return fmt.Errorf("replace reconnect credentials: %w", errRename)
++			}
++			return nil
++		})
+ 	})
+ }
+ 
+diff --git a/internal/api/handlers/management/auth_files_reconnect_test.go b/internal/api/handlers/management/auth_files_reconnect_test.go
+index f67dd5b9..83a7ba73 100644
+--- a/internal/api/handlers/management/auth_files_reconnect_test.go
++++ b/internal/api/handlers/management/auth_files_reconnect_test.go
+@@ -2,6 +2,7 @@ package management
+ 
+ import (
+ 	"context"
++	"crypto/sha256"
+ 	"encoding/json"
+ 	"errors"
+ 	"net/http"
+@@ -86,8 +87,13 @@ func TestCodexReconnectPreservesTrackingIdentityAndSettings(t *testing.T) {
+ 		}
+ 	}
+ 	entries, errList := os.ReadDir(filepath.Dir(path))
+-	if errList != nil || len(entries) != 1 {
+-		t.Fatal("reconnect created an extra file or left temporary credentials")
++	if errList != nil {
++		t.Fatal(errList)
++	}
++	for _, entry := range entries {
++		if entry.Name() != target.name && entry.Name() != target.name+".lock" {
++			t.Fatal("reconnect created an extra file or left temporary credentials")
++		}
+ 	}
+ 	if CancelOAuthSession(state) {
+ 		t.Fatal("cancel reported success after credentials were persisted")
+@@ -219,3 +225,38 @@ func TestCodexReconnectCancellationAtCommit(t *testing.T) {
+ 		t.Fatal("cancelled session committed")
+ 	}
+ }
++
++func TestCodexReconnectSerializesFinalCheckWithRefreshWriter(t *testing.T) {
++	_, target, record, raw, state := reconnectFixture(t)
++	storage := &atomicCodexReconnectStorage{record.Storage.(*codex.CodexTokenStorage), target.path, sha256.Sum256(raw), state}
++	locked, release, writerDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
++	concurrent := []byte(`{"type":"codex","account_id":"account-original","access_token":"renewed-by-concurrent-writer","websockets":true}`)
++	go func() {
++		writerDone <- codex.WithFileLock(target.path, func() error {
++			close(locked)
++			<-release
++			return os.WriteFile(target.path, concurrent, 0600)
++		})
++	}()
++	<-locked
++	reconnectDone := make(chan error, 1)
++	go func() { reconnectDone <- storage.SaveTokenToFile(target.path) }()
++	select {
++	case err := <-reconnectDone:
++		close(release)
++		<-writerDone
++		t.Fatalf("reconnect bypassed credential file lock: %v", err)
++	case <-time.After(50 * time.Millisecond):
++	}
++	close(release)
++	if err := <-writerDone; err != nil {
++		t.Fatal(err)
++	}
++	if err := <-reconnectDone; !errors.Is(err, errCodexReconnectChanged) {
++		t.Fatalf("newer credential was overwritten: %v", err)
++	}
++	after, err := os.ReadFile(target.path)
++	if err != nil || string(after) != string(concurrent) {
++		t.Fatal("concurrent refreshed credential was lost")
++	}
++}
+diff --git a/internal/api/handlers/management/oauth_sessions.go b/internal/api/handlers/management/oauth_sessions.go
+index 8b5925a9..98423d7a 100644
+--- a/internal/api/handlers/management/oauth_sessions.go
++++ b/internal/api/handlers/management/oauth_sessions.go
+@@ -72,7 +72,7 @@ type oauthSession struct {
+ 	Completed       bool
+ 	CreatedAt       time.Time
+ 	ExpiresAt       time.Time
+-	Persisted bool
++	Persisted       bool
+ }
+ 
+ type oauthSessionStore struct {
+@@ -457,7 +457,7 @@ func (s *oauthSessionStore) Cancel(state string) bool {
+ 
+ 	s.purgeExpiredLocked(now)
+ 	session, ok := s.sessions[state]
+-	if !ok || session.Completed || session.Status != "" || session.Committing || session.SIWCCommitting {
++	if !ok || session.Completed || session.Persisted || session.Status != "" || session.Committing || session.SIWCCommitting {
+ 		return false
+ 	}
+ 	if session.SIWC != nil {
+diff --git a/internal/auth/codex/openai_auth.go b/internal/auth/codex/openai_auth.go
+index 931e40ee..6f6d6f36 100644
+--- a/internal/auth/codex/openai_auth.go
++++ b/internal/auth/codex/openai_auth.go
+@@ -347,7 +347,9 @@ func isNonRetryableRefreshErr(err error) bool {
+ 	if err == nil {
+ 		return false
+ 	}
+-	if refreshdiagnostic.Reason(err) != "" { return true }
++	if refreshdiagnostic.Reason(err) != "" {
++		return true
++	}
+ 	raw := strings.ToLower(err.Error())
+ 	for _, token := range []string{
+ 		"refresh_token_reused",
+diff --git a/internal/redisqueue/plugin.go b/internal/redisqueue/plugin.go
+index dff3c706..704808ca 100644
+--- a/internal/redisqueue/plugin.go
++++ b/internal/redisqueue/plugin.go
+@@ -161,7 +161,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
+ 	}
+ 
+ 	upstreamTier := strings.TrimSpace(record.UpstreamServiceTier)
+-	if upstreamTier == "" { upstreamTier = strings.TrimSpace(usageDetail.UpstreamServiceTier) }
++	if upstreamTier == "" {
++		upstreamTier = strings.TrimSpace(usageDetail.UpstreamServiceTier)
++	}
+ 	payload, err := json.Marshal(queuedUsageDetail{
+ 		requestDetail:         detail,
+ 		AccountingVersion:     coreusage.TokenAccountingSchemaVersion,
+diff --git a/internal/redisqueue/plugin_test.go b/internal/redisqueue/plugin_test.go
+index 0b34177f..875c6eba 100644
+--- a/internal/redisqueue/plugin_test.go
++++ b/internal/redisqueue/plugin_test.go
+@@ -982,3 +982,27 @@ func TestUsageQueuePluginPublishesAnthropicStructuredUsageDetails(t *testing.T)
+ 		}
+ 	})
+ }
++
++// The maintained Codex field predates upstream's observed-tier detail. Keep its
++// outgoing intent for historical reports while native effective/response tiers
++// remain distinct, and preserve observed tiers for other upstream providers.
++func TestUsageQueueLegacyOutgoingTierAndNativeTierProvenance(t *testing.T) {
++	for _, legacy := range []string{"priority", ""} {
++		t.Run(legacy, func(t *testing.T) {
++			withEnabledQueue(t, func() {
++				(&usageQueuePlugin{}).HandleUsage(context.Background(), coreusage.Record{
++					Provider: "codex", Model: "test", ServiceTier: "auto", EffectiveServiceTier: "priority", UpstreamServiceTier: legacy, ResponseServiceTier: "default",
++					Detail: coreusage.Detail{TotalTokens: 1, UpstreamServiceTier: "default"},
++				})
++				payload := popSinglePayload(t)
++				want := legacy
++				if want == "" {
++					want = "default"
++				}
++				requireStringField(t, payload, "upstream_service_tier", want)
++				requireStringField(t, payload, "effective_service_tier", "priority")
++				requireStringField(t, payload, "response_service_tier", "default")
++			})
++		})
++	}
++}
+diff --git a/internal/refreshdiagnostic/error.go b/internal/refreshdiagnostic/error.go
+index a32e845a..0319ffd7 100644
+--- a/internal/refreshdiagnostic/error.go
++++ b/internal/refreshdiagnostic/error.go
+@@ -28,7 +28,11 @@ func (e *Error) Error() string {
+ func (e *Error) StatusCode() int { return e.Status }
+ 
+ func IsReason(reason string) bool {
+-	return reason == "refresh_token_expired" || reason == "refresh_token_reused"
++	switch reason {
++	case "refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated", "token_revoked", "invalid_client":
++		return true
++	}
++	return false
+ }
+ 
+ // FromResponse deliberately discards upstream messages and unknown fields.
+diff --git a/internal/refreshdiagnostic/error_test.go b/internal/refreshdiagnostic/error_test.go
+index a6f8d024..b4460765 100644
+--- a/internal/refreshdiagnostic/error_test.go
++++ b/internal/refreshdiagnostic/error_test.go
+@@ -35,3 +35,13 @@ func TestInvalidGrantRemainsClassifiableWithoutLeakingDetails(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// Keep upstream's expanded terminal classification after removing untrusted messages.
++func TestExpandedTerminalReasonsRemainSafeAndClassifiable(t *testing.T) {
++	for _, code := range []string{"refresh_token_invalidated", "token_revoked", "invalid_client"} {
++		err := FromResponse(400, []byte(fmt.Sprintf(`{"error":{"code":%q,"message":"secret@example.test token-secret"}}`, code)))
++		if Reason(err) != code || !strings.Contains(err.Error(), code) || strings.Contains(err.Error(), "secret") {
++			t.Fatalf("terminal classification lost: %v", err)
++		}
++	}
++}
+diff --git a/internal/runtime/executor/helps/usage_helpers.go b/internal/runtime/executor/helps/usage_helpers.go
+index ea187635..8b4c3320 100644
+--- a/internal/runtime/executor/helps/usage_helpers.go
++++ b/internal/runtime/executor/helps/usage_helpers.go
+@@ -62,8 +62,8 @@ type UsageReporter struct {
+ 	ttftStart            time.Time
+ 	ttftSet              bool
+ 	once                 sync.Once
+-	upstreamTierMu sync.RWMutex
+-	upstreamServiceTier string
++	upstreamTierMu       sync.RWMutex
++	upstreamServiceTier  string
+ 
+ 	responseModelMu sync.RWMutex
+ 	// responseModel holds the latest model name reported by the upstream response.
+@@ -711,8 +711,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
+ 		Failed:               failed,
+ 		Fail:                 fail,
+ 		Detail:               detail,
+-	upstreamTierMu sync.RWMutex
+-	upstreamServiceTier string
++		UpstreamServiceTier:  r.UpstreamServiceTier(),
+ 	}
+ }
+ 
+diff --git a/sdk/cliproxy/service_executionregistry_test.go b/sdk/cliproxy/service_executionregistry_test.go
+index dbf92290..800e3e6f 100644
+--- a/sdk/cliproxy/service_executionregistry_test.go
++++ b/sdk/cliproxy/service_executionregistry_test.go
+@@ -1450,7 +1450,8 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
+ 	}
+ 	select {
+ 	case <-secondSubscribe:
+-	case <-time.After(time.Second):
++	// The supervisor retries with up to one second of jitter after heartbeat loss.
++	case <-time.After(5 * time.Second):
+ 		t.Fatal("new subscription did not start while the old scope remained active")
+ 	}
+ 	service.homeMu.Lock()

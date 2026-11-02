@@ -34,6 +34,8 @@ def main():
    eventually(lambda:request(api+'/v1/models',auth)[0]==200)
    docker('start',names['keeper'])
    keeper,gateway=endpoint('keeper',8080),endpoint('keeper',8082)
+   # Docker publishes ports before the gateway finishes starting.
+   eventually(lambda:request(gateway+'/test-quota/')[0]==200)
    body=lambda account:{'model':account+'/quota-test','input':'Reply briefly.','stream':False}
    # Configure WebSocket-capable runtime API credentials in the isolated configuration.
    for account in ('a','b'):

@@ -1,0 +1,257 @@
+diff --git a/src/App.tsx b/src/App.tsx
+index 048f34a..0a857b0 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,6 +1,7 @@
+ import { useEffect } from 'react';
+ import { Outlet, RouterProvider, createHashRouter } from 'react-router-dom';
+ import { LoginPage } from '@/pages/LoginPage';
++import { RouteErrorPage } from '@/pages/RouteErrorPage';
+ import { NotificationContainer } from '@/components/common/NotificationContainer';
+ import { ConfirmationModal } from '@/components/common/ConfirmationModal';
+ import { LoginRevealVeil } from '@/components/common/LoginRevealVeil';
+@@ -37,6 +38,7 @@ const devPreviewRoutes = import.meta.env.DEV
+ const router = createHashRouter([
+   {
+     element: <RootShell />,
++    errorElement: <RouteErrorPage />,
+     children: [
+       ...devPreviewRoutes,
+       { path: '/login', element: <LoginPage /> },
+diff --git a/src/features/quota/trafficQuota.ts b/src/features/quota/trafficQuota.ts
+index 5ca6723..9ed9028 100644
+--- a/src/features/quota/trafficQuota.ts
++++ b/src/features/quota/trafficQuota.ts
+@@ -13,7 +13,7 @@ export interface TrafficQuota {
+   auth_index: string;
+   provider: string;
+   window: string;
+-  headers: Record<string, string[]>;
++  headers: Record<string, string[]> | null;
+   observed_at: string;
+   source: string;
+  reset_credits_available_count?: number;
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index 64a303e..e308f73 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -2469,5 +2469,11 @@
+     "scheduled": "Scheduled provider query",
+     "provider": "Provider quota query",
+     "custom_window": "{{name}}{{minutes}}-minute limit"
++  },
++  "route_error": {
++    "title": "This page could not load",
++    "description": "An unexpected error interrupted this page. Reload it to try again, or return to the dashboard.",
++    "reload": "Reload page",
++    "dashboard": "Go to dashboard"
+   }
+ }
+diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
+index be90c22..c74702a 100644
+--- a/src/i18n/locales/ko.json
++++ b/src/i18n/locales/ko.json
+@@ -2469,5 +2469,11 @@
+     "scheduled": "예약된 제공업체 조회",
+     "provider": "제공업체 할당량 조회",
+     "custom_window": "{{name}}{{minutes}}분 한도"
++  },
++  "route_error": {
++    "title": "이 페이지를 불러올 수 없습니다",
++    "description": "예기치 않은 오류가 발생했습니다. 페이지를 새로고침하거나 대시보드로 돌아가세요.",
++    "reload": "페이지 새로고침",
++    "dashboard": "대시보드로 이동"
+   }
+ }
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index 280e74d..7dea593 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -2463,5 +2463,11 @@
+     "scheduled": "Плановый запрос провайдера",
+     "provider": "Запрос квоты провайдера",
+     "custom_window": "{{name}}Лимит на {{minutes}} минут"
++  },
++  "route_error": {
++    "title": "Не удалось загрузить страницу",
++    "description": "На странице произошла непредвиденная ошибка. Перезагрузите её или вернитесь на панель управления.",
++    "reload": "Перезагрузить страницу",
++    "dashboard": "На панель управления"
+   }
+ }
+diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
+index 7bd2557..e0ae413 100644
+--- a/src/i18n/locales/tr.json
++++ b/src/i18n/locales/tr.json
+@@ -2469,5 +2469,11 @@
+     "scheduled": "Zamanlanmış sağlayıcı sorgusu",
+     "provider": "Sağlayıcı kota sorgusu",
+     "custom_window": "{{name}}{{minutes}} dakikalık limit"
++  },
++  "route_error": {
++    "title": "Bu sayfa yüklenemedi",
++    "description": "Beklenmeyen bir hata bu sayfayı kesintiye uğrattı. Yeniden denemek için sayfayı yenileyin veya kontrol paneline dönün.",
++    "reload": "Sayfayı yenile",
++    "dashboard": "Kontrol paneline git"
+   }
+ }
+diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
+index 5f4119c..0011d55 100644
+--- a/src/i18n/locales/vi.json
++++ b/src/i18n/locales/vi.json
+@@ -2475,5 +2475,11 @@
+     "scheduled": "Truy vấn nhà cung cấp theo lịch",
+     "provider": "Truy vấn hạn mức nhà cung cấp",
+     "custom_window": "Giới hạn {{name}}{{minutes}} phút"
++  },
++  "route_error": {
++    "title": "Không thể tải trang này",
++    "description": "Đã xảy ra lỗi ngoài dự kiến. Hãy tải lại trang để thử lại hoặc quay về bảng điều khiển.",
++    "reload": "Tải lại trang",
++    "dashboard": "Về bảng điều khiển"
+   }
+ }
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index 20ebf54..e597a3f 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -2467,5 +2467,11 @@
+     "scheduled": "定时提供商查询",
+     "provider": "提供商配额查询",
+     "custom_window": "{{name}}{{minutes}} 分钟限额"
++  },
++  "route_error": {
++    "title": "无法加载此页面",
++    "description": "发生意外错误。请重新加载页面，或返回仪表盘。",
++    "reload": "重新加载页面",
++    "dashboard": "返回仪表盘"
+   }
+ }
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index 1df37a2..139dd5e 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -2495,5 +2495,11 @@
+     "scheduled": "排程提供者查詢",
+     "provider": "提供者配額查詢",
+     "custom_window": "{{name}}{{minutes}} 分鐘限額"
++  },
++  "route_error": {
++    "title": "無法載入此頁面",
++    "description": "發生未預期的錯誤。請重新載入頁面，或返回儀表板。",
++    "reload": "重新載入頁面",
++    "dashboard": "返回儀表板"
+   }
+ }
+diff --git a/src/pages/RouteErrorPage.module.scss b/src/pages/RouteErrorPage.module.scss
+new file mode 100644
+index 0000000..ed894bf
+--- /dev/null
++++ b/src/pages/RouteErrorPage.module.scss
+@@ -0,0 +1,21 @@
++.page {
++  min-height: 100dvh;
++  display: grid;
++  place-items: center;
++  padding: 24px;
++  color: var(--text-primary);
++  background: var(--bg-secondary);
++}
++
++.card {
++  width: min(100%, 36rem);
++  padding: 32px;
++  border: 1px solid var(--border-color);
++  border-radius: 16px;
++  background: var(--bg-primary);
++
++  h1 { margin: 0 0 12px; font-size: 24px; }
++  p { margin: 0; color: var(--text-secondary); line-height: 1.6; }
++}
++
++.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+diff --git a/src/pages/RouteErrorPage.tsx b/src/pages/RouteErrorPage.tsx
+new file mode 100644
+index 0000000..78a8f68
+--- /dev/null
++++ b/src/pages/RouteErrorPage.tsx
+@@ -0,0 +1,23 @@
++import { Link } from 'react-router-dom';
++import { useTranslation } from 'react-i18next';
++import { Button } from '@/components/ui/Button';
++import styles from './RouteErrorPage.module.scss';
++
++/** Recover from unexpected route failures without exposing response data or stacks. */
++export function RouteErrorPage() {
++  const { t } = useTranslation();
++  return (
++    <main className={styles.page}>
++      <section className={styles.card} role="alert" aria-labelledby="route-error-title">
++        <h1 id="route-error-title">{t('route_error.title')}</h1>
++        <p>{t('route_error.description')}</p>
++        <div className={styles.actions}>
++          <Button type="button" onClick={() => window.location.reload()}>
++            {t('route_error.reload')}
++          </Button>
++          <Link className="btn btn-secondary" to="/">{t('route_error.dashboard')}</Link>
++        </div>
++      </section>
++    </main>
++  );
++}
+diff --git a/tests/routeErrorPage.test.tsx b/tests/routeErrorPage.test.tsx
+new file mode 100644
+index 0000000..a69469c
+--- /dev/null
++++ b/tests/routeErrorPage.test.tsx
+@@ -0,0 +1,30 @@
++import { expect, test } from 'bun:test';
++import { createElement } from 'react';
++import { renderToStaticMarkup } from 'react-dom/server';
++import { createMemoryRouter, RouterProvider } from 'react-router-dom';
++import i18n from '../src/i18n';
++import { RouteErrorPage } from '../src/pages/RouteErrorPage';
++
++test('route failures show recovery actions without leaking error text, stacks or credentials', async () => {
++ await i18n.changeLanguage('en');
++ const router = createMemoryRouter([{
++  errorElement: createElement(RouteErrorPage),
++  children: [
++   { path: '/auth-files', loader: () => { throw new Error('sensitive-response-fixture'); } },
++   { path: '/', element: createElement('p', null, 'Dashboard') },
++  ],
++ }], { initialEntries: ['/auth-files'] });
++ if (!router.state.initialized) await new Promise<void>((resolve) => {
++  const stop = router.subscribe((state) => { if (state.initialized) { stop(); resolve(); } });
++ });
++ const html = renderToStaticMarkup(createElement(RouterProvider, { router }));
++ expect(html).toContain('This page could not load');
++ expect(html).toContain('Reload page');
++ expect(html).toContain('href="/"');
++ expect(html).toContain('Go to dashboard');
++ expect(html).not.toContain('sensitive-response-fixture');
++ expect(html).not.toContain('Unexpected Application Error');
++ await router.navigate('/');
++ expect(router.state.errors).toBeNull();
++ router.dispose();
++});
+diff --git a/tests/trafficNativeQuota.test.tsx b/tests/trafficNativeQuota.test.tsx
+index c293fcc..057c7df 100644
+--- a/tests/trafficNativeQuota.test.tsx
++++ b/tests/trafficNativeQuota.test.tsx
+@@ -86,3 +86,15 @@ test('cached reset credits update independently, retain zero, reject invalid/old
+  expect(merged.rateLimitResetCreditsAvailableCount).toBe(0);expect(merged.planType).toBe(native.planType);expect(merged.windows).toEqual(native.windows.map(window=>({...window,capturedAt:native.capturedAt,source:native.source})));
+  for(const bad of [{...credit,observed_at:'invalid'},{...credit,observed_at:'2026-10-05T09:00:00Z'},{...credit,reset_credits_available_count:-1}])expect(mergeTrafficQuota('codex',native,[bad],t)).toBe(native);
+ });
++
++
++test('null-header credit snapshots cannot crash auth files or replace measured quota windows', () => {
++ const credit: TrafficQuota = { ...sample, window: 'reset-credits', headers: null, reset_credits_available_count: 3 };
++ expect(trafficQuotaWindow(credit, t)).toBeNull();
++ const merged = mergeTrafficQuota('codex', native, [credit, sample], t) as CodexQuotaState;
++ expect(merged.rateLimitResetCreditsAvailableCount).toBe(3);
++ expect(merged.windows[0].usedPercent).toBe(42);
++ expect(render(merged, true)).toContain('58%');
++ const noCredit = { ...credit, reset_credits_available_count: undefined };
++ expect(mergeTrafficQuota('codex', native, [noCredit], t)).toBe(native);
++});

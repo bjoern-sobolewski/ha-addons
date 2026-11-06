@@ -61,6 +61,26 @@ async function until(check, label, timeout=45000) {const end=Date.now()+timeout;
  await panel.locator('[data-usage-total]').first().scrollIntoViewIfNeeded();await pause(500);
  await panel.screenshot({path:'/output/cpamc-providers.png',fullPage:true});
  console.log('CPAMC visible graph buckets: '+await panel.locator('[data-usage-total]').count());
+ // Older backends and cached observations may contain credit-only null headers.
+ let nullHeadersInjected=false;
+ const observationFixture=await (await fetch(f.private+'/v8/management/quota/observations',{headers:{Authorization:'Bearer '+f.management}})).json();
+ const quotaAccount=observationFixture.items.find(item=>item.provider==='codex');assert(quotaAccount,'synthetic quota account');
+ await panel.route('**/v8/management/credentials',route=>route.fulfill({json:{files:[{name:'synthetic-oauth.json',type:'codex',provider:'codex',auth_type:'oauth',auth_index:quotaAccount.auth_index,status:'active',disabled:false,runtime_only:false,supports_quota:true}]}}));
+ await panel.route('**/v8/management/quota/observations',async route=>{
+  const response=await route.fetch();const body=await response.json();
+  const account=body.items?.find(item=>item.provider==='codex');
+  if(account){body.items.push({...account,window:'reset-credits',headers:null,observed_at:new Date().toISOString(),reset_credits_available_count:3});nullHeadersInjected=true;}
+  await route.fulfill({response,json:body});
+ });
+ await panel.goto(f.private+'/management.html#/auth-files');
+ await traffic(); // Publish a fresh quota observation after installing the response fixture.
+ await until(()=>nullHeadersInjected,'null-header observation fixture');
+ await panel.locator('[data-quota-updated]').first().waitFor();
+ assert.equal(await panel.getByText('Unexpected Application Error!',{exact:true}).count(),0,'auth-files crashed on null headers');
+ assert.equal(await panel.getByText('This page could not load',{exact:true}).count(),0,'null headers should render normally');
+ await panel.screenshot({path:'/output/cpamc-auth-files-null-headers.png',fullPage:true});
+ console.log('PASS: CPAMC auth-files renders cached null-header credit observations without a crash');
+
  await page.setViewportSize({width:390,height:844});await page.goto(f.keeper+'/ai-provider');await page.locator('[data-usage-total]').first().waitFor();await pause(1000);
  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),'mobile horizontal overflow');
  await page.screenshot({path:'/output/keeper-usage-mobile.png',fullPage:true});

@@ -1,0 +1,46 @@
+diff --git a/internal/quotatraffic/reset_credits.go b/internal/quotatraffic/reset_credits.go
+index be384759..f02ea5fb 100644
+--- a/internal/quotatraffic/reset_credits.go
++++ b/internal/quotatraffic/reset_credits.go
+@@ -2,8 +2,10 @@ package quotatraffic
+ 
+ import (
+ 	"encoding/json"
+-	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
++	"net/http"
+ 	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
+ )
+ 
+ func CaptureResetCredits(index string, body []byte, at time.Time, source string) {
+@@ -34,7 +36,7 @@ func CaptureResetCredits(index string, body []byte, at time.Time, source string)
+ 		return
+ 	}
+ 	value := *count
+-	cache.items[key] = Observation{AuthIndex: index, Provider: "codex", Window: "reset-credits", ObservedAt: at, Source: source, ResetCreditsAvailableCount: &value}
++	cache.items[key] = Observation{AuthIndex: index, Provider: "codex", Window: "reset-credits", Headers: http.Header{}, ObservedAt: at, Source: source, ResetCreditsAvailableCount: &value}
+ 	cache.Unlock()
+ 	live.Default.Publish("quota")
+ }
+diff --git a/internal/quotatraffic/reset_credits_test.go b/internal/quotatraffic/reset_credits_test.go
+index fa17e84a..0bafb883 100644
+--- a/internal/quotatraffic/reset_credits_test.go
++++ b/internal/quotatraffic/reset_credits_test.go
+@@ -22,7 +22,16 @@ func TestResetCreditsAreNumericScopedAndMonotonic(t *testing.T) {
+ 	if len(rows) != 1 || rows[0].ResetCreditsAvailableCount == nil || *rows[0].ResetCreditsAvailableCount != 3 {
+ 		t.Fatalf("bad count: %+v", rows)
+ 	}
++	// Older management clients enumerate headers without a null guard.
++	// Credit-only observations must preserve the existing object contract.
++	if rows[0].Headers == nil {
++		t.Fatal("credit-only observation has nil headers")
++	}
+ 	body, _ := json.Marshal(rows)
++	var wire []map[string]json.RawMessage
++	if err := json.Unmarshal(body, &wire); err != nil || string(wire[0]["headers"]) != "{}" {
++		t.Fatal("credit-only headers must serialize as an empty object")
++	}
+ 	if strings.Contains(string(body), "never-copy") {
+ 		t.Fatal("raw provider data leaked")
+ 	}

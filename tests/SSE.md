@@ -21,3 +21,5 @@ Build the browser runner and include the real Chromium checks:
     SSE_BROWSER=1 CPA_QUOTA_IMAGE=ha-cpa-sse:local KEEPER_QUOTA_IMAGE=ha-keeper-sse:local python tests/quota_flow.py
 
 Browser checks cover all Keeper reporting tabs, credential volume bars and the open account popup, CPAMC dashboard and provider graphs, preserved chart/bar DOM nodes, mobile overflow, and idle provider traffic. Screenshots and browser results are written under ignored .test-data/sse-20261106/browser.
+
+The browser fixture also renders an OAuth Auth Files card with a credit-only observation whose headers are null. This checks compatibility with older snapshot payloads without changing production accounts. The frontend suite verifies route error recovery, safe error text, and dashboard navigation; backend tests ensure credit-only observations serialize headers as an empty object for cached older clients.

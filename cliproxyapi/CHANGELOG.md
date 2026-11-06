@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.19
+
+- Preserve object-shaped headers on credit-only quota observations for older cached management clients; explicitly cover null-header account rendering.
+- Replace the default React Router crash screen with safe reload/dashboard recovery actions.
+
 ## 0.1.18
 
 - Centralize Codex/Claude quota resets in the v8 Management API with provider eligibility checks, explicit grant/credit support, durable request replay protection and cooldown recovery. Keep automatic OpenAI credit selection as the default.

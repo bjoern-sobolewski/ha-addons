@@ -1,5 +1,5 @@
 name: CLIProxyAPI
-version: "0.1.17"
+version: "0.1.18"
 slug: cliproxyapi
 description: AI API proxy with a separate API-only gateway for Cloudflare Tunnel
 url: https://github.com/bjoern-sobolewski/ha-addons/tree/main/cliproxyapi

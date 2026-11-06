@@ -1,0 +1,894 @@
+diff --git a/internal/api/account_performance.go b/internal/api/account_performance.go
+index 44f1e609..1ef33929 100644
+--- a/internal/api/account_performance.go
++++ b/internal/api/account_performance.go
+@@ -17,6 +17,9 @@ type accountPerformanceProvider interface {
+ }
+ 
+ func accountPerformanceRequest(c *gin.Context, authIndex string) (repository.PerformanceQuery, error) {
++	return performanceRequest(c, authIndex, "")
++}
++func performanceRequest(c *gin.Context, authIndex, provider string) (repository.PerformanceQuery, error) {
+ 	days := 30
+ 	if value, ok := c.GetQuery("days"); ok {
+ 		n, err := strconv.Atoi(value)
+@@ -26,7 +29,7 @@ func accountPerformanceRequest(c *gin.Context, authIndex string) (repository.Per
+ 		days = n
+ 	}
+ 	metric := c.DefaultQuery("metric", "latency")
+-	q := repository.PerformanceQuery{AuthIndex: authIndex, Days: days, Metric: metric, Models: c.QueryArray("model"), Mode: c.Query("mode"), Context: c.Query("context"), Output: c.Query("output"), Effort: c.Query("effort")}
++	q := repository.PerformanceQuery{AuthIndex: authIndex, Provider: provider, Days: days, Metric: metric, Models: c.QueryArray("model"), Mode: c.Query("mode"), Context: c.Query("context"), Output: c.Query("output"), Effort: c.Query("effort")}
+ 	return q, repository.ValidatePerformanceQuery(q)
+ }
+ func serveAccountPerformance(c *gin.Context, provider QuotaProvider, authIndex string) {
+@@ -56,6 +59,7 @@ func serveAccountPerformance(c *gin.Context, provider QuotaProvider, authIndex s
+ 	c.JSON(200, report)
+ }
+ func registerAccountPerformanceRoutes(router gin.IRoutes, provider QuotaProvider) {
++	registerProviderStatsRoutes(router, provider)
+ 	router.GET("/quota/performance/:auth_index", func(c *gin.Context) { serveAccountPerformance(c, provider, strings.TrimSpace(c.Param("auth_index"))) })
+ }
+ func registerReadOnlyPerformanceRoutes(group *gin.RouterGroup, identities service.UsageIdentityProvider, provider QuotaProvider) {
+diff --git a/internal/api/cost_read_routes.go b/internal/api/cost_read_routes.go
+index da2415a5..4414fde2 100644
+--- a/internal/api/cost_read_routes.go
++++ b/internal/api/cost_read_routes.go
+@@ -34,7 +34,7 @@ func isCostReadRoute(method, path string) bool {
+ 	switch method {
+ 	case http.MethodGet:
+ 		switch path {
+-		case "/api/v1/read-only/overview", "/api/v1/read-only/key-overview", "/api/v1/read-only/key-overview/comparisons", "/api/v1/read-only/key-overview/realtime", "/api/v1/read-only/key-analysis", "/api/v1/read-only/events", "/api/v1/read-only/events/export", "/api/v1/read-only/accounts", "/api/v1/read-only/accounts/:id", "/api/v1/read-only/accounts/:id/weekly-quota", "/api/v1/usage/overview", "/api/v1/usage/overview/comparisons", "/api/v1/usage/overview/realtime",
++		case "/api/v1/quota/providers/:provider/stats", "/api/v1/read-only/overview", "/api/v1/read-only/key-overview", "/api/v1/read-only/key-overview/comparisons", "/api/v1/read-only/key-overview/realtime", "/api/v1/read-only/key-analysis", "/api/v1/read-only/events", "/api/v1/read-only/events/export", "/api/v1/read-only/accounts", "/api/v1/read-only/accounts/:id", "/api/v1/read-only/accounts/:id/weekly-quota", "/api/v1/usage/overview", "/api/v1/usage/overview/comparisons", "/api/v1/usage/overview/realtime",
+ 			"/api/v1/usage/analysis", "/api/v1/usage/events", "/api/v1/usage/events/export",
+ 			"/api/v1/key-overview", "/api/v1/key-overview/comparisons", "/api/v1/key-overview/realtime",
+ 			"/api/v1/key-analysis", "/api/v1/quota/history/:auth_index", "/api/v1/quota/refresh/:auth_index":
+diff --git a/internal/api/provider_stats.go b/internal/api/provider_stats.go
+new file mode 100644
+index 00000000..7db766e6
+--- /dev/null
++++ b/internal/api/provider_stats.go
+@@ -0,0 +1,66 @@
++package api
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/quota"
++	"cpa-usage-keeper/internal/repository"
++	"errors"
++	"github.com/gin-gonic/gin"
++)
++
++type providerStatsReader interface {
++	ListStatsProviders(context.Context) ([]string, error)
++	GetProviderStats(context.Context, repository.PerformanceQuery) (repository.ProviderStats, error)
++	GetProviderPerformance(context.Context, repository.PerformanceQuery) (repository.PerformanceReport, error)
++}
++
++// Registered only behind the LAN administrator authentication boundary.
++func registerProviderStatsRoutes(router gin.IRoutes, provider QuotaProvider) {
++	router.GET("/quota/providers", func(c *gin.Context) {
++		setNoStoreHeaders(c)
++		reader, ok := provider.(providerStatsReader)
++		if !ok {
++			c.JSON(503, gin.H{"error": "Provider statistics unavailable"})
++			return
++		}
++		providers, err := reader.ListStatsProviders(c.Request.Context())
++		if err != nil {
++			writeInternalError(c, "Provider statistics unavailable", err)
++			return
++		}
++		c.JSON(200, gin.H{"providers": providers})
++	})
++	serve := func(c *gin.Context, performance bool) {
++		setNoStoreHeaders(c)
++		reader, ok := provider.(providerStatsReader)
++		if !ok {
++			c.JSON(503, gin.H{"error": "Provider statistics unavailable"})
++			return
++		}
++		request, err := performanceRequest(c, "", c.Param("provider"))
++		if err != nil {
++			c.JSON(400, gin.H{"error": "Invalid provider filter"})
++			return
++		}
++		var result any
++		if performance {
++			result, err = reader.GetProviderPerformance(c.Request.Context(), request)
++		} else {
++			result, err = reader.GetProviderStats(c.Request.Context(), request)
++		}
++		if err != nil {
++			switch {
++			case errors.Is(err, quota.ErrNotFound):
++				c.JSON(404, gin.H{"error": "Provider not found"})
++			case errors.Is(err, quota.ErrValidation):
++				c.JSON(400, gin.H{"error": "Invalid provider filter"})
++			default:
++				writeInternalError(c, "Provider statistics unavailable", err)
++			}
++			return
++		}
++		c.JSON(200, result)
++	}
++	router.GET("/quota/providers/:provider/stats", func(c *gin.Context) { serve(c, false) })
++	router.GET("/quota/providers/:provider/performance", func(c *gin.Context) { serve(c, true) })
++}
+diff --git a/internal/api/test/cost_read_gate_test.go b/internal/api/test/cost_read_gate_test.go
+index 4f2e6a63..8be9e1da 100644
+--- a/internal/api/test/cost_read_gate_test.go
++++ b/internal/api/test/cost_read_gate_test.go
+@@ -56,6 +56,7 @@ func TestCostReadRoutesRespectAuthAndExactFeeScope(t *testing.T) {
+ 		{"read-only events", http.MethodGet, "/read-only/events", readOnly},
+ 		{"read-only export", http.MethodGet, "/read-only/events/export?format=csv", readOnly},
+ 		{"read-only weekly value", http.MethodGet, "/read-only/accounts/1/weekly-quota", readOnly},
++		{"provider value", http.MethodGet, "/quota/providers/codex/stats", admin},
+ 		{"overview", http.MethodGet, "/usage/overview", admin},
+ 		{"comparisons", http.MethodGet, "/usage/overview/comparisons", admin},
+ 		{"realtime", http.MethodGet, "/usage/overview/realtime", admin},
+diff --git a/internal/api/test/provider_stats_test.go b/internal/api/test/provider_stats_test.go
+new file mode 100644
+index 00000000..7ea956ef
+--- /dev/null
++++ b/internal/api/test/provider_stats_test.go
+@@ -0,0 +1,67 @@
++package test
++
++import (
++	"context"
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/quota"
++	"cpa-usage-keeper/internal/repository"
++	"net/http"
++	"testing"
++	"time"
++)
++
++type providerStatsStub struct {
++	quotaProviderStub
++	request repository.PerformanceQuery
++	err     error
++}
++
++func (p *providerStatsStub) ListStatsProviders(context.Context) ([]string, error) {
++	return []string{"codex", "claude"}, p.err
++}
++func (p *providerStatsStub) GetProviderStats(_ context.Context, q repository.PerformanceQuery) (repository.ProviderStats, error) {
++	p.request = q
++	return repository.ProviderStats{Provider: q.Provider}, p.err
++}
++func (p *providerStatsStub) GetProviderPerformance(_ context.Context, q repository.PerformanceQuery) (repository.PerformanceReport, error) {
++	p.request = q
++	return repository.PerformanceReport{Metric: q.Metric}, p.err
++}
++func TestProviderStatsRoutesValidateFiltersAndStayAdminOnly(t *testing.T) {
++	sessions := auth.NewSessionManager(time.Hour)
++	cfg := AuthConfig{Enabled: true, LoginPassword: "admin", ReadOnlyPassword: "synthetic-read-only-password"}
++	provider := &providerStatsStub{}
++	router := NewRouter(nil, nil, nil, nil, cfg, NewAuthHandler(cfg, sessions), "", OptionalProviders{Quota: provider})
++	token, _, _ := sessions.Create()
++	admin := &http.Cookie{Name: standardSessionCookieName, Value: token}
++	viewerToken, _, _ := sessions.CreateAPIKeyViewer(1)
++	viewer := &http.Cookie{Name: standardSessionCookieName, Value: viewerToken}
++	readToken, _, _ := sessions.CreateReadOnlyWithSourceAndMetadata(auth.SessionSourceStandard, auth.SessionClientMetadata{})
++	readOnly := &http.Cookie{Name: standardSessionCookieName, Value: readToken}
++	for _, path := range []string{"/api/v1/quota/providers", "/api/v1/quota/providers/codex/stats?days=7", "/api/v1/quota/providers/codex/performance?days=14&metric=tps&model=a&mode=fast"} {
++		if response := serveAPIGet(router, path, admin); response.Code != 200 {
++			t.Fatalf("%s: %d %s", path, response.Code, response.Body.String())
++		}
++		if serveAPIGet(router, path).Code != 401 || serveAPIGet(router, path, viewer).Code != 403 || serveAPIGet(router, path, readOnly).Code != 403 {
++			t.Fatal("provider aggregate escaped admin boundary")
++		}
++	}
++	if provider.request.Provider != "codex" || provider.request.AuthIndex != "" || provider.request.Days != 14 || provider.request.Metric != "tps" || provider.request.Mode != "fast" {
++		t.Fatal(provider.request)
++	}
++	for _, query := range []string{"days=1", "days=bad", "mode=bad", "metric=bad"} {
++		if serveAPIGet(router, "/api/v1/quota/providers/codex/stats?"+query, admin).Code != 400 {
++			t.Fatal(query)
++		}
++	}
++	for _, item := range []struct {
++		err    error
++		status int
++	}{{quota.ErrNotFound, 404}, {quota.ErrValidation, 400}} {
++		provider.err = item.err
++		if serveAPIGet(router, "/api/v1/quota/providers/missing/stats?days=7", admin).Code != item.status {
++			t.Fatal("wrong error mapping")
++		}
++	}
++}
+diff --git a/internal/quota/provider_stats.go b/internal/quota/provider_stats.go
+new file mode 100644
+index 00000000..dce39cd0
+--- /dev/null
++++ b/internal/quota/provider_stats.go
+@@ -0,0 +1,44 @@
++package quota
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/repository"
++	"fmt"
++)
++
++func (s *Service) ListStatsProviders(ctx context.Context) ([]string, error) {
++	if s == nil || s.db == nil {
++		return nil, fmt.Errorf("provider statistics unavailable")
++	}
++	return repository.ListStatsProviders(ctx, s.db)
++}
++func (s *Service) GetProviderStats(ctx context.Context, q repository.PerformanceQuery) (repository.ProviderStats, error) {
++	if err := s.validateStatsProvider(ctx, q); err != nil {
++		return repository.ProviderStats{}, err
++	}
++	return repository.BuildProviderStats(ctx, s.db, q.Provider, q.Days, q.Now)
++}
++func (s *Service) GetProviderPerformance(ctx context.Context, q repository.PerformanceQuery) (repository.PerformanceReport, error) {
++	if err := s.validateStatsProvider(ctx, q); err != nil {
++		return repository.PerformanceReport{}, err
++	}
++	return repository.BuildAccountPerformance(ctx, s.db, q)
++}
++func (s *Service) validateStatsProvider(ctx context.Context, q repository.PerformanceQuery) error {
++	if q.Provider == "" || q.AuthIndex != "" {
++		return ErrValidation
++	}
++	if err := repository.ValidatePerformanceQuery(q); err != nil {
++		return fmt.Errorf("%w: %v", ErrValidation, err)
++	}
++	providers, err := s.ListStatsProviders(ctx)
++	if err != nil {
++		return err
++	}
++	for _, provider := range providers {
++		if provider == q.Provider {
++			return nil
++		}
++	}
++	return ErrNotFound
++}
+diff --git a/internal/repository/account_performance.go b/internal/repository/account_performance.go
+index ce749c4c..fbf4d6e1 100644
+--- a/internal/repository/account_performance.go
++++ b/internal/repository/account_performance.go
+@@ -17,6 +17,7 @@ import (
+ // Performance contains aggregate timings only, never keys, identities or raw requests.
+ type PerformanceQuery struct {
+ 	AuthIndex                     string
++	Provider                      string
+ 	Days                          int
+ 	Metric                        string
+ 	Models                        []string
+@@ -72,8 +73,11 @@ type performanceWork struct {
+ type weightedPerformanceValue struct{ value, weight float64 }
+ 
+ func ValidatePerformanceQuery(q PerformanceQuery) error {
+-	if strings.TrimSpace(q.AuthIndex) == "" {
+-		return fmt.Errorf("account is required")
++	if strings.TrimSpace(q.AuthIndex) == "" && strings.TrimSpace(q.Provider) == "" {
++		return fmt.Errorf("account or provider is required")
++	}
++	if q.Provider != "" && (q.AuthIndex != "" || len(q.Provider) > 100 || strings.TrimSpace(q.Provider) != q.Provider) {
++		return fmt.Errorf("invalid provider scope")
+ 	}
+ 	if q.Days != 7 && q.Days != 14 && q.Days != 30 && q.Days != 90 {
+ 		return fmt.Errorf("days must be 7, 14, 30 or 90")
+@@ -184,6 +188,10 @@ func BuildAccountPerformance(ctx context.Context, db *gorm.DB, q PerformanceQuer
+ 	eventProjection := strings.Replace(projection, "COALESCE(upstream_service_tier, '')", "COALESCE(NULLIF(effective_service_tier, ''), upstream_service_tier, '')", 1)
+ 	filter := "auth_type = ? AND auth_index = ? AND provider = ? AND timestamp >= ? AND timestamp < ?"
+ 	args := []any{"oauth", q.AuthIndex, "codex", timeutil.FormatStorageTime(report.RangeStart), timeutil.FormatStorageTime(report.GeneratedAt)}
++	if q.Provider != "" {
++		filter = "auth_type = ? AND provider = ? AND timestamp >= ? AND timestamp < ?"
++		args = []any{"oauth", q.Provider, timeutil.FormatStorageTime(report.RangeStart), timeutil.FormatStorageTime(report.GeneratedAt)}
++	}
+ 	source := "usage_events"
+ 	if db.Migrator().HasTable(&entities.UsageEventArchive{}) {
+ 		source = "(SELECT " + eventProjection + " FROM usage_events WHERE " + filter + " UNION ALL SELECT " + eventProjection + " FROM usage_events_archive WHERE " + filter + ")"
+diff --git a/internal/repository/provider_stats.go b/internal/repository/provider_stats.go
+new file mode 100644
+index 00000000..a9634870
+--- /dev/null
++++ b/internal/repository/provider_stats.go
+@@ -0,0 +1,143 @@
++package repository
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/timeutil"
++	"fmt"
++	"gorm.io/gorm"
++	"gorm.io/plugin/dbresolver"
++	"sort"
++	"strings"
++	"time"
++)
++
++// Provider reports contain aggregate facts only, never credential metadata.
++type ProviderUsageTotals struct {
++	Requests         int64   `json:"requests"`
++	Failed           int64   `json:"failed"`
++	InputTokens      int64   `json:"input_tokens"`
++	OutputTokens     int64   `json:"output_tokens"`
++	CacheReadTokens  int64   `json:"cache_read_tokens"`
++	TotalTokens      int64   `json:"total_tokens"`
++	TotalCostUSD     float64 `json:"total_cost_usd"`
++	UnpricedRequests int64   `json:"unpriced_requests"`
++}
++type ProviderUsageGroup struct {
++	Model string `json:"model"`
++	Mode  string `json:"mode"`
++	ProviderUsageTotals
++}
++type ProviderUsageDay struct {
++	Day string `json:"day"`
++	ProviderUsageTotals
++}
++type ProviderStats struct {
++	Provider    string               `json:"provider"`
++	GeneratedAt time.Time            `json:"generated_at"`
++	RangeStart  time.Time            `json:"range_start"`
++	Accounts    int                  `json:"accounts"`
++	Totals      ProviderUsageTotals  `json:"totals"`
++	Groups      []ProviderUsageGroup `json:"groups"`
++	Days        []ProviderUsageDay   `json:"days"`
++}
++
++func ListStatsProviders(ctx context.Context, db *gorm.DB) ([]string, error) {
++	source := "SELECT provider FROM usage_events WHERE auth_type = 'oauth'"
++	if db.Migrator().HasTable(&entities.UsageEventArchive{}) {
++		source += " UNION SELECT provider FROM usage_events_archive WHERE auth_type = 'oauth'"
++	}
++	source += " UNION SELECT type AS provider FROM usage_identities WHERE auth_type = 1"
++	values := []string{}
++	err := db.WithContext(ctx).Clauses(dbresolver.Read).Raw("SELECT DISTINCT provider FROM (" + source + ") WHERE provider IS NOT NULL AND TRIM(provider) <> '' ORDER BY provider").Scan(&values).Error
++	return values, err
++}
++
++func BuildProviderStats(ctx context.Context, db *gorm.DB, provider string, days int, now time.Time) (ProviderStats, error) {
++	report := ProviderStats{Provider: provider, Groups: []ProviderUsageGroup{}, Days: []ProviderUsageDay{}}
++	if err := ValidatePerformanceQuery(PerformanceQuery{Provider: provider, Days: days, Metric: "latency"}); err != nil {
++		return report, err
++	}
++	if now.IsZero() {
++		now = time.Now()
++	}
++	report.GeneratedAt = now.UTC()
++	report.RangeStart = report.GeneratedAt.Add(-time.Duration(days) * 24 * time.Hour)
++	projection := "auth_index, model, COALESCE(NULLIF(effective_service_tier, ''), upstream_service_tier, '') AS upstream_service_tier, timestamp, failed, input_tokens, output_tokens, cache_read_tokens, total_tokens, cost_usd, cost_available"
++	filter := "auth_type = ? AND provider = ? AND timestamp >= ? AND timestamp < ?"
++	args := []any{"oauth", provider, timeutil.FormatStorageTime(report.RangeStart), timeutil.FormatStorageTime(report.GeneratedAt)}
++	source := "SELECT " + projection + " FROM usage_events WHERE " + filter
++	if db.Migrator().HasTable(&entities.UsageEventArchive{}) {
++		source += " UNION ALL SELECT " + projection + " FROM usage_events_archive WHERE " + filter
++		args = append(append([]any{}, args...), args...)
++	}
++	rows, err := db.WithContext(ctx).Clauses(dbresolver.Read).Raw(source, args...).Rows()
++	if err != nil {
++		return report, fmt.Errorf("read provider stats: %w", err)
++	}
++	defer rows.Close()
++	accounts := map[string]bool{}
++	groups := map[[2]string]*ProviderUsageGroup{}
++	daily := map[string]*ProviderUsageDay{}
++	for rows.Next() {
++		var e entities.UsageEvent
++		if err := db.ScanRows(rows, &e); err != nil {
++			return report, err
++		}
++		if strings.TrimSpace(e.AuthIndex) != "" {
++			accounts[e.AuthIndex] = true
++		}
++		key := [2]string{e.Model, quotaRequestedMode(e.UpstreamServiceTier)}
++		if groups[key] == nil {
++			groups[key] = &ProviderUsageGroup{Model: key[0], Mode: key[1]}
++		}
++		day := timeutil.NormalizeStorageTime(e.Timestamp).UTC().Format("2006-01-02")
++		if daily[day] == nil {
++			daily[day] = &ProviderUsageDay{Day: day}
++		}
++		addProviderUsage(&report.Totals, e)
++		addProviderUsage(&groups[key].ProviderUsageTotals, e)
++		addProviderUsage(&daily[day].ProviderUsageTotals, e)
++	}
++	if err := rows.Err(); err != nil {
++		return report, err
++	}
++	report.Accounts = len(accounts)
++	for _, group := range groups {
++		report.Groups = append(report.Groups, *group)
++	}
++	sort.Slice(report.Groups, func(i, j int) bool {
++		a, b := report.Groups[i], report.Groups[j]
++		if a.Requests != b.Requests {
++			return a.Requests > b.Requests
++		}
++		if a.Model != b.Model {
++			return a.Model < b.Model
++		}
++		return a.Mode < b.Mode
++	})
++	for date := report.RangeStart.Truncate(24 * time.Hour); !date.After(report.GeneratedAt.Truncate(24 * time.Hour)); date = date.AddDate(0, 0, 1) {
++		day := date.Format("2006-01-02")
++		if value := daily[day]; value != nil {
++			report.Days = append(report.Days, *value)
++		} else {
++			report.Days = append(report.Days, ProviderUsageDay{Day: day})
++		}
++	}
++	return report, nil
++}
++func addProviderUsage(total *ProviderUsageTotals, e entities.UsageEvent) {
++	total.Requests++
++	if e.Failed {
++		total.Failed++
++	}
++	total.InputTokens += e.InputTokens
++	total.OutputTokens += e.OutputTokens
++	total.CacheReadTokens += e.CacheReadTokens
++	total.TotalTokens += e.TotalTokens
++	if e.CostAvailable != nil && *e.CostAvailable && e.CostUSD != nil {
++		total.TotalCostUSD += *e.CostUSD
++	} else {
++		total.UnpricedRequests++
++	}
++}
+diff --git a/internal/repository/test/provider_stats_test.go b/internal/repository/test/provider_stats_test.go
+new file mode 100644
+index 00000000..8ef1b0f7
+--- /dev/null
++++ b/internal/repository/test/provider_stats_test.go
+@@ -0,0 +1,75 @@
++package test
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/repository"
++	"encoding/json"
++	"reflect"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestProviderStatsPoolRequestsPricesAndArchivedAccounts(t *testing.T) {
++	db := openTestDatabase(t)
++	at := performanceNow.Add(-time.Hour)
++	seedPerformance(t, db, "model", 1000, 1000, 1, at)
++	seedPerformance(t, db, "model", 1000, 9000, 9, at.Add(-time.Minute))
++	if err := db.Model(&entities.UsageEvent{}).Where("latency_ms = ?", 9000).Update("auth_index", "second-private-account").Error; err != nil {
++		t.Fatal(err)
++	}
++	if err := db.Model(&entities.UsageEvent{}).Where("latency_ms = ?", 9000).Updates(map[string]any{"cost_usd": 2.0, "cost_available": true, "cache_read_tokens": 500, "total_tokens": 1100}).Error; err != nil {
++		t.Fatal(err)
++	}
++	seedPerformance(t, db, "foreign", 1000, 2000, 3, at)
++	db.Model(&entities.UsageEvent{}).Where("model = ?", "foreign").Update("provider", "claude")
++	seedPerformance(t, db, "api", 1000, 2000, 3, at)
++	db.Model(&entities.UsageEvent{}).Where("model = ?", "api").Update("auth_type", "api_key")
++	seedPerformance(t, db, "future", 1000, 2000, 1, performanceNow)
++	seedPerformance(t, db, "old", 1000, 2000, 1, performanceNow.Add(-8*24*time.Hour))
++	q := repository.PerformanceQuery{Provider: "codex", Days: 7, Metric: "latency", Now: performanceNow}
++	report := getPerformance(t, db, q)
++	if len(report.Groups) != 1 || report.Groups[0].Requests != 10 || *report.Groups[0].Raw.Median != 9 {
++		t.Fatalf("did not pool request distributions: %+v", report)
++	}
++	totals, err := repository.BuildProviderStats(context.Background(), db, "codex", 7, performanceNow)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if totals.Accounts != 2 || totals.Totals.Requests != 10 || totals.Totals.TotalCostUSD != 18 || totals.Totals.UnpricedRequests != 1 || totals.Totals.CacheReadTokens != 4500 {
++		t.Fatalf("bad totals: %+v", totals)
++	}
++	if len(totals.Groups) != 1 || totals.Groups[0].Requests != 10 {
++		t.Fatal(totals.Groups)
++	}
++	payload, _ := json.Marshal(totals)
++	if strings.Contains(string(payload), "private-account") || strings.Contains(string(payload), "auth_index") {
++		t.Fatal("aggregate leaked account identity")
++	}
++	db.Exec("INSERT INTO usage_events_archive (" + entities.UsageEventStorageColumns + ") SELECT " + entities.UsageEventStorageColumns + " FROM usage_events")
++	db.Exec("DELETE FROM usage_events")
++	archived, err := repository.BuildProviderStats(context.Background(), db, "codex", 7, performanceNow)
++	if err != nil || !reflect.DeepEqual(totals, archived) {
++		t.Fatalf("archive changed totals: %v %+v", err, archived)
++	}
++	if !reflect.DeepEqual(report, getPerformance(t, db, q)) {
++		t.Fatal("archive changed pooled speed")
++	}
++	providers, err := repository.ListStatsProviders(context.Background(), db)
++	if err != nil || !reflect.DeepEqual(providers, []string{"claude", "codex"}) {
++		t.Fatalf("provider catalog: %v %v", providers, err)
++	}
++}
++func TestProviderStatsEmptyAndScopeValidation(t *testing.T) {
++	db := openTestDatabase(t)
++	report, err := repository.BuildProviderStats(context.Background(), db, "codex", 7, performanceNow)
++	if err != nil || report.Totals.Requests != 0 || report.Accounts != 0 || len(report.Days) != 8 {
++		t.Fatalf("empty: %+v %v", report, err)
++	}
++	for _, q := range []repository.PerformanceQuery{{Days: 7, Metric: "tps"}, {Provider: "codex", AuthIndex: "account", Days: 7, Metric: "tps"}, {Provider: "codex", Days: 1, Metric: "tps"}} {
++		if repository.ValidatePerformanceQuery(q) == nil {
++			t.Fatal("invalid scope accepted", q)
++		}
++	}
++}
+diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
+index ad953615..2d43b18e 100644
+--- a/web/src/components/usage/credentials/CredentialsSection.tsx
++++ b/web/src/components/usage/credentials/CredentialsSection.tsx
+@@ -6,7 +6,7 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
+ import { MainActionButton } from '@/components/ui/MainActionButton'
+ import { Modal } from '@/components/ui/Modal'
+ import { Select } from '@/components/ui/Select'
+-import { IconInfo, IconGaugeReset, IconRefreshCw, IconSearch, IconSettings, IconShield, IconTrash2 } from '@/components/ui/icons'
++import { IconInfo, IconChartLine, IconGaugeReset, IconRefreshCw, IconSearch, IconSettings, IconShield, IconTrash2 } from '@/components/ui/icons'
+ import { PortalTooltip, usePortalTooltip } from '@/components/ui/PortalTooltip'
+ import quotaCostIcon from '@/assets/icons/quota-cost.svg'
+ import quotaTokenIcon from '@/assets/icons/quota-token.svg'
+@@ -23,6 +23,7 @@ import { CredentialCardGrid, CredentialCardShell, CredentialSectionShell, Creden
+ import { CredentialPriorityEditor } from './CredentialPriorityEditor'
+ import { ProviderBrandIcon, providerBrandIconKey } from '@/components/ProviderBrandIcon'
+ import { CredentialStatusToggle } from './CredentialStatusToggle'
++import { ProviderStatsDrawer } from './ProviderStatsDrawer'
+ 
+ type Translate = (key: string, options?: Record<string, string>) => string
+ type InspectionIndicatorTone = 'idle' | 'running' | 'completed'
+@@ -135,6 +136,7 @@ interface CredentialsSectionProps {
+ export function CredentialsSection({ reportingOnly = false, rows, timeZone, total, page, totalPages, pageSize, activeOnly, sort, loading, quotaRefreshing, quotaRefreshError, quotaInspectionStatus, quotaInspectionLoading, quotaInspectionStarting, quotaInspectionError, onPageChange, onPageSizeChange, onActiveOnlyChange, onSortChange, onRefreshQuota, onRefreshQuotaForAuthIndex, onResetQuotaForAuthIndex, editFallbackRef, onEdit, onOpenDetails, statusPendingIdentityIds, onToggleStatus, onSavePriority, onRefreshInspectionStatus, onStartInspection, onAfterInvalidAccountAction }: CredentialsSectionProps) {
+   const { t } = useTranslation()
+   const [inspectionOpen, setInspectionOpen] = useState(false)
++  const [providerStatsOpen, setProviderStatsOpen] = useState(false)
+   const [quotaUsageMode, setQuotaUsageMode] = useState<QuotaUsageMode>('current')
+   const [expiryTooltip, setExpiryTooltip] = useState<CredentialExpiryTooltipState | null>(null)
+   const expiryTooltipHoverTargetRef = useRef<CredentialExpiryTooltipTarget | null>(null)
+@@ -198,6 +200,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+ 
+   return (
+     <>
++      {!reportingOnly && <ProviderStatsDrawer open={providerStatsOpen} initialProvider={rows[0]?.identity.type} onClose={() => setProviderStatsOpen(false)} />}
+       <CredentialSectionShell
+         title={t('usage_stats.credentials_title')}
+         subtitle={reportingOnly ? '' : t('usage_stats.credentials_subtitle')}
+@@ -215,6 +218,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+         )}
+         actions={!reportingOnly && (
+           <div className={styles.credentialSectionActionButtons}>
++            <MainActionButton type="button" onClick={() => setProviderStatsOpen(true)}><IconChartLine size={12} /><span>{t('provider_stats.button', 'Provider stats')}</span></MainActionButton>
+             <MainActionButton
+               type="button"
+               className={styles.credentialInspectionButton}
+diff --git a/web/src/components/usage/credentials/PerformancePanel.tsx b/web/src/components/usage/credentials/PerformancePanel.tsx
+index ed76ce4b..3f96eec1 100644
+--- a/web/src/components/usage/credentials/PerformancePanel.tsx
++++ b/web/src/components/usage/credentials/PerformancePanel.tsx
+@@ -13,7 +13,7 @@ import { AnalyticsModelPicker } from './AnalyticsModelPicker'
+ import { analyticsModeSelected, analyticsModelColor, rankAnalyticsModels, selectedAnalyticsModels, type AnalyticsModel, type ModelSelection } from './analyticsModels'
+ import styles from './WeeklyQuotaValuePanel.module.scss'
+ 
+-export function PerformancePanel({ authIndex, readOnlyAccountId, onAuthRequired }: { authIndex: string; readOnlyAccountId?: string; onAuthRequired?: () => void }) {
++export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAuthRequired }: { authIndex: string; provider?: string; readOnlyAccountId?: string; onAuthRequired?: () => void }) {
+   const { t, i18n } = useTranslation()
+   const isDark = useThemeStore(state => state.resolvedTheme) === 'dark'
+   const [days, setDays] = useState('7')
+@@ -22,7 +22,7 @@ export function PerformancePanel({ authIndex, readOnlyAccountId, onAuthRequired
+   const [context, setContext] = useState('')
+   const [output, setOutput] = useState('')
+   const [effort, setEffort] = useState('')
+-  const accountKey = JSON.stringify([authIndex, readOnlyAccountId])
++  const accountKey = JSON.stringify([authIndex, readOnlyAccountId, provider])
+   const catalogKey = JSON.stringify([accountKey, days])
+   const [selectionState, setSelectionState] = useState<{ account: string; value: ModelSelection }>()
+   const selection = selectionState?.account === accountKey ? selectionState.value : 'top'
+@@ -44,8 +44,8 @@ export function PerformancePanel({ authIndex, readOnlyAccountId, onAuthRequired
+     // Discover request totals without workload filters before asking the server to
+     // match the selected models. Merely hiding lines would leave the wrong mix.
+     const query = discovering
+-      ? { readOnlyAccountId, days, metric: 'latency', mode: '', context: '', output: '', effort: '', models: [] }
+-      : { readOnlyAccountId, days, metric, mode: mode === 'captured' ? '' : mode, context, output, effort, models: requestModels }
++      ? { provider, readOnlyAccountId, days, metric: 'latency', mode: '', context: '', output: '', effort: '', models: [] }
++      : { provider, readOnlyAccountId, days, metric, mode: mode === 'captured' ? '' : mode, context, output, effort, models: requestModels }
+     return startLiveRefresh(async (signal) => { await fetchAccountPerformance(authIndex, query, signal)
+       .then(report => {
+         if (signal.aborted) return
+diff --git a/web/src/components/usage/credentials/ProviderStatsDrawer.module.scss b/web/src/components/usage/credentials/ProviderStatsDrawer.module.scss
+new file mode 100644
+index 00000000..be2faa62
+--- /dev/null
++++ b/web/src/components/usage/credentials/ProviderStatsDrawer.module.scss
+@@ -0,0 +1 @@
++.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+diff --git a/web/src/components/usage/credentials/ProviderStatsDrawer.tsx b/web/src/components/usage/credentials/ProviderStatsDrawer.tsx
+new file mode 100644
+index 00000000..e7c87370
+--- /dev/null
++++ b/web/src/components/usage/credentials/ProviderStatsDrawer.tsx
+@@ -0,0 +1,116 @@
++import { useEffect, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++import { Modal } from '@/components/ui/Modal'
++import { Button } from '@/components/ui/Button'
++import { ProviderBrandIcon } from '@/components/ProviderBrandIcon'
++import { Chart } from '@/components/usage/charts/UsageChart'
++import type { ChartData, ChartOptions } from 'chart.js'
++import '@/lib/chartjs'
++import { ApiError, fetchProviderStats, fetchStatsProviders } from '@/lib/api'
++import type { ProviderStats } from '@/lib/types'
++import { startLiveRefresh } from '@/lib/live'
++import { useThemeStore } from '@/stores'
++import { buildUsageChartTooltipStyle, getUsageChartTheme } from '@/utils/usage/chartConfig'
++import { PerformancePanel } from './PerformancePanel'
++import { formatCredentialNumber } from './CredentialSectionShell'
++import detail from './CredentialDetailDrawer.module.scss'
++import styles from './WeeklyQuotaValuePanel.module.scss'
++import providerStyles from './ProviderStatsDrawer.module.scss'
++
++export function ProviderStatsDrawer({ open, initialProvider, onClose }: { open: boolean; initialProvider?: string; onClose: () => void }) {
++ const { t } = useTranslation()
++ const [providers, setProviders] = useState<string[]>([])
++ const [provider, setProvider] = useState(initialProvider ?? '')
++ const [revision, setRevision] = useState(0)
++ const [catalogError, setCatalogError] = useState(false)
++ const [tab, setTab] = useState('overview')
++ useEffect(() => {
++  if (!open) return
++  const controller = new AbortController()
++  fetchStatsProviders(controller.signal).then(values => {
++   if (controller.signal.aborted) return
++   setCatalogError(false)
++   setProviders(values)
++   setProvider(previous => values.includes(previous) ? previous : values.includes(initialProvider ?? '') ? initialProvider! : values[0] ?? '')
++  }).catch(() => { if (!controller.signal.aborted) setCatalogError(true) })
++  return () => controller.abort()
++ }, [open, initialProvider, revision])
++ return <Modal open={open} title={<div className={detail.drawerTitle}>
++  <ProviderBrandIcon providerType={provider} size={36} />
++  <div className={detail.drawerTitleText}><strong>{t('provider_stats.title', 'Provider statistics')}</strong><span>{t('provider_stats.subtitle', 'All accounts combined')}</span></div>
++ </div>} variant="drawer" width={980} className={detail.drawer} onClose={onClose}>
++  {open && <>
++   <div className={styles.panel}>
++    <div className={styles.filters}><label>{t('provider_stats.provider', 'Provider')}<select aria-label={t('provider_stats.provider', 'Provider')} value={provider} onChange={event => setProvider(event.target.value)}>{providers.map(value => <option key={value} value={value}>{value}</option>)}</select></label></div>
++    <p className={styles.note}>{t('provider_stats.scope', 'Combined recorded requests across all client keys and accounts for this provider, including disabled and historical accounts. The account-list filters do not limit this view.')}</p>
++    {catalogError && <div role="alert">{t('provider_stats.catalog_error', 'Unable to load providers.')} <Button size="sm" onClick={() => setRevision(value => value + 1)}>{t('common.retry', 'Retry')}</Button></div>}
++    {!catalogError && !providers.length && <p role="status">{t('provider_stats.empty', 'No provider data available yet.')}</p>}
++    <div className={styles.views} aria-label={t('provider_stats.views', 'Provider statistic views')}>
++     <button type="button" aria-pressed={tab === 'overview'} onClick={() => setTab('overview')}>{t('provider_stats.overview', 'Overview & API value')}</button>
++     <button type="button" aria-pressed={tab === 'speed'} onClick={() => setTab('speed')}>{t('analytics.response_speed', 'Response speed')}</button>
++    </div>
++   </div>
++   {provider && (tab === 'speed' ? <PerformancePanel key={provider} authIndex="" provider={provider} /> : <ProviderUsagePanel key={provider} provider={provider} />)}
++  </>}
++ </Modal>
++}
++
++export function ProviderUsagePanel({ provider }: { provider: string }) {
++ const { t, i18n } = useTranslation()
++ const isDark = useThemeStore(state => state.resolvedTheme) === 'dark'
++ const [days, setDays] = useState('7')
++ const [metric, setMetric] = useState('value')
++ const [revision, setRevision] = useState(0)
++ const [result, setResult] = useState<{ key: string; report?: ProviderStats; error?: string }>()
++ const key = JSON.stringify([provider, days, revision])
++ const loading = result?.key !== key
++ const report = loading ? undefined : result?.report
++ useEffect(() => startLiveRefresh(async signal => {
++  try {
++   const report = await fetchProviderStats(provider, days, signal)
++   if (!signal.aborted) setResult({ key, report })
++  } catch (error) {
++   if (!signal.aborted) setResult(previous => previous?.key === key && previous.report ? previous : { key, error: error instanceof ApiError ? error.message : t('provider_stats.load_error', 'Unable to load provider statistics.') })
++  }
++ }, ['usage', 'accounts']), [provider, days, key, t])
++ const money = (value: number, unpriced: number, requests: number) => unpriced > 0 && unpriced === requests ? '—' : (unpriced > 0 ? '≥ ' : '') + new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value)
++ const percent = (value: number, total: number) => total ? new Intl.NumberFormat(i18n.language, { style: 'percent', maximumFractionDigits: 2 }).format(value / total) : '—'
++ const theme = getUsageChartTheme(isDark)
++ const label = metric === 'value' ? t('provider_stats.api_value', 'API-equivalent value') : metric === 'requests' ? t('usage_stats.total_requests', 'Requests') : t('usage_stats.total_tokens', 'Tokens')
++ const data: ChartData<'line', Array<number | null>, string> = {
++  labels: report?.days.map(point => new Date(point.day + 'T00:00:00Z').toLocaleDateString(i18n.language, { month: 'short', day: 'numeric', timeZone: 'UTC' })) ?? [],
++  datasets: [{ label, data: report?.days.map(point => metric === 'value' ? point.unpriced_requests ? null : point.total_cost_usd : metric === 'requests' ? point.requests : point.total_tokens) ?? [], borderColor: '#d49b00', backgroundColor: '#d49b00', borderWidth: 2, pointRadius: 3, tension: 0, spanGaps: false }],
++ }
++ const options: ChartOptions<'line'> = { responsive: true, maintainAspectRatio: false, animation: false,
++  plugins: { legend: { display: false }, tooltip: buildUsageChartTooltipStyle(theme) },
++  scales: { x: { ticks: { color: theme.textSecondary, maxTicksLimit: 8 }, grid: { display: false } }, y: { beginAtZero: true, ticks: { color: theme.textSecondary }, grid: { color: theme.grid } } },
++ }
++ const modeName = (mode: string) => mode === 'fast' ? t('weekly_quota.fast', 'Fast requested') : mode === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
++ return <div className={styles.panel} data-provider-usage>
++  <div className={styles.toolbar}><label>{t('performance.period', 'Period')}{' '}<select aria-label={t('performance.period', 'Period')} value={days} onChange={event => setDays(event.target.value)}>{['7', '14', '30', '90'].map(value => <option key={value} value={value}>{t('provider_stats.days', '{{count}} days', { count: Number(value) })}</option>)}</select></label><Button size="sm" disabled={loading} onClick={() => setRevision(value => value + 1)}>{t('common.refresh', 'Refresh')}</Button></div>
++  {loading && <p role="status">{t('common.loading', 'Loading…')}</p>}
++  {!loading && result?.error && <p role="alert">{result.error}</p>}
++  {report && <>
++   <p className={styles.note}>{new Date(report.range_start).toLocaleString(i18n.language)} – {new Date(report.generated_at).toLocaleString(i18n.language)} · {t('provider_stats.account_count', '{{count}} accounts with requests', { count: report.accounts })}</p>
++   <div className={providerStyles.summary}>
++    {[
++     [t('usage_stats.total_requests', 'Requests'), formatCredentialNumber(report.totals.requests)],
++     [t('usage_stats.success_rate', 'Success rate'), percent(report.totals.requests - report.totals.failed, report.totals.requests)],
++     [t('usage_stats.total_tokens', 'Tokens'), formatCredentialNumber(report.totals.total_tokens)],
++     [t('usage_stats.cache_rate', 'Cache rate'), percent(report.totals.cache_read_tokens, report.totals.input_tokens)],
++     [t('provider_stats.api_value', 'API-equivalent value'), money(report.totals.total_cost_usd, report.totals.unpriced_requests, report.totals.requests)],
++    ].map(([title, value]) => <div key={title} className={detail.summaryMetric}><span>{title}</span><strong>{value}</strong></div>)}
++   </div>
++   <p className={styles.note}>{t('provider_stats.value_note', 'API-equivalent value sums stored request costs; it is not a subscription charge. Account quota percentages and reset times stay separate because account plans and allowances can differ.')}</p>
++   {report.totals.unpriced_requests > 0 && <p className={styles.note} role="note">{t('provider_stats.unpriced', '{{count}} requests have no stored price. ≥ shows the priced portion only; incomplete daily values appear as gaps.', { count: report.totals.unpriced_requests })}</p>}
++   {report.totals.requests === 0 ? <p role="status" className={styles.empty}>{t('provider_stats.no_requests', 'No recorded requests in this period.')}</p> : <>
++    <section className={styles.card}>
++     <div className={styles.sectionHeading}><h4>{t('provider_stats.daily', 'Combined daily activity')}</h4><span className={styles.meta}>UTC</span></div>
++     <label>{t('provider_stats.measure', 'Measure')}{' '}<select aria-label={t('provider_stats.measure', 'Measure')} value={metric} onChange={event => setMetric(event.target.value)}><option value="value">{t('provider_stats.api_value', 'API-equivalent value')}</option><option value="requests">{t('usage_stats.total_requests', 'Requests')}</option><option value="tokens">{t('usage_stats.total_tokens', 'Tokens')}</option></select></label>
++     <div className={styles.chart}><Chart type="line" data={data} options={options} role="img" aria-label={t('provider_stats.daily', 'Combined daily activity')} /></div>
++    </section>
++    <div className={styles.scroll}><table><thead><tr><th>{t('provider_stats.model', 'Model / mode')}</th><th>{t('usage_stats.total_requests', 'Requests')}</th><th>{t('usage_stats.success_rate', 'Success rate')}</th><th>{t('usage_stats.total_tokens', 'Tokens')}</th><th>{t('provider_stats.api_value', 'API-equivalent value')}</th></tr></thead><tbody>{report.groups.map(group => <tr key={JSON.stringify([group.model, group.mode])}><td>{group.model || '—'}<small>{modeName(group.mode)}</small></td><td>{formatCredentialNumber(group.requests)}</td><td>{percent(group.requests - group.failed, group.requests)}</td><td>{formatCredentialNumber(group.total_tokens)}</td><td>{money(group.total_cost_usd, group.unpriced_requests, group.requests)}</td></tr>)}</tbody></table></div>
++   </>}
++  </>}
++ </div>
++}
+diff --git a/web/src/components/usage/credentials/test/ProviderStatsDrawer.test.tsx b/web/src/components/usage/credentials/test/ProviderStatsDrawer.test.tsx
+new file mode 100644
+index 00000000..93acaf94
+--- /dev/null
++++ b/web/src/components/usage/credentials/test/ProviderStatsDrawer.test.tsx
+@@ -0,0 +1,66 @@
++// @vitest-environment happy-dom
++import { act } from 'react'
++import { createRoot, type Root } from 'react-dom/client'
++import { afterEach, beforeEach, expect, it, vi } from 'vitest'
++import i18n from '@/i18n'
++import type { ProviderStats } from '@/lib/types'
++import { ProviderStatsDrawer } from '../ProviderStatsDrawer'
++import { CredentialsSection } from '../CredentialsSection'
++import { createCredentialSectionProps } from './credentialSectionFixtures'
++const mocks = vi.hoisted(() => ({ providers: vi.fn(), stats: vi.fn(), chart: vi.fn() }))
++vi.mock('@/lib/api', async original => ({ ...await original<typeof import('@/lib/api')>(), fetchStatsProviders: (...args: unknown[]) => mocks.providers(...args), fetchProviderStats: (...args: unknown[]) => mocks.stats(...args) }))
++vi.mock('react-chartjs-2', () => ({ Chart: (props: {data: unknown}) => { mocks.chart(props.data); return <div role="img" /> } }))
++vi.mock('../PerformancePanel', () => ({ PerformancePanel: ({provider}: {provider: string}) => <div data-speed-provider={provider}>Pooled speed</div> }))
++vi.mock('@/lib/live', () => ({ startLiveRefresh: (load: (signal: AbortSignal) => Promise<void>) => { const controller = new AbortController(); void load(controller.signal); return () => controller.abort() } }))
++const fixture = (provider = 'codex'): ProviderStats => ({ provider, generated_at:'2026-11-06T12:00:00Z', range_start:'2026-10-30T12:00:00Z', accounts: 2,
++ totals:{ requests:100, failed:5, input_tokens:10000, output_tokens:1000, cache_read_tokens:9000, total_tokens:11000, total_cost_usd:12, unpriced_requests:3 },
++ groups:[{model:provider+'-model',mode:'fast',requests:100,failed:5,input_tokens:10000,output_tokens:1000,cache_read_tokens:9000,total_tokens:11000,total_cost_usd:12,unpriced_requests:3}],
++ days:[{day:'2026-11-06',requests:100,failed:5,input_tokens:10000,output_tokens:1000,cache_read_tokens:9000,total_tokens:11000,total_cost_usd:12,unpriced_requests:3}]
++})
++let element: HTMLDivElement; let root: Root
++beforeEach(async () => { globalThis.IS_REACT_ACT_ENVIRONMENT = true; await i18n.changeLanguage('en'); mocks.providers.mockReset().mockResolvedValue(['codex','claude']); mocks.stats.mockReset().mockImplementation(async (provider: string) => fixture(provider)); mocks.chart.mockClear(); element=document.createElement('div'); document.body.append(element); root=createRoot(element) })
++afterEach(async () => { await act(async () => root.unmount()); element.remove() })
++const button = (text: string) => [...document.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === text)!
++const change = async (label: string, value: string) => { const select=document.querySelector<HTMLSelectElement>('select[aria-label="'+label+'"]')!; await act(async () => { select.value=value; select.dispatchEvent(new Event('change',{bubbles:true})) }) }
++it('opens provider stats from the credential toolbar without a quota refresh',async () => {
++ const refresh=vi.fn()
++ await act(async () => root.render(<CredentialsSection {...createCredentialSectionProps({onRefreshQuota:refresh})} />))
++ expect(mocks.providers).not.toHaveBeenCalled()
++ await act(async () => button('Provider stats').click())
++ expect(document.body.textContent).toContain('All accounts combined')
++ expect(document.body.textContent).toContain('2 accounts with requests')
++ expect(refresh).not.toHaveBeenCalled()
++})
++it('shows pooled value, partial pricing, daily gaps, provider changes and the speed view',async () => {
++ await act(async () => root.render(<ProviderStatsDrawer open initialProvider="codex" onClose={() => undefined} />))
++ expect(document.body.textContent).toContain('≥ $12.00')
++ expect(document.body.textContent).toContain('95%')
++ expect(document.body.textContent).toContain('90%')
++ expect(document.body.textContent).toContain('disabled and historical accounts')
++ expect(mocks.chart.mock.lastCall?.[0].datasets[0].data).toEqual([null])
++ await change('Measure','requests')
++ expect(mocks.chart.mock.lastCall?.[0].datasets[0].data).toEqual([100])
++ await change('Period','30')
++ expect(mocks.stats.mock.lastCall?.[1]).toBe('30')
++ await change('Provider','claude')
++ expect(document.body.textContent).toContain('claude-model')
++ expect(document.body.textContent).not.toContain('codex-model')
++ await act(async () => button('Response speed').click())
++ expect(document.querySelector('[data-speed-provider="claude"]')).not.toBeNull()
++})
++it('cancels stale provider loads and ignores late totals',async () => {
++ let resolve: (value: ProviderStats) => void = () => undefined
++ mocks.stats.mockImplementationOnce(() => new Promise<ProviderStats>(done => { resolve=done }))
++ await act(async () => root.render(<ProviderStatsDrawer open initialProvider="codex" onClose={() => undefined} />))
++ const signal=mocks.stats.mock.calls[0][2] as AbortSignal
++ await change('Provider','claude')
++ expect(signal.aborted).toBe(true)
++ await act(async () => resolve(fixture('codex')))
++ expect(document.body.textContent).not.toContain('codex-model')
++ expect(document.body.textContent).toContain('claude-model')
++})
++it('keeps aggregate controls out of the restricted reporting toolbar',async () => {
++ await act(async () => root.render(<CredentialsSection {...createCredentialSectionProps({reportingOnly:true})} />))
++ expect(button('Provider stats')).toBeUndefined()
++ expect(mocks.providers).not.toHaveBeenCalled()
++})
+diff --git a/web/src/components/usage/test/PerformancePanel.test.tsx b/web/src/components/usage/test/PerformancePanel.test.tsx
+index 31f0fd60..8ef174fe 100644
+--- a/web/src/components/usage/test/PerformancePanel.test.tsx
++++ b/web/src/components/usage/test/PerformancePanel.test.tsx
+@@ -97,3 +97,12 @@ it('defaults to two models ranked across modes, supports extra models and an emp
+   await change('Response speed over time', 'phase')
+   expect(mocks.fetch.mock.lastCall?.[1].metric).toBe('phase')
+ })
++
++it('forwards provider scope through discovery and workload filters', async () => {
++ await render({authIndex:'',provider:'codex'})
++ expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({provider:'codex'})
++ await change('Input size','large')
++ expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({provider:'codex',context:'large'})
++ await render({authIndex:'',provider:'claude'})
++ expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({provider:'claude'})
++})
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index b17a8e56..885f9a8e 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -1199,13 +1199,26 @@ export async function fetchReadOnlyReport<T>(path: string, params = new URLSearc
+  if(!response.ok) await parseApiError(response,'Unable to load reporting data');return response.json();
+ }
+ 
+-export interface AccountPerformanceOptions { readOnlyAccountId?: string; days: string; metric: string; models: string[]; mode: string; context: string; output: string; effort: string }
++export interface AccountPerformanceOptions { provider?: string; readOnlyAccountId?: string; days: string; metric: string; models: string[]; mode: string; context: string; output: string; effort: string }
+ export async function fetchAccountPerformance(authIndex: string, options: AccountPerformanceOptions, signal?: AbortSignal): Promise<import('./types').PerformanceReport> {
+   const params = new URLSearchParams({ days: options.days, metric: options.metric })
+   for (const model of options.models) params.append('model', model)
+   for (const key of ['mode', 'context', 'output', 'effort'] as const) if (options[key]) params.set(key, options[key])
+-  const path = options.readOnlyAccountId ? `/read-only/accounts/${encodeURIComponent(options.readOnlyAccountId)}/performance` : `/quota/performance/${encodeURIComponent(authIndex)}`
+-  const response = await apiFetch(`${apiPath(path)}?${params}`, { signal })
++  const path = options.provider ? `/quota/providers/${encodeURIComponent(options.provider)}/performance` : options.readOnlyAccountId ? `/read-only/accounts/${encodeURIComponent(options.readOnlyAccountId)}/performance` : `/quota/performance/${encodeURIComponent(authIndex)}`
++  const response = await apiFetch(`${apiPath(path)}?${params}`, { signal, cache: 'no-store' })
+   if (!response.ok) await parseApiError(response, `Failed to load performance: ${response.status}`)
+   return response.json()
+ }
++
++export async function fetchStatsProviders(signal?: AbortSignal): Promise<string[]> {
++ const response = await apiFetch(apiPath('/quota/providers'), { signal, cache: 'no-store' })
++ if (!response.ok) await parseApiError(response, 'Unable to load providers')
++ const result: { providers: string[] } = await response.json()
++ return result.providers
++}
++export async function fetchProviderStats(provider: string, days: string, signal?: AbortSignal): Promise<import('./types').ProviderStats> {
++ const params = new URLSearchParams({ days })
++ const response = await apiFetch(apiPath(`/quota/providers/${encodeURIComponent(provider)}/stats`)+`?${params}`, { signal, cache: 'no-store' })
++ if (!response.ok) await parseApiError(response, 'Unable to load provider statistics')
++ return response.json()
++}
+diff --git a/web/src/lib/test/providerStats.test.ts b/web/src/lib/test/providerStats.test.ts
+new file mode 100644
+index 00000000..85cd9828
+--- /dev/null
++++ b/web/src/lib/test/providerStats.test.ts
+@@ -0,0 +1,21 @@
++import { afterEach, expect, it, vi } from 'vitest'
++import { fetchAccountPerformance, fetchCodexQuotaHistory, fetchProviderStats, fetchStatsProviders } from '../api'
++afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
++it('routes provider reports separately from account and read-only reports', async () => {
++ vi.stubGlobal('window', { __APP_BASE_PATH__: '/keeper/' })
++ const fetchMock=vi.spyOn(globalThis,'fetch').mockImplementation(async () => Response.json({providers:['codex']}))
++ const signal=new AbortController().signal
++ const options={days:'14',metric:'tps',models:['a','b'],mode:'fast',context:'large',output:'long',effort:'low'}
++ expect(await fetchStatsProviders(signal)).toEqual(['codex'])
++ await fetchProviderStats('codex','30',signal)
++ await fetchAccountPerformance('',{...options,provider:'codex'},signal)
++ await fetchAccountPerformance('private-account',options,signal)
++ await fetchAccountPerformance('private-account',{...options,readOnlyAccountId:'3'},signal)
++ await fetchCodexQuotaHistory('private-account',{readOnlyAccountId:'3',weeklyOnly:true},signal)
++ const urls=fetchMock.mock.calls.map(([url])=>new URL(String(url),'http://localhost'))
++ expect(urls.map(url=>url.pathname)).toEqual(['/keeper/api/v1/quota/providers','/keeper/api/v1/quota/providers/codex/stats','/keeper/api/v1/quota/providers/codex/performance','/keeper/api/v1/quota/performance/private-account','/keeper/api/v1/read-only/accounts/3/performance','/keeper/api/v1/read-only/accounts/3/weekly-quota'])
++ expect(urls[2].searchParams.getAll('model')).toEqual(['a','b'])
++ expect(urls[2].searchParams.get('context')).toBe('large')
++ expect(urls[2].searchParams.get('days')).toBe('14')
++ expect(fetchMock.mock.calls[2][1]).toMatchObject({credentials:'include',cache:'no-store',signal})
++})
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 7935e943..24f0fa29 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -1121,3 +1121,14 @@ export interface PerformanceStats { samples: number; median: number | null; p90:
+ export interface PerformanceDay { day: string; raw: PerformanceStats; matched: PerformanceStats }
+ export interface PerformanceGroup { model: string; mode: string; requests: number; failed: number; raw: PerformanceStats; matched: PerformanceStats; coverage: number; days: PerformanceDay[] }
+ export interface PerformanceReport { generated_at: string; range_start: string; metric: string; models: string[]; efforts: string[]; groups: PerformanceGroup[]; common_cells: number; comparison_groups: number; min_samples: number; min_cell_samples: number; min_daily_samples: number; min_daily_cell_samples: number }
++
++export interface ProviderUsageTotals {
++ requests: number; failed: number; input_tokens: number; output_tokens: number;
++ cache_read_tokens: number; total_tokens: number; total_cost_usd: number; unpriced_requests: number;
++}
++export interface ProviderStats {
++ provider: string; generated_at: string; range_start: string; accounts: number;
++ totals: ProviderUsageTotals;
++ groups: Array<ProviderUsageTotals & { model: string; mode: string }>;
++ days: Array<ProviderUsageTotals & { day: string }>;
++}

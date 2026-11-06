@@ -4,6 +4,7 @@ import http.cookiejar, json, os, secrets, tempfile, time
 import yaml
 from websockets.sync.client import connect
 from smoke import docker, request, eventually
+from live_sse import LiveStream
 
 ROOT=Path(__file__).resolve().parents[1]
 CPA_QUOTA_IMAGE=os.environ.get('CPA_QUOTA_IMAGE','ha-cpa-quota:local')
@@ -18,6 +19,7 @@ def main():
   (config/'providers.yaml').write_text(yaml.safe_dump({'api-keys':{'codex':[{'name':'test-'+a,'keys':[{'api-key':'fake-account-'+a,'websockets':True}],'base-url':'http://mock:9000','prefix':a,'models':[{'name':'gpt-5.5','alias':'quota-test'}]} for a in ('a','b')]},'requests':{'payload':{'override':[{'models':[{'name':'*','protocol':'codex'}],'params':{'service_tier':'priority'}}]}}}))
   (tmp/'cpa.json').write_text(json.dumps({'api_keys':[key],'management_key':management}))
   (tmp/'keeper.json').write_text(json.dumps({'cpa_base_url':'http://cpa:8317','management_key':management,'login_password':password,'read_only_password':readonly,'viewer_base_path':'/test-quota','viewer_dashboard_enabled':True,'viewer_quota_enabled':True,'viewer_api_gateway_enabled':True}))
+  streams=[]
   try:
    docker('network','create',network)
    for v in volumes:docker('volume','create',v)
@@ -56,6 +58,12 @@ def main():
    allview=lambda:json.loads(request(gateway+'/test-quota/api/v1/read-only/key-quota',opener=ro)[1])['accounts']
    eventually(lambda:len([a for a in view() if a['rows']])==2,timeout=90)
    assert sorted(round(a['rows'][0]['remaining_percent']) for a in view() if a['rows'])==[29,83]
+   assert request(private+'/v8/management/live')[0]==401
+   assert request(api+'/v8/management/live',admin)[0]==404
+   assert request(gateway+'/test-quota/api/v1/live')[0]==401
+   for method in ('POST','PUT','DELETE'):
+    assert request(gateway+'/test-quota/api/v1/live',method=method,body={})[0]==404
+   streams=[LiveStream(private+'/v8/management/live',admin),LiveStream(gateway+'/test-quota/api/v1/live',opener=viewer),LiveStream(gateway+'/test-quota/api/v1/live',opener=ro)]
    with connect(api.replace('http:','ws:')+'/v1/responses',additional_headers={'Authorization':'Bearer '+key},open_timeout=20) as ws:
     ws.send(json.dumps({'type':'response.create','model':'a/quota-test','input':[{'role':'user','content':[{'type':'input_text','text':'Reply briefly.'}]}]}))
     got_quota=False
@@ -63,6 +71,8 @@ def main():
      event=json.loads(ws.recv(timeout=20));assert event.get('type')!='error',event;got_quota |= event.get('type')=='codex.rate_limits'
      if event.get('type')=='response.completed':break
    assert got_quota,'upstream WebSocket event not forwarded'
+   for stream in streams:stream.wait('quota')
+   print('PASS: authenticated CPA and restricted Keeper SSE streams deliver cached quota changes without buffering',flush=True)
    # Exercise interruption through both packaged gateways against a held-open
    # upstream turn, then continue on the same downstream/upstream connection.
    mock_calls=lambda:json.loads(docker('exec',names['mock'],'python','-c','import urllib.request;print(urllib.request.urlopen("http://localhost:9000/stats").read().decode())'))['calls']
@@ -101,6 +111,18 @@ def main():
    assert request(keeper+'/api/v1/auth/read-only-login',headers,{'password':readonly},lanro)[0]==204
    assert request(keeper+'/api/v1/quota/refresh',headers,{'auth_indexes':['anything']},lanro)[0]==403
    assert request(keeper+'/api/v1/usage/provider-quota',opener=lanro)[0]==403
+   status,_=request(api+'/v1/responses',auth,{**body('b'),'instructions':'__fail_fixture__'})
+   assert status>=400
+   for stream in streams:stream.wait('usage')
+   eventually(lambda:any(event['failed'] for event in events()),timeout=90)
+   overview=lambda:json.loads(request(gateway+'/test-quota/api/v1/read-only/key-overview?range=today',opener=ro)[1])['usage']
+   eventually(lambda:overview()['failure_count']>=1 and overview()['total_requests']>=4,timeout=90)
+   replacement=LiveStream(gateway+'/test-quota/api/v1/live',opener=viewer);replacement.close()
+   print('PASS: request/failure counts and events update after SSE; reconnect resynchronizes',flush=True)
+   if os.environ.get('SSE_BROWSER') == '1':
+    (tmp/'browser.json').write_text(json.dumps({'keeper':'http://'+names['keeper']+':8080','private':'http://cpa:8317','api':'http://cpa:8080','password':password,'management':management,'key':key}))
+    output=ROOT/'.test-data'/'sse-20261106'/'browser';output.mkdir(parents=True,exist_ok=True)
+    print(docker('run','--rm','--network',network,'-v',str(ROOT/'tests')+':/scripts:ro','-v',str(tmp)+':/fixtures:ro','-v',str(output)+':/output','ha-sse-browser:local','/scripts/sse_browser.cjs'),flush=True)
    counter=lambda:json.loads(docker('exec',names['mock'],'python','-c','import urllib.request;print(urllib.request.urlopen("http://localhost:9000/stats").read().decode())'))['calls']
    count=counter();times=[r['captured_at'] for a in view() for r in a['rows']]
    for _ in range(3):
@@ -120,6 +142,7 @@ def main():
     print(name+': '+logs[-3000:],flush=True)
    raise
   finally:
+   for stream in streams:stream.close()
    for name in names.values():docker('rm','-f',name,check=False)
    for v in volumes:docker('volume','rm',v,check=False)
    docker('network','rm',network,check=False)

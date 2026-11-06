@@ -1,0 +1,488 @@
+diff --git a/internal/api/handlers/management/api_tools.go b/internal/api/handlers/management/api_tools.go
+index 2438ee7a..8c7693a2 100644
+--- a/internal/api/handlers/management/api_tools.go
++++ b/internal/api/handlers/management/api_tools.go
+@@ -235,7 +235,7 @@ func (h *Handler) APICall(c *gin.Context) {
+ 		return
+ 	}
+ 
+-	if auth != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && ((auth.Provider == "codex" && parsedURL.Hostname() == "chatgpt.com" && parsedURL.Path == "/backend-api/wham/usage") || (auth.Provider == "claude" && parsedURL.Hostname() == "api.anthropic.com" && parsedURL.Path == "/api/oauth/usage")) {
++	if auth != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && ((auth.Provider == "codex" && parsedURL.Hostname() == "chatgpt.com" && (parsedURL.Path == "/backend-api/wham/usage" || parsedURL.Path == "/backend-api/wham/rate-limit-reset-credits")) || (auth.Provider == "claude" && parsedURL.Hostname() == "api.anthropic.com" && parsedURL.Path == "/api/oauth/usage")) {
+ 		source := "manual_provider_query"
+ 		if body.QuotaSource == "scheduled" {
+ 			source = "scheduled_provider_query"
+diff --git a/internal/api/handlers/management/live.go b/internal/api/handlers/management/live.go
+new file mode 100644
+index 00000000..9052f8b4
+--- /dev/null
++++ b/internal/api/handlers/management/live.go
+@@ -0,0 +1,75 @@
++package management
++
++import (
++	"encoding/json"
++	"fmt"
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
++	"net/http"
++	"strings"
++	"time"
++)
++
++func (h *Handler) GetLiveStats(c *gin.Context) {
++	subscription := live.Default.Subscribe("", false)
++	if subscription == nil {
++		c.Status(http.StatusServiceUnavailable)
++		return
++	}
++	defer subscription.Close()
++	provided := strings.TrimSpace(c.GetHeader("Authorization"))
++	if strings.HasPrefix(strings.ToLower(provided), "bearer ") {
++		provided = strings.TrimSpace(provided[7:])
++	}
++	if provided == "" {
++		provided = c.GetHeader("X-Management-Key")
++	}
++	ip := c.ClientIP()
++	local := ip == "127.0.0.1" || ip == "::1"
++	c.Header("Content-Type", "text/event-stream")
++	c.Header("Cache-Control", "no-store")
++	c.Header("X-Accel-Buffering", "no")
++	seq := 0
++	send := func(topics []string) bool {
++		if allowed, _, _ := h.AuthenticateManagementKey(ip, local, provided); !allowed {
++			return false
++		}
++		seq++
++		payload, _ := json.Marshal(gin.H{"topics": topics})
++		_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(10 * time.Second))
++		_, err := fmt.Fprintf(c.Writer, "id: %d\nevent: change\ndata: %s\n\n", seq, payload)
++		c.Writer.Flush()
++		return err == nil
++	}
++	if !send([]string{"sync"}) {
++		return
++	}
++	tick := time.NewTicker(15 * time.Second)
++	defer tick.Stop()
++	for {
++		select {
++		case <-c.Request.Context().Done():
++			return
++		case <-subscription.Wake:
++			timer := time.NewTimer(150 * time.Millisecond)
++			select {
++			case <-c.Request.Context().Done():
++				timer.Stop()
++				return
++			case <-timer.C:
++			}
++			topics := subscription.Drain()
++			if len(topics) == 0 {
++				continue
++			}
++			if !send(topics) {
++				return
++			}
++		case <-tick.C:
++			allowed, _, _ := h.AuthenticateManagementKey(ip, local, provided)
++			if !allowed || !send([]string{"clock"}) {
++				return
++			}
++		}
++	}
++}
+diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
+index ba1f836b..892d97b4 100644
+--- a/internal/api/server_management_v8.go
++++ b/internal/api/server_management_v8.go
+@@ -1,6 +1,7 @@
+ package api
+ 
+ import (
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
+ 	"net/http"
+ 
+ 	"github.com/gin-gonic/gin"
+@@ -17,10 +18,16 @@ func (s *Server) registerManagementV8Routes() {
+ 	v8 := s.engine.Group(prefix)
+ 	v8.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
+ 		c.Set(management.ConfigV8ContextKey, true)
++		c.Next()
++		if c.Request.Method != "GET" && c.Writer.Status() < 300 {
++			live.Default.Publish("accounts")
++			live.Default.Publish("quota")
++		}
+ 	})
+ 	v8.GET("/access/api-key-names", s.mgmt.GetAPIKeyNames)
+ 	v8.PATCH("/access/api-key-names", s.mgmt.PatchAPIKeyNames)
+ 	v8.GET("/quota/observations", s.mgmt.GetQuotaObservations)
++	v8.GET("/live", s.mgmt.GetLiveStats)
+ 	v8.GET("/config", s.mgmt.ConfigV8)
+ 	v8.PUT("/config", s.mgmt.ConfigV8)
+ 	v8.PATCH("/config", s.mgmt.ConfigV8)
+diff --git a/internal/live/hub.go b/internal/live/hub.go
+new file mode 100644
+index 00000000..c40c62eb
+--- /dev/null
++++ b/internal/live/hub.go
+@@ -0,0 +1,74 @@
++// Package live carries bounded, non-blocking invalidations, never account data or credentials.
++package live
++
++import "sync"
++
++type Hub struct {
++	mu          sync.Mutex
++	subscribers map[*Subscription]struct{}
++}
++type Subscription struct {
++	hub    *Hub
++	Group  string
++	Viewer bool
++	Wake   chan struct{}
++	topics map[string]bool
++}
++
++func New() *Hub { return &Hub{subscribers: make(map[*Subscription]struct{})} }
++func (h *Hub) Subscribe(group string, viewer bool) *Subscription {
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	if len(h.subscribers) >= 256 {
++		return nil
++	}
++	s := &Subscription{hub: h, Group: group, Viewer: viewer, Wake: make(chan struct{}, 1), topics: map[string]bool{}}
++	h.subscribers[s] = struct{}{}
++	return s
++}
++func (s *Subscription) Close() {
++	s.hub.mu.Lock()
++	defer s.hub.mu.Unlock()
++	delete(s.hub.subscribers, s)
++}
++func (s *Subscription) Drain() []string {
++	s.hub.mu.Lock()
++	defer s.hub.mu.Unlock()
++	out := make([]string, 0, len(s.topics))
++	for topic := range s.topics {
++		out = append(out, topic)
++	}
++	s.topics = map[string]bool{}
++	return out
++}
++func (h *Hub) Publish(topic string, groups ...string) {
++	if h == nil {
++		return
++	}
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	for s := range h.subscribers {
++		if s.Viewer && topic != "usage" && topic != "quota" {
++			continue
++		}
++		if s.Viewer && topic == "usage" && len(groups) > 0 {
++			match := false
++			for _, group := range groups {
++				if group == s.Group {
++					match = true
++					break
++				}
++			}
++			if !match {
++				continue
++			}
++		}
++		s.topics[topic] = true
++		select {
++		case s.Wake <- struct{}{}:
++		default:
++		}
++	}
++}
++
++var Default = New()
+diff --git a/internal/live/hub_test.go b/internal/live/hub_test.go
+new file mode 100644
+index 00000000..db087869
+--- /dev/null
++++ b/internal/live/hub_test.go
+@@ -0,0 +1,53 @@
++package live
++
++import "testing"
++
++func TestAudienceAndCoalescing(t *testing.T) {
++	h := New()
++	admin := h.Subscribe("", false)
++	a := h.Subscribe("a", true)
++	b := h.Subscribe("b", true)
++	defer admin.Close()
++	defer a.Close()
++	defer b.Close()
++	for i := 0; i < 10000; i++ {
++		h.Publish("usage", "a")
++		h.Publish("accounts")
++		h.Publish("quota")
++	}
++	if len(admin.Drain()) != 3 {
++		t.Fatal("lost topics for slow subscriber")
++	}
++	if len(a.Drain()) != 2 {
++		t.Fatal("viewer missed scoped usage/quota")
++	}
++	topics := b.Drain()
++	if len(topics) != 1 || topics[0] != "quota" {
++		t.Fatalf("cross-group notification: %v", topics)
++	}
++	a.Close()
++	h.Publish("usage", "a")
++	if len(a.Drain()) != 0 {
++		t.Fatal("closed subscriber retained")
++	}
++}
++func TestSubscriberLimit(t *testing.T) {
++	h := New()
++	var first *Subscription
++	for i := 0; i < 256; i++ {
++		s := h.Subscribe("", false)
++		if s == nil {
++			t.Fatal(i)
++		}
++		if i == 0 {
++			first = s
++		}
++	}
++	if h.Subscribe("", false) != nil {
++		t.Fatal("unbounded subscriptions")
++	}
++	first.Close()
++	if h.Subscribe("", false) == nil {
++		t.Fatal("slot not released")
++	}
++}
+diff --git a/internal/quotatraffic/cache.go b/internal/quotatraffic/cache.go
+index 7dd7d3fe..b42efecb 100644
+--- a/internal/quotatraffic/cache.go
++++ b/internal/quotatraffic/cache.go
+@@ -2,6 +2,7 @@ package quotatraffic
+ 
+ import (
+ 	"encoding/json"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
+ 	"math"
+ 	"net/http"
+ 	"sort"
+@@ -12,12 +13,13 @@ import (
+ )
+ 
+ type Observation struct {
+-	AuthIndex  string      `json:"auth_index"`
+-	Provider   string      `json:"provider"`
+-	Window     string      `json:"window"`
+-	Headers    http.Header `json:"headers"`
+-	ObservedAt time.Time   `json:"observed_at"`
+-	Source     string      `json:"source"`
++	ResetCreditsAvailableCount *int        `json:"reset_credits_available_count,omitempty"`
++	AuthIndex                  string      `json:"auth_index"`
++	Provider                   string      `json:"provider"`
++	Window                     string      `json:"window"`
++	Headers                    http.Header `json:"headers"`
++	ObservedAt                 time.Time   `json:"observed_at"`
++	Source                     string      `json:"source"`
+ }
+ 
+ const maxObservations = 4096
+@@ -100,7 +102,13 @@ func Capture(index, provider string, headers http.Header, at time.Time, source s
+ 		groups[group].Set(key, value)
+ 	}
+ 	cache.Lock()
+-	defer cache.Unlock()
++	changed := false
++	defer func() {
++		cache.Unlock()
++		if changed {
++			live.Default.Publish("quota")
++		}
++	}()
+ 	for group, h := range groups {
+ 		for key, values := range headers {
+ 			lower := strings.ToLower(key)
+@@ -151,7 +159,8 @@ func Capture(index, provider string, headers http.Header, at time.Time, source s
+ 			}
+ 			delete(cache.items, oldKey)
+ 		}
+-		cache.items[key] = Observation{index, provider, group, h.Clone(), at, source}
++		cache.items[key] = Observation{AuthIndex: index, Provider: provider, Window: group, Headers: h.Clone(), ObservedAt: at, Source: source}
++		changed = true
+ 	}
+ }
+ func Read(allowed map[string]bool) []Observation {
+@@ -180,6 +189,9 @@ func CaptureQuery(index, provider string, body []byte, at time.Time, source stri
+ 		return
+ 	}
+ 	headers := http.Header{}
++	if provider == "codex" {
++		CaptureResetCredits(index, body, at, source)
++	}
+ 	if provider == "codex" {
+ 		add := func(prefix string, raw json.RawMessage) {
+ 			var limit map[string]json.RawMessage
+diff --git a/internal/quotatraffic/reset_credits.go b/internal/quotatraffic/reset_credits.go
+new file mode 100644
+index 00000000..be384759
+--- /dev/null
++++ b/internal/quotatraffic/reset_credits.go
+@@ -0,0 +1,40 @@
++package quotatraffic
++
++import (
++	"encoding/json"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
++	"time"
++)
++
++func CaptureResetCredits(index string, body []byte, at time.Time, source string) {
++	if index == "" || at.IsZero() {
++		return
++	}
++	var payload struct {
++		AvailableCount *int `json:"available_count"`
++		Credits        *struct {
++			AvailableCount *int `json:"available_count"`
++		} `json:"rate_limit_reset_credits"`
++	}
++	if json.Unmarshal(body, &payload) != nil {
++		return
++	}
++	count := payload.AvailableCount
++	if payload.Credits != nil {
++		count = payload.Credits.AvailableCount
++	}
++	if count == nil || *count < 0 || *count > 10000 {
++		return
++	}
++	cache.Lock()
++	key := index + "\x00codex\x00reset-credits"
++	old, exists := cache.items[key]
++	if (exists && !at.After(old.ObservedAt)) || (!exists && len(cache.items) >= maxObservations) {
++		cache.Unlock()
++		return
++	}
++	value := *count
++	cache.items[key] = Observation{AuthIndex: index, Provider: "codex", Window: "reset-credits", ObservedAt: at, Source: source, ResetCreditsAvailableCount: &value}
++	cache.Unlock()
++	live.Default.Publish("quota")
++}
+diff --git a/internal/quotatraffic/reset_credits_test.go b/internal/quotatraffic/reset_credits_test.go
+new file mode 100644
+index 00000000..fa17e84a
+--- /dev/null
++++ b/internal/quotatraffic/reset_credits_test.go
+@@ -0,0 +1,33 @@
++package quotatraffic
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestResetCreditsAreNumericScopedAndMonotonic(t *testing.T) {
++	resetCache()
++	at := time.Now()
++	CaptureResetCredits("a", []byte(`{"available_count":3,"token":"never-copy-this"}`), at, "manual_provider_query")
++	for _, body := range []string{`{"available_count":-1}`, `{"available_count":10001}`, `{"available_count":"4"}`, `{"available_count":1.5}`, `{}`} {
++		CaptureResetCredits("a", []byte(body), at.Add(time.Second), "manual_provider_query")
++	}
++	CaptureResetCredits("a", []byte(`{"available_count":8}`), at.Add(-time.Second), "manual_provider_query")
++	if len(Read(map[string]bool{"b": true})) != 0 {
++		t.Fatal("cross-account observation")
++	}
++	rows := Read(map[string]bool{"a": true})
++	if len(rows) != 1 || rows[0].ResetCreditsAvailableCount == nil || *rows[0].ResetCreditsAvailableCount != 3 {
++		t.Fatalf("bad count: %+v", rows)
++	}
++	body, _ := json.Marshal(rows)
++	if strings.Contains(string(body), "never-copy") {
++		t.Fatal("raw provider data leaked")
++	}
++	CaptureResetCredits("a", []byte(`{"rate_limit_reset_credits":{"available_count":0}}`), at.Add(time.Second), "manual_provider_query")
++	if *Read(map[string]bool{"a": true})[0].ResetCreditsAvailableCount != 0 {
++		t.Fatal("zero count lost")
++	}
++}
+diff --git a/sdk/cliproxy/auth/conductor_cooldown.go b/sdk/cliproxy/auth/conductor_cooldown.go
+index 76379170..efc5048b 100644
+--- a/sdk/cliproxy/auth/conductor_cooldown.go
++++ b/sdk/cliproxy/auth/conductor_cooldown.go
+@@ -5,6 +5,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
+ 	"io"
+ 	"net"
+@@ -948,8 +949,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
+ 		auth.recordRecentRequest(now, result.Success)
+ 		if result.Success {
+ 			auth.Success++
++			live.Default.Publish("usage")
++			live.Default.Publish("accounts")
+ 		} else {
+ 			auth.Failed++
++			live.Default.Publish("usage")
++			live.Default.Publish("accounts")
+ 		}
+ 		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
+ 
+@@ -1488,8 +1493,12 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
+ 		auth.recordRecentRequest(now, result.Success)
+ 		if result.Success {
+ 			auth.Success++
++			live.Default.Publish("usage")
++			live.Default.Publish("accounts")
+ 		} else {
+ 			auth.Failed++
++			live.Default.Publish("usage")
++			live.Default.Publish("accounts")
+ 		}
+ 		auth.Generation++
+ 		auth.UpdatedAt = now
+diff --git a/sdk/cliproxy/auth/conductor_lifecycle.go b/sdk/cliproxy/auth/conductor_lifecycle.go
+index 117c15c0..8e1d8d4b 100644
+--- a/sdk/cliproxy/auth/conductor_lifecycle.go
++++ b/sdk/cliproxy/auth/conductor_lifecycle.go
+@@ -3,6 +3,7 @@ package auth
+ import (
+ 	"context"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
+ 	"math"
+ 	"net/http"
+ 	"strings"
+@@ -165,6 +166,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
+ 	m.structuralEpoch.Add(1)
+ 	m.queueRefreshReschedule(auth.ID)
+ 	m.hook.OnAuthRegistered(ctx, auth.Clone())
++	live.Default.Publish("accounts")
+ 	if cooldownStateChanged {
+ 		m.persistCooldownStates(context.Background())
+ 	}
+@@ -275,6 +277,7 @@ func (m *Manager) finishAuthUpdate(ctx context.Context, committed *Auth, persist
+ 	m.structuralEpoch.Add(1)
+ 	m.queueRefreshReschedule(committed.ID)
+ 	m.hook.OnAuthUpdated(ctx, committed.Clone())
++	live.Default.Publish("accounts")
+ 	if persistCooldown {
+ 		m.persistCooldownStates(context.Background())
+ 	}
+@@ -695,6 +698,7 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
+ 	}
+ 	m.structuralEpoch.Add(1)
+ 	m.queueRefreshUnschedule(id)
++	live.Default.Publish("accounts")
+ 	m.invalidateSessionAffinity(id)
+ 
+ 	if provider != "" {

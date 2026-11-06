@@ -29,16 +29,20 @@ COPY patches/codex-reconnect.patch /tmp/codex-reconnect.patch
 RUN git apply --check /tmp/codex-reconnect.patch && git apply /tmp/codex-reconnect.patch
 COPY patches/upstream-integration.patch /tmp/upstream-integration.patch
 RUN git apply --check /tmp/upstream-integration.patch && git apply /tmp/upstream-integration.patch
+COPY patches/live-stats.patch /tmp/live-stats.patch
+RUN git apply --check /tmp/live-stats.patch && git apply /tmp/live-stats.patch
+COPY patches/shared-quota-reset.patch /tmp/shared-quota-reset.patch
+RUN git apply --check /tmp/shared-quota-reset.patch && git apply /tmp/shared-quota-reset.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./
 RUN go mod download
 COPY --from=source /src/ ./
-RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/live ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/api/handlers/openai
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api -run 'TestManagementV8'
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.1" -o /out/CLIProxyAPI ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.2" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -48,6 +52,10 @@ RUN git init && git remote add origin https://github.com/router-for-me/Cli-Proxy
     && test "$(git rev-parse HEAD)" = f154fa9380825c4fe94bc577a9abaa7e505f8875
 COPY patches/cpamc-ha-integration.patch /tmp/cpamc-ha-integration.patch
 RUN git apply --check /tmp/cpamc-ha-integration.patch && git apply /tmp/cpamc-ha-integration.patch
+COPY patches/cpamc-live-stats.patch /tmp/cpamc-live-stats.patch
+RUN git apply --check /tmp/cpamc-live-stats.patch && git apply /tmp/cpamc-live-stats.patch
+COPY patches/cpamc-browser-locale-shared-reset.patch /tmp/cpamc-browser-locale-shared-reset.patch
+RUN git apply --check /tmp/cpamc-browser-locale-shared-reset.patch && git apply /tmp/cpamc-browser-locale-shared-reset.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/package.json /src/bun.lock ./
@@ -66,7 +74,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.17
+ARG BUILD_VERSION=0.1.18
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

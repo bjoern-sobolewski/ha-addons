@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.18
+
+- Centralize Codex/Claude quota resets in the v8 Management API with provider eligibility checks, explicit grant/credit support, durable request replay protection and cooldown recovery. Keep automatic OpenAI credit selection as the default.
+- Format CPAMC date/time displays using browser locale, hour cycle and time zone.
+
+- Replace credential/provider health dots with taller green/red request-volume graphs that update in place.
+
+- Add an authenticated private SSE stats stream. CPAMC refreshes cached quota, reset-credit counts, credential health and request/failure totals from backend notifications without extra provider queries.
+
 ## 0.1.17
 
 - Integrate CLIProxyAPI 8.0.51 plus the frozen main fixes at `be2563ff74a40979a9aadc59d0b24cedc6ba2e81`; pin management UI 1.27.2 at `f154fa9380825c4fe94bc577a9abaa7e505f8875`. The backend includes unreleased post-8.0.51 changes.

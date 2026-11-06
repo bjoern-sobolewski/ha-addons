@@ -31,7 +31,10 @@ async def responses(request):
                 await socket.send_json({'type':'codex.rate_limits','rate_limits':{'primary':{'used_percent':used,'window_minutes':300,'reset_after_seconds':3600},'secondary':{'used_percent':5,'window_minutes':10080,'reset_after_seconds':86400}}})
                 await socket.send_json({'type':'response.completed','response':result})
         return socket
-    assert (await request.json()).get('service_tier')=='priority'
+    payload=await request.json()
+    assert payload.get('service_tier')=='priority'
+    if payload.get('instructions')=='__fail_fixture__':
+        return web.json_response({'error':{'message':'synthetic failure','type':'server_error'}},status=500)
     return web.Response(text='data: '+json.dumps({'type':'response.completed','response':result})+'\n\n',content_type='text/event-stream',headers={'X-Codex-Primary-Used-Percent':str(used),'X-Codex-Primary-Window-Minutes':'300','X-Codex-Primary-Reset-After-Seconds':'3600','Set-Cookie':'synthetic-secret-cookie'})
 
 app=web.Application()

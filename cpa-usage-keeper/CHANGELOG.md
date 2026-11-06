@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1
+
+- Use browser locale, hour cycle and time zone for date/time displays across Keeper, including reset expiry, history, charts, events, pricing and provider statistics.
+- Route reset options and redemption through CLIProxyAPI shared reset endpoints; preserve request IDs and selected grants on ambiguous retries.
+
+- Add Provider stats in the Credentials toolbar: combined all-account request totals, success/cache rates, tokens, stored API-equivalent value, daily activity and pooled response-speed distributions with workload filters. Include retained history and show missing prices explicitly.
+
+- Replace credential health dots with taller stacked request-volume graphs, green successes and red failures, exact bucket counts and smooth height transitions.
+
+- Add authenticated SSE updates across overview, realtime, analysis, request events, credentials and account details. Preserve chart state with animated in-place updates; cache-only quota/reset-credit and request/failure stats follow backend changes.
+
 ## 0.2.0
 
 - Integrate upstream Keeper v2.0.3 and main through `7b2b670`, including staged startup, persisted request costs, pricing branches, OIDC, execution traces and plugin identities.

@@ -1,0 +1,567 @@
+diff --git a/src/components/providers/ProviderStatusBar.module.scss b/src/components/providers/ProviderStatusBar.module.scss
+new file mode 100644
+index 0000000..48b35ce
+--- /dev/null
++++ b/src/components/providers/ProviderStatusBar.module.scss
+@@ -0,0 +1,10 @@
++.graph {position: relative;display: flex;align-items: flex-end;gap: 2px;min-width: 0;flex: 1; height: 36px;}
++.bucket {position: relative;flex: 1 1 0;min-width: 0;height: 100%;}
++.bucket::after {content: '';position: absolute;inset: auto 0 0;height: 1px;background: var(--border-color);}
++.stack {position: absolute;inset: auto 0 0;display: flex;flex-direction: column;justify-content: flex-end;transition: height 350ms ease;z-index: 1;}
++.success,.failure {min-height: 1px;flex-shrink: 0;transition: height 350ms ease;border-radius: 1px 1px 0 0;}
++.success {background: #22c55e;}
++.failure {background: #ef4444;}
++.legend {display: flex;gap: 10px;font-size: 10px;font-variant-numeric: tabular-nums;line-height: 1.25;margin-top: 5px;}
++.ok {color: #22c55e;}.error {color: #ef4444;}.peak {margin-left: auto;color: var(--text-secondary);}
++@media(prefers-reduced-motion: reduce) {.stack,.success,.failure {transition: none;}}
+diff --git a/src/components/providers/ProviderStatusBar.tsx b/src/components/providers/ProviderStatusBar.tsx
+index de6a8fd..03a1093 100644
+--- a/src/components/providers/ProviderStatusBar.tsx
++++ b/src/components/providers/ProviderStatusBar.tsx
+@@ -2,29 +2,9 @@ import { useState, useCallback, useRef, useEffect } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import type { StatusBarData, StatusBlockDetail } from '@/utils/recentRequests';
+ 
+-const defaultStyles: Record<string, string> = {};
++import graph from './ProviderStatusBar.module.scss';
+ 
+-/**
+- * 根据成功率 (0–1) 在三个色标之间做 RGB 线性插值
+- * 0 → 红 (#ef4444)  →  0.5 → 金黄 (#facc15)  →  1 → 绿 (#22c55e)
+- */
+-const COLOR_STOPS = [
+-  { r: 239, g: 68, b: 68 }, // #ef4444
+-  { r: 250, g: 204, b: 21 }, // #facc15
+-  { r: 34, g: 197, b: 94 }, // #22c55e
+-] as const;
+-
+-function rateToColor(rate: number): string {
+-  const t = Math.max(0, Math.min(1, rate));
+-  const segment = t < 0.5 ? 0 : 1;
+-  const localT = segment === 0 ? t * 2 : (t - 0.5) * 2;
+-  const from = COLOR_STOPS[segment];
+-  const to = COLOR_STOPS[segment + 1];
+-  const r = Math.round(from.r + (to.r - from.r) * localT);
+-  const g = Math.round(from.g + (to.g - from.g) * localT);
+-  const b = Math.round(from.b + (to.b - from.b) * localT);
+-  return `rgb(${r}, ${g}, ${b})`;
+-}
++const defaultStyles: Record<string, string> = {};
+ 
+ function formatTime(timestamp: number): string {
+   const date = new Date(timestamp);
+@@ -51,6 +31,7 @@ export function ProviderStatusBar({ statusData, styles: stylesProp }: ProviderSt
+   const [activeTooltip, setActiveTooltip] = useState<number | null>(null);
+   const blocksRef = useRef<HTMLDivElement>(null);
+ 
++  const peak = Math.max(1, ...statusData.blockDetails.map(detail => detail.success + detail.failure));
+   const hasData = statusData.totalSuccess + statusData.totalFailure > 0;
+   const rateClass = !hasData
+     ? ''
+@@ -123,25 +104,28 @@ export function ProviderStatusBar({ statusData, styles: stylesProp }: ProviderSt
+   };
+ 
+   return (
++    <div>
+     <div className={s.statusBar}>
+-      <div className={s.statusBlocks} ref={blocksRef}>
++      <div className={`${s.statusBlocks} ${graph.graph}`} ref={blocksRef} role="list" aria-label={t('status_bar.usage_graph')}>
+         {statusData.blockDetails.map((detail, idx) => {
+-          const isIdle = detail.rate === -1;
+-          const blockStyle = isIdle ? undefined : { backgroundColor: rateToColor(detail.rate) };
++          const total = Math.max(0, detail.success) + Math.max(0, detail.failure);
+           const isActive = activeTooltip === idx;
+ 
+           return (
+             <div
+               key={idx}
+-              className={`${s.statusBlockWrapper} ${isActive ? s.statusBlockActive : ''}`}
++              className={`${s.statusBlockWrapper} ${graph.bucket} ${isActive ? s.statusBlockActive : ''}`}
++              role="listitem"
++              data-usage-total={total}
++              aria-label={formatTime(detail.startTime)+' – '+formatTime(detail.endTime)+': '+t('status_bar.success_short')+' '+detail.success+', '+t('status_bar.failure_short')+' '+detail.failure}
+               onPointerEnter={(e) => handlePointerEnter(e, idx)}
+               onPointerLeave={handlePointerLeave}
+               onPointerDown={(e) => handlePointerDown(e, idx)}
+             >
+-              <div
+-                className={`${s.statusBlock} ${isIdle ? s.statusBlockIdle : ''}`}
+-                style={blockStyle}
+-              />
++              <div className={graph.stack} aria-hidden="true" style={{height: String(total/peak*100)+'%'}}>
++                {detail.failure>0 && <span className={graph.failure} style={{height: String(detail.failure/total*100)+'%'}}/>}
++                {detail.success>0 && <span className={graph.success} style={{height: String(detail.success/total*100)+'%'}}/>}
++              </div>
+               {isActive && renderTooltip(detail, idx)}
+             </div>
+           );
+@@ -151,5 +135,7 @@ export function ProviderStatusBar({ statusData, styles: stylesProp }: ProviderSt
+         {hasData ? formatSuccessRate(statusData.successRate) : '--'}
+       </span>
+     </div>
++    <div className={graph.legend} aria-hidden="true"><span className={graph.ok}>{t('status_bar.success_short')} {statusData.totalSuccess.toLocaleString()}</span><span className={graph.error}>{t('status_bar.failure_short')} {statusData.totalFailure.toLocaleString()}</span><span className={graph.peak}>{t('status_bar.usage_peak',{count:hasData?peak:0})}</span></div>
++    </div>
+   );
+ }
+diff --git a/src/components/providers/hooks/useProviderRecentRequests.ts b/src/components/providers/hooks/useProviderRecentRequests.ts
+index 9ec1ee6..95c8cf1 100644
+--- a/src/components/providers/hooks/useProviderRecentRequests.ts
++++ b/src/components/providers/hooks/useProviderRecentRequests.ts
+@@ -1,5 +1,5 @@
+ import { useCallback, useEffect, useMemo, useState } from 'react';
+-import { useInterval } from '@/hooks/useInterval';
++import { useLiveRefresh } from '@/hooks/useLiveRefresh';
+ import { apiKeyUsageApi } from '@/services/api';
+ import { useAuthStore } from '@/stores';
+ import {
+@@ -170,12 +170,7 @@ export function useProviderRecentRequests(options: UseProviderRecentRequestsOpti
+     void loadRecentRequests().catch(() => {});
+   }, [enabled, loadRecentRequests, setUsageForCurrentScope]);
+ 
+-  useInterval(
+-    () => {
+-      void refreshRecentRequests().catch(() => {});
+-    },
+-    enabled ? PROVIDER_RECENT_REQUESTS_STALE_TIME_MS : null
+-  );
++  useLiveRefresh(refreshRecentRequests, ['usage', 'clock'], enabled);
+ 
+   const usageByProvider =
+     usageState.cache === cache ? usageState.value : cache.cachedUsageByProvider;
+diff --git a/src/features/authFiles/AuthFilesPage.tsx b/src/features/authFiles/AuthFilesPage.tsx
+index 81c04fd..c6a3579 100644
+--- a/src/features/authFiles/AuthFilesPage.tsx
++++ b/src/features/authFiles/AuthFilesPage.tsx
+@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
+ import { useNavigate } from 'react-router-dom';
+ import { apiClient } from '@/services/api/client';
+ import { makeCodexReconnectTarget } from './reconnect';
+-import { useInterval } from '@/hooks/useInterval';
++import { useLiveRefresh } from '@/hooks/useLiveRefresh';
+ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+ import { useRevealOnScroll } from '@/hooks/motion';
+ import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
+@@ -385,12 +385,7 @@ export function AuthFilesPage() {
+     loadModelAlias();
+   }, [isCurrentLayer, loadFiles, loadExcluded, loadModelAlias]);
+ 
+-  useInterval(
+-    () => {
+-      void loadFiles({ background: true }).catch(() => {});
+-    },
+-    isCurrentLayer ? 240_000 : null
+-  );
++  useLiveRefresh(async () => loadFiles({ background: true }), ['accounts', 'usage'], isCurrentLayer);
+ 
+   /* ---------- 过滤 / 排序 / 分页 memos ---------- */
+ 
+diff --git a/src/features/dashboard/hooks/useDashboardOverview.ts b/src/features/dashboard/hooks/useDashboardOverview.ts
+index 518fe09..1535c47 100644
+--- a/src/features/dashboard/hooks/useDashboardOverview.ts
++++ b/src/features/dashboard/hooks/useDashboardOverview.ts
+@@ -1,3 +1,4 @@
++import { useLiveRefresh } from '@/hooks/useLiveRefresh';
+ import { useCallback, useEffect, useMemo, useState } from 'react';
+ import { authFilesApi } from '@/services/api';
+ import { useAuthStore, useConfigStore, useModelsStore } from '@/stores';
+@@ -135,10 +136,12 @@ export function useDashboardOverview() {
+       const response = await authFilesApi.list();
+       setAuthFiles(response.files);
+     } catch {
+-      setAuthFiles(null);
++      // Keep the last successful snapshot during a temporary disconnect.
+     }
+   }, [connected]);
+ 
++  useLiveRefresh(loadAuthFiles, ['accounts', 'usage', 'clock'], connected);
++
+   const loadModels = useCallback(async () => {
+     if (!connected || !apiBase) return;
+     try {
+diff --git a/src/features/quota/trafficQuota.ts b/src/features/quota/trafficQuota.ts
+index f25336f..5ca6723 100644
+--- a/src/features/quota/trafficQuota.ts
++++ b/src/features/quota/trafficQuota.ts
+@@ -16,6 +16,7 @@ export interface TrafficQuota {
+   headers: Record<string, string[]>;
+   observed_at: string;
+   source: string;
++ reset_credits_available_count?: number;
+ }
+ export type ObservedWindow = CodexQuotaWindow & QuotaObservation;
+ const normalizeName = (name: string) =>
+@@ -35,7 +36,7 @@ const instant = (value: string | undefined): number | null => {
+ export function trafficQuotaWindow(item: TrafficQuota, t: TFunction): ObservedWindow | null {
+   const captured = Date.parse(item.observed_at);
+   if (!Number.isFinite(captured)) return null;
+-  const entries = Object.entries(item.headers);
++  const entries = Object.entries(item.headers ?? {});
+   const value = (suffix: string) =>
+     entries.find(([key]) => key.toLowerCase().endsWith(suffix))?.[1]?.[0];
+   const number = (suffix: string) => {
+@@ -160,6 +161,9 @@ export function mergeTrafficQuota(
+       };
+     changed = true;
+   }
+-  if (!changed) return stored;
++  const credits = provider === 'codex' ? items.filter(item => item.provider === provider && Number.isInteger(item.reset_credits_available_count) && item.reset_credits_available_count! >= 0 && Number.isFinite(Date.parse(item.observed_at))).sort((a,b) => Date.parse(b.observed_at)-Date.parse(a.observed_at))[0] : undefined;
++  const creditCurrent = credits && (!stored?.capturedAt || Date.parse(credits.observed_at) >= Date.parse(stored.capturedAt));
++  if (!changed && !creditCurrent) return stored;
++  if (creditCurrent) return { ...(hasAccount ? stored : {}), status: 'success', windows, rateLimitResetCreditsAvailableCount: credits.reset_credits_available_count } as CodexQuotaState;
+   return { ...(hasAccount ? stored : {}), status: 'success', windows } as CodexQuotaState;
+ }
+diff --git a/src/hooks/useLiveRefresh.ts b/src/hooks/useLiveRefresh.ts
+new file mode 100644
+index 0000000..7d56142
+--- /dev/null
++++ b/src/hooks/useLiveRefresh.ts
+@@ -0,0 +1,8 @@
++import { useEffect, useRef } from 'react';
++import { startLiveRefresh, type LiveTopic } from '@/services/api/live';
++export function useLiveRefresh(refresh: () => Promise<unknown>, topics: readonly LiveTopic[], enabled = true) {
++ const current = useRef(refresh);
++ useEffect(() => { current.current = refresh; }, [refresh]);
++ const key = topics.join(',');
++ useEffect(() => { if (!enabled) return; return startLiveRefresh(async () => current.current(), key.split(',') as LiveTopic[], false); }, [enabled, key]);
++}
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index 7477ed4..64a303e 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -1012,7 +1012,9 @@
+   "status_bar": {
+     "success_short": "✓",
+     "failure_short": "✗",
+-    "no_requests": "No requests"
++    "no_requests": "No requests",
++    "usage_peak": "Peak {{count}} / 10m",
++    "usage_graph": "Request volume: successes and failures"
+   },
+   "logs": {
+     "preview_too_large": "This request log exceeds the 2 MiB preview limit. Download it to view.",
+diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
+index b516606..be90c22 100644
+--- a/src/i18n/locales/ko.json
++++ b/src/i18n/locales/ko.json
+@@ -1012,7 +1012,9 @@
+   "status_bar": {
+     "success_short": "✓",
+     "failure_short": "✗",
+-    "no_requests": "요청 없음"
++    "no_requests": "요청 없음",
++    "usage_peak": "최대 {{count}} / 10분",
++    "usage_graph": "요청량: 성공 및 실패"
+   },
+   "logs": {
+     "preview_too_large": "이 요청 로그는 2 MiB 미리보기 제한을 초과합니다. 다운로드하여 확인하세요.",
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index 9b1d990..280e74d 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -1015,7 +1015,9 @@
+   "status_bar": {
+     "success_short": "✓",
+     "failure_short": "✗",
+-    "no_requests": "Нет запросов"
++    "no_requests": "Нет запросов",
++    "usage_peak": "Пик {{count}} / 10 мин",
++    "usage_graph": "Запросы: успешные и неудачные"
+   },
+   "logs": {
+     "preview_too_large": "Журнал запроса превышает лимит предпросмотра в 2 МиБ. Скачайте его для просмотра.",
+diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
+index be13040..7bd2557 100644
+--- a/src/i18n/locales/tr.json
++++ b/src/i18n/locales/tr.json
+@@ -1012,7 +1012,9 @@
+   "status_bar": {
+     "success_short": "✓",
+     "failure_short": "✗",
+-    "no_requests": "İstek Yok"
++    "no_requests": "İstek Yok",
++    "usage_peak": "Zirve {{count}} / 10 dk",
++    "usage_graph": "İstek hacmi: başarılı ve başarısız"
+   },
+   "logs": {
+     "preview_too_large": "Bu İstek Günlüğü 2 MiB Önizleme Sınırını Aşıyor. Görmek için İndir.",
+diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
+index 4107e18..5f4119c 100644
+--- a/src/i18n/locales/vi.json
++++ b/src/i18n/locales/vi.json
+@@ -968,7 +968,9 @@
+   "status_bar": {
+     "success_short": "✓",
+     "failure_short": "✗",
+-    "no_requests": "Không có yêu cầu"
++    "no_requests": "Không có yêu cầu",
++    "usage_peak": "Đỉnh {{count}} / 10 phút",
++    "usage_graph": "Lượng yêu cầu: thành công và thất bại"
+   },
+   "logs": {
+     "title": "Trình xem Log",
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index 63f943a..20ebf54 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -581,7 +581,6 @@
+     "reset_confirm_button": "确认重置",
+     "reset_not_confirmed": "未确认额度重置成功，请刷新额度后再决定是否重试。",
+     "reset_cooldown_failed": "额度已重置，但代理冷却清除失败。请在原连接的认证文件页面使用“清除冷却”，不要再次消耗重置卡。",
+-
+     "reset_success": "已重置 \"{{name}}\" 的 Codex 额度",
+     "reset_failed": "重置 \"{{name}}\" 的 Codex 额度失败：{{message}}",
+     "plan_plus": "Plus",
+@@ -1011,7 +1010,9 @@
+   "status_bar": {
+     "success_short": "✓",
+     "failure_short": "✗",
+-    "no_requests": "无请求"
++    "no_requests": "无请求",
++    "usage_peak": "峰值 {{count}} / 10分钟",
++    "usage_graph": "请求量：成功与失败"
+   },
+   "logs": {
+     "preview_too_large": "报文超过 2 MiB 预览限制，请下载查看",
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index a3c32e6..1df37a2 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -581,7 +581,6 @@
+     "reset_confirm_button": "確認重置",
+     "reset_not_confirmed": "尚未確認額度重置成功，請重新整理額度後再決定是否重試。",
+     "reset_cooldown_failed": "額度已重置，但代理冷卻清除失敗。請在原連線的認證檔案頁面使用「清除冷卻」，不要再次消耗重置卡。",
+-
+     "reset_success": "已重置「{{name}}」的 Codex 配額",
+     "reset_failed": "重置「{{name}}」的 Codex 配額失敗：{{message}}",
+     "plan_plus": "Plus",
+@@ -1039,7 +1038,9 @@
+   "status_bar": {
+     "success_short": "✓",
+     "failure_short": "✗",
+-    "no_requests": "無請求"
++    "no_requests": "無請求",
++    "usage_peak": "峰值 {{count}} / 10分鐘",
++    "usage_graph": "請求量：成功與失敗"
+   },
+   "logs": {
+     "preview_too_large": "封包超過 2 MiB 預覽限制，請下載查看",
+diff --git a/src/services/api/client.ts b/src/services/api/client.ts
+index 17c46ed..2a44c3a 100644
+--- a/src/services/api/client.ts
++++ b/src/services/api/client.ts
+@@ -68,6 +68,13 @@ class ApiClient {
+     return client;
+   }
+ 
++  async openLiveStream(signal: AbortSignal): Promise<Response> {
++    const revision = this.connectionRevision;
++    const response = await fetch(this.apiBase + '/live', { signal, headers: { Authorization: 'Bearer ' + this.managementKey, Accept: 'text/event-stream' } });
++    if (signal.aborted || revision !== this.connectionRevision) throw new Error('Connection changed');
++    return response;
++  }
++
+   private readHeader(headers: Record<string, unknown> | undefined, keys: string[]): string | null {
+     if (!headers) return null;
+ 
+diff --git a/src/services/api/live.ts b/src/services/api/live.ts
+new file mode 100644
+index 0000000..e4e8f6f
+--- /dev/null
++++ b/src/services/api/live.ts
+@@ -0,0 +1,88 @@
++import { apiClient } from '@/services/api/client';
++import { useAuthStore } from '@/stores/useAuthStore';
++
++export type LiveTopic = 'sync' | 'usage' | 'quota' | 'accounts' | 'clock';
++export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'paused';
++type Listener = (topics: LiveTopic[]) => void;
++const listeners = new Set<Listener>();
++let unwatchAuth: (() => void) | undefined;
++const statusListeners = new Set<() => void>();
++let status: LiveStatus = 'connecting';
++let controller: AbortController | undefined;
++let retry: ReturnType<typeof setTimeout> | undefined;
++let generation = 0;
++let attempts = 0;
++const setStatus = (value: LiveStatus) => { if (status !== value) { status = value; statusListeners.forEach(listener => listener()); } };
++export const getLiveStatus = () => status;
++export const subscribeLiveStatus = (listener: () => void) => { statusListeners.add(listener); return () => { statusListeners.delete(listener); }; };
++
++// Fetch retains the existing cookie and CPAMC embed-header authentication. Tokens never enter URLs.
++async function connect() {
++  if (!listeners.size || document.hidden || controller || !useAuthStore.getState().isAuthenticated || useAuthStore.getState().connectionStatus !== 'connected') return;
++  const current = new AbortController(); controller = current;
++  const revision = generation;
++  setStatus(attempts ? 'reconnecting' : 'connecting');
++  let watchdog: ReturnType<typeof setTimeout> | undefined;
++  const touch = () => { clearTimeout(watchdog); watchdog = setTimeout(() => current.abort(), 45_000); };
++  try {
++    touch();
++    const response = await apiClient.openLiveStream(current.signal);
++    if (response.status === 401 || response.status === 403) { window.dispatchEvent(new Event('unauthorized')); return; }
++    if (!response.ok || !response.body || !response.headers.get('content-type')?.includes('text/event-stream')) throw new Error('Live connection unavailable');
++    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
++    while (true) {
++      const { value, done } = await reader.read(); if (done) break;
++      if (current.signal.aborted || revision !== generation) return;
++      touch(); buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
++      if (buffer.length > 65536) throw new Error('Invalid live frame');
++      let boundary: number;
++      while ((boundary = buffer.indexOf('\n\n')) >= 0) {
++        const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
++        const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
++        if (!data) continue;
++        const payload = JSON.parse(data) as { topics?: unknown };
++        if (!Array.isArray(payload.topics)) continue;
++        const topics = payload.topics.filter((topic): topic is LiveTopic => ['sync', 'usage', 'quota', 'accounts', 'clock'].includes(String(topic)));
++        attempts = 0; setStatus('live'); listeners.forEach(listener => listener(topics));
++      }
++    }
++  } catch { /* Retain the last good data while the stream reconnects. */ }
++  finally {
++    current.abort();
++    clearTimeout(watchdog);
++    if (controller === current) controller = undefined;
++    if (revision === generation && listeners.size && !document.hidden) {
++      setStatus('reconnecting');
++      const delay = Math.min(30_000, 1000 * 2 ** Math.min(attempts++, 5));
++      retry = setTimeout(() => { retry = undefined; void connect(); }, delay);
++    }
++  }
++}
++function stop() { generation++; clearTimeout(retry); retry = undefined; controller?.abort(); controller = undefined; }
++function visibility() { stop(); if (document.hidden) setStatus('paused'); else { attempts = 0; void connect(); } }
++export function subscribeLive(listener: Listener) {
++  listeners.add(listener);
++  if (listeners.size === 1) { unwatchAuth = useAuthStore.subscribe((state, prior) => { if (state.apiBase !== prior.apiBase || state.managementKey !== prior.managementKey || state.isAuthenticated !== prior.isAuthenticated || state.connectionStatus !== prior.connectionStatus) visibility(); }); document.addEventListener('visibilitychange', visibility); window.addEventListener('online', visibility); if (document.hidden) setStatus('paused'); else void connect(); }
++  return () => { listeners.delete(listener); if (!listeners.size) { unwatchAuth?.(); unwatchAuth = undefined; stop(); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('online', visibility); } };
++}
++
++// Each consumer has one in-flight read and one trailing refresh. Bursts never cancel a useful read.
++export function startLiveRefresh(refresh: (signal: AbortSignal) => Promise<unknown>, topics: readonly LiveTopic[], initial = true) {
++  let stopped = false, dirty = false;
++  let request: AbortController | undefined;
++  let lastRequest: AbortController | undefined;
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  const run = async () => {
++    timer = undefined;
++    if (stopped || document.hidden || request || !dirty) return;
++    dirty = false; const current = new AbortController(); request = current; lastRequest = current;
++    try { await refresh(current.signal); } catch { /* The caller owns error presentation. */ }
++    finally { if (request === current) request = undefined; if (dirty && !stopped) schedule(); }
++  };
++  const schedule = () => { if (!timer && !request && !stopped) timer = setTimeout(() => { void run(); }, 200); };
++  const unsubscribe = subscribeLive(changed => { if (changed.includes('sync') || topics.some(topic => changed.includes(topic))) { dirty = true; schedule(); } });
++  const hide = () => { if (document.hidden) { lastRequest?.abort(); dirty = true; } };
++  document.addEventListener('visibilitychange', hide);
++  if (initial) { dirty = true; void run(); }
++  return () => { stopped = true; clearTimeout(timer); lastRequest?.abort(); unsubscribe(); document.removeEventListener('visibilitychange', hide); };
++}
+diff --git a/src/utils/quotaPolling.ts b/src/utils/quotaPolling.ts
+index 0566811..d811d4c 100644
+--- a/src/utils/quotaPolling.ts
++++ b/src/utils/quotaPolling.ts
+@@ -1,40 +1,4 @@
+-export function startQuotaPolling(
+-  refresh: (signal: AbortSignal) => Promise<unknown>,
+-  interval = 10_000
+-) {
+-  let stopped = false;
+-  let visibleRefreshPending = false;
+-  let controller: AbortController | null = null;
+-  const run = async () => {
+-    if (stopped || document.hidden || controller) return;
+-    const current = new AbortController();
+-    controller = current;
+-    try {
+-      await refresh(current.signal);
+-    } catch {
+-      /* callers present errors; retain last good data */
+-    } finally {
+-      if (controller === current) controller = null;
+-      if (visibleRefreshPending && !stopped && !document.hidden) {
+-        visibleRefreshPending = false;
+-        void run();
+-      }
+-    }
+-  };
+-  const visibility = () => {
+-    if (document.hidden) controller?.abort();
+-    else {
+-      if (controller) visibleRefreshPending = true;
+-      else void run();
+-    }
+-  };
+-  const timer = window.setInterval(() => void run(), interval);
+-  document.addEventListener('visibilitychange', visibility);
+-  void run();
+-  return () => {
+-    stopped = true;
+-    window.clearInterval(timer);
+-    document.removeEventListener('visibilitychange', visibility);
+-    controller?.abort();
+-  };
++import { startLiveRefresh } from '@/services/api/live';
++export function startQuotaPolling(refresh: (signal: AbortSignal) => Promise<unknown>, _interval = 10_000) {
++ return startLiveRefresh(refresh, ['quota']);
+ }
+diff --git a/tests/liveStatsClient.test.ts b/tests/liveStatsClient.test.ts
+new file mode 100644
+index 0000000..03e184c
+--- /dev/null
++++ b/tests/liveStatsClient.test.ts
+@@ -0,0 +1,13 @@
++import {expect,test} from 'bun:test';
++import {apiClient} from '../src/services/api/client';
++test('SSE uses authenticated private management URL and rejects a response after changing connections',async()=>{
++ const client=apiClient.captureConnection();client.setConfig({apiBase:'https://fixture.example',managementKey:'fixture-secret'});
++ const original=globalThis.fetch;let finish!:(response:Response)=>void;let target='';let options:RequestInit|undefined;
++ globalThis.fetch=((url:URL|string|Request,init?:RequestInit)=>{target=String(url);options=init;return new Promise<Response>(resolve=>{finish=resolve})}) as typeof fetch;
++ try{
++  const signal=new AbortController().signal;const pending=client.openLiveStream(signal);
++  expect(target).toBe('https://fixture.example/v8/management/live');expect(target).not.toContain('fixture-secret');expect(options?.headers).toMatchObject({Authorization:'Bearer fixture-secret',Accept:'text/event-stream'});expect(options?.signal).toBe(signal);
++  client.setConfig({apiBase:'https://other.example',managementKey:'different'});finish(new Response('data: {}\n\n',{headers:{'Content-Type':'text/event-stream'}}));
++  await expect(pending).rejects.toThrow('Connection changed');
++ }finally{globalThis.fetch=original}
++});
+diff --git a/tests/providerUsageGraph.test.tsx b/tests/providerUsageGraph.test.tsx
+new file mode 100644
+index 0000000..939467c
+--- /dev/null
++++ b/tests/providerUsageGraph.test.tsx
+@@ -0,0 +1,20 @@
++import { expect, test } from 'bun:test';
++import { createElement } from 'react';
++import { renderToStaticMarkup } from 'react-dom/server';
++import '@/i18n';
++import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
++
++test('request graph scales volume linearly and preserves separate success and error segments', () => {
++ const html = renderToStaticMarkup(createElement(ProviderStatusBar, {statusData: {
++  blocks: ['mixed', 'success', 'idle'], totalSuccess: 12, totalFailure: 4, successRate: 75,
++  blockDetails: [{success: 8, failure: 4, rate: 2/3, startTime: 0, endTime: 600000}, {success: 4, failure: 0, rate: 1, startTime: 600000, endTime: 1200000}, {success: 0, failure: 0, rate: 0, startTime: 1200000, endTime: 1800000}]
++ }}));
++ expect(html).toContain('data-usage-total="12"');
++ expect(html).toContain('data-usage-total="4"');
++ expect(html).toContain('data-usage-total="0"');
++ expect(html).toContain('height:100%');
++ expect(html).toContain('height:33.33333333333333%');
++ expect(html).toContain('height:66.66666666666666%');
++ expect(html).toContain('height:0%');
++ expect(html).not.toContain('NaN');
++});
+diff --git a/tests/trafficNativeQuota.test.tsx b/tests/trafficNativeQuota.test.tsx
+index a41f883..c293fcc 100644
+--- a/tests/trafficNativeQuota.test.tsx
++++ b/tests/trafficNativeQuota.test.tsx
+@@ -79,3 +79,10 @@ test('Claude refresh states retain account balances and unrelated windows during
+     expect(stored.windows[0].usedPercent).toBe(12);
+   }
+ });
++
++test('cached reset credits update independently, retain zero, reject invalid/older counts and preserve account data',()=>{
++ const credit={...sample,window:'reset-credits',headers:{},reset_credits_available_count:0};
++ const merged=mergeTrafficQuota('codex',native,[credit],t) as CodexQuotaState;
++ expect(merged.rateLimitResetCreditsAvailableCount).toBe(0);expect(merged.planType).toBe(native.planType);expect(merged.windows).toEqual(native.windows.map(window=>({...window,capturedAt:native.capturedAt,source:native.source})));
++ for(const bad of [{...credit,observed_at:'invalid'},{...credit,observed_at:'2026-10-05T09:00:00Z'},{...credit,reset_credits_available_count:-1}])expect(mergeTrafficQuota('codex',native,[bad],t)).toBe(native);
++});

@@ -1,0 +1,931 @@
+diff --git a/internal/api/handlers/management/handler.go b/internal/api/handlers/management/handler.go
+index 7e8db2f7..2ba6eb27 100644
+--- a/internal/api/handlers/management/handler.go
++++ b/internal/api/handlers/management/handler.go
+@@ -38,6 +38,12 @@ const attemptMaxIdleTime = 2 * time.Hour
+ 
+ // Handler aggregates config reference, persistence path and helpers.
+ type Handler struct {
++	resetMu         sync.Mutex
++	resetOperations map[string]*quotaResetOperation
++	resetLoaded     bool
++	resetHTTPClient interface {
++		Do(*http.Request) (*http.Response, error)
++	}
+ 	cfg                     *config.Config
+ 	configFilePath          string
+ 	mu                      sync.Mutex
+diff --git a/internal/api/handlers/management/quota_reset.go b/internal/api/handlers/management/quota_reset.go
+new file mode 100644
+index 00000000..4cf818dd
+--- /dev/null
++++ b/internal/api/handlers/management/quota_reset.go
+@@ -0,0 +1,445 @@
++package management
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++)
++
++// Omitting credit_id preserves OpenAI's automatic credit selection.
++type quotaResetRequest struct {
++	AuthIndex      string `json:"auth_index"`
++	Provider       string `json:"provider"`
++	RequestID      string `json:"request_id"`
++	CreditID       string `json:"credit_id,omitempty"`
++	GrantID        string `json:"grant_id,omitempty"`
++	OrganizationID string `json:"organization_id,omitempty"`
++}
++type quotaResetResult struct {
++	Code           string `json:"code"`
++	WindowsReset   int    `json:"windowsReset,omitempty"`
++	RecoveryFailed bool   `json:"recoveryFailed,omitempty"`
++}
++type quotaResetOperation struct {
++	Request   quotaResetRequest `json:"request"`
++	Identity  string            `json:"identity"`
++	CreatedAt time.Time         `json:"created_at"`
++	Result    quotaResetResult  `json:"result"`
++	Busy      bool              `json:"-"`
++}
++type quotaResetOptions struct {
++	Provider        string                  `json:"provider"`
++	Credits         json.RawMessage         `json:"credits,omitempty"`
++	Usage           json.RawMessage         `json:"usage,omitempty"`
++	Status          *ClaudeResetGrantStatus `json:"status,omitempty"`
++	SelectedGrantID string                  `json:"selectedGrantId,omitempty"`
++	OrganizationID  string                  `json:"organizationId,omitempty"`
++}
++
++func resetIdentity(a *coreauth.Auth) string {
++	email, account := authIdentityEmailAndAccountID(a)
++	sum := sha256.Sum256([]byte(a.ID + "\x00" + a.Provider + "\x00" + email + "\x00" + account))
++	return hex.EncodeToString(sum[:])
++}
++
++// No caller-controlled URLs or headers reach the provider from this endpoint.
++func (h *Handler) resetProviderCall(ctx context.Context, a *coreauth.Auth, method, path string, body any) (int, []byte, error) {
++	token, err := h.resolveTokenForAuth(ctx, a, "")
++	if err != nil || token == "" {
++		return 0, nil, errors.New("account authentication unavailable")
++	}
++	origin := "https://chatgpt.com"
++	if a.Provider == "claude" {
++		origin = "https://api.anthropic.com"
++	}
++	var data []byte
++	if body != nil {
++		data, err = json.Marshal(body)
++		if err != nil {
++			return 0, nil, err
++		}
++	}
++	req, err := http.NewRequestWithContext(ctx, method, origin+path, bytes.NewReader(data))
++	if err != nil {
++		return 0, nil, err
++	}
++	req.Header.Set("Authorization", "Bearer "+token)
++	req.Header.Set("Accept", "application/json")
++	req.Header.Set("Content-Type", "application/json")
++	if a.Provider == "claude" {
++		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
++		req.Header.Set("User-Agent", "claude-cli/2.1.280 (external, cli)")
++	} else {
++		req.Header.Set("OpenAI-Beta", "codex-1")
++		req.Header.Set("Originator", "Codex Desktop")
++		req.Header.Set("User-Agent", "Codex Desktop/0.160.1")
++		_, account := authIdentityEmailAndAccountID(a)
++		if account != "" {
++			req.Header.Set("Chatgpt-Account-Id", account)
++		}
++	}
++	// Same bound as management API-call. Never redirect credentials to another host.
++	client := &http.Client{Transport: h.apiCallTransport(a, ""), Timeout: defaultAPICallTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
++	var doer interface {
++		Do(*http.Request) (*http.Response, error)
++	} = client
++	if h.resetHTTPClient != nil {
++		doer = h.resetHTTPClient
++	}
++	resp, err := doer.Do(req)
++	if err != nil {
++		return 0, nil, errors.New("provider request failed")
++	}
++	defer resp.Body.Close()
++	data, err = io.ReadAll(io.LimitReader(resp.Body, 2<<20))
++	return resp.StatusCode, data, err
++}
++func (h *Handler) quotaResetOptions(ctx context.Context, a *coreauth.Auth) (quotaResetOptions, error) {
++	options := quotaResetOptions{Provider: a.Provider}
++	if a.Provider == "codex" {
++		code, data, err := h.resetProviderCall(ctx, a, "GET", "/backend-api/wham/rate-limit-reset-credits", nil)
++		if err != nil || code < 200 || code >= 300 || !json.Valid(data) {
++			return options, errors.New("reset credits unavailable")
++		}
++		options.Credits = data
++		return options, nil
++	}
++	if a.Provider != "claude" {
++		return options, errors.New("unsupported reset provider")
++	}
++	code, data, err := h.resetProviderCall(ctx, a, "GET", "/api/oauth/usage?cedar_ember=1&skip_spend=1", nil)
++	if err != nil || code < 200 || code >= 300 {
++		return options, errors.New("reset grants unavailable")
++	}
++	var usage struct {
++		Grants json.RawMessage `json:"cedar_ember"`
++	}
++	if json.Unmarshal(data, &usage) != nil {
++		return options, errors.New("invalid reset grants")
++	}
++	options.Status = parseClaudeResetGrants(usage.Grants)
++	if options.Status == nil {
++		return options, errors.New("invalid reset grants")
++	}
++	options.Usage = data
++	if grant := selectClaudeResetGrant(options.Status, time.Now()); grant != nil {
++		options.SelectedGrantID = grant.ID
++	}
++	code, data, err = h.resetProviderCall(ctx, a, "GET", "/api/oauth/profile", nil)
++	var profile struct {
++		Organization struct {
++			UUID string `json:"uuid"`
++		} `json:"organization"`
++	}
++	if err != nil || code < 200 || code >= 300 || json.Unmarshal(data, &profile) != nil || !claudeUUIDPattern.MatchString(profile.Organization.UUID) {
++		return options, errors.New("reset organization unavailable")
++	}
++	options.OrganizationID = strings.ToLower(profile.Organization.UUID)
++	// The popup offers only currently usable grants. Keep original usage for quota display.
++	original := options.Status
++	filtered := *original
++	filtered.Grants = []ClaudeResetGrant{}
++	filtered.AvailableCount = 0
++	for _, grant := range original.Grants {
++		if claudeGrantUsable(original, grant, time.Now()) {
++			filtered.Grants = append(filtered.Grants, grant)
++			filtered.AvailableCount += grant.ResetsLeft
++		}
++	}
++	options.Status = &filtered
++	return options, nil
++}
++func (h *Handler) GetQuotaResetOptions(c *gin.Context) {
++	a := h.authByIndex(strings.TrimSpace(c.Query("auth_index")))
++	if a == nil {
++		c.JSON(404, gin.H{"error": "auth not found"})
++		return
++	}
++	options, err := h.quotaResetOptions(c.Request.Context(), a)
++	if err != nil {
++		c.JSON(502, gin.H{"error": err.Error()})
++		return
++	}
++	c.JSON(200, options)
++}
++func (h *Handler) resetJournalPath() string {
++	cfg := h.configSnapshot()
++	if cfg == nil || cfg.AuthDir == "" {
++		return ""
++	}
++	return filepath.Join(cfg.AuthDir, ".quota-reset-journal.ledger")
++}
++
++// Persist before spending. On restart unfinished operations remain ambiguous.
++func (h *Handler) loadResetJournal() error {
++	if h.resetLoaded {
++		return nil
++	}
++	if h.resetJournalPath() == "" {
++		return errors.New("persistent reset journal unavailable")
++	}
++	h.resetOperations = map[string]*quotaResetOperation{}
++	if path := h.resetJournalPath(); path != "" {
++		data, err := os.ReadFile(path)
++		if err != nil && !os.IsNotExist(err) {
++			return errors.New("reset journal unavailable")
++		}
++		if err == nil && (json.Unmarshal(data, &h.resetOperations) != nil || h.resetOperations == nil) {
++			return errors.New("reset journal invalid")
++		}
++	}
++	for id, op := range h.resetOperations {
++		if op == nil || op.Request.RequestID != id || !validQuotaResetRequestID(op.Request.Provider, id) || op.Identity == "" || op.CreatedAt.IsZero() {
++			return errors.New("reset journal invalid")
++		}
++	}
++	h.resetLoaded = true
++	return nil
++}
++func (h *Handler) saveResetJournal() error {
++	path := h.resetJournalPath()
++	if path == "" {
++		return nil
++	}
++	data, err := json.Marshal(h.resetOperations)
++	if err != nil {
++		return err
++	}
++	f, err := os.CreateTemp(filepath.Dir(path), ".quota-reset-*")
++	if err != nil {
++		return err
++	}
++	name := f.Name()
++	defer os.Remove(name)
++	if err = f.Chmod(0600); err == nil {
++		_, err = f.Write(data)
++	}
++	if err == nil {
++		err = f.Sync()
++	}
++	closeErr := f.Close()
++	if err == nil {
++		err = closeErr
++	}
++	if err != nil {
++		return err
++	}
++	return os.Rename(name, path)
++}
++func (h *Handler) RedeemQuotaReset(c *gin.Context) {
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
++	var req quotaResetRequest
++	if c.ShouldBindJSON(&req) != nil || !validQuotaResetRequestID(req.Provider, req.RequestID) || req.AuthIndex == "" || (req.Provider != "codex" && req.Provider != "claude") || len(req.CreditID) > 200 {
++		c.JSON(400, gin.H{"error": "invalid reset request"})
++		return
++	}
++	if (req.Provider == "codex" && (req.GrantID != "" || req.OrganizationID != "")) || (req.Provider == "claude" && req.CreditID != "") {
++		c.JSON(400, gin.H{"error": "invalid provider choice"})
++		return
++	}
++	a := h.authByIndex(req.AuthIndex)
++	if a == nil || a.Provider != req.Provider {
++		c.JSON(409, gin.H{"error": "account changed"})
++		return
++	}
++	identity := resetIdentity(a)
++	h.resetMu.Lock()
++	if err := h.loadResetJournal(); err != nil {
++		h.resetMu.Unlock()
++		c.JSON(503, gin.H{"error": err.Error()})
++		return
++	}
++	op := h.resetOperations[req.RequestID]
++	retry := op != nil
++	if op != nil {
++		if op.Request != req || op.Identity != identity {
++			h.resetMu.Unlock()
++			c.JSON(409, gin.H{"error": "reset request identity conflict"})
++			return
++		}
++		if op.Busy {
++			h.resetMu.Unlock()
++			c.JSON(409, gin.H{"error": "reset in progress"})
++			return
++		}
++		if op.Result.Code != "unknown" {
++			result := op.Result
++			h.resetMu.Unlock()
++			c.JSON(200, result)
++			return
++		}
++		if time.Since(op.CreatedAt) > 10*time.Minute {
++			h.resetMu.Unlock()
++			c.JSON(409, gin.H{"error": "ambiguous reset retry expired"})
++			return
++		}
++	} else {
++		for _, prior := range h.resetOperations {
++			if prior.Identity == identity && (prior.Busy || prior.Result.Code == "unknown") {
++				h.resetMu.Unlock()
++				c.JSON(409, gin.H{"error": "account has an unresolved reset"})
++				return
++			}
++
++		}
++		if len(h.resetOperations) >= 4096 {
++			h.resetMu.Unlock()
++			c.JSON(503, gin.H{"error": "reset journal full"})
++			return
++		}
++		op = &quotaResetOperation{Request: req, Identity: identity, CreatedAt: time.Now(), Result: quotaResetResult{Code: "unknown"}}
++		h.resetOperations[req.RequestID] = op
++	}
++	op.Busy = true
++	if err := h.saveResetJournal(); err != nil {
++		op.Busy = false
++		if !retry {
++			delete(h.resetOperations, req.RequestID)
++		}
++		h.resetMu.Unlock()
++		c.JSON(503, gin.H{"error": "reset journal unavailable"})
++		return
++	}
++	h.resetMu.Unlock()
++	result := h.executeQuotaReset(c.Request.Context(), a, req, retry)
++	h.resetMu.Lock()
++	// A retry refusal cannot prove an earlier ambiguous POST did not spend.
++	if !retry || result.Code == "reset" || result.Code == "already_redeemed" || result.Code == "already_used" {
++		op.Result = result
++	}
++	op.Busy = false
++	if retry && op.Result.Code == "unknown" {
++		result.Code = "unknown"
++	}
++	_ = h.saveResetJournal() // The previously persisted unknown state remains safe on failure.
++	h.resetMu.Unlock()
++	c.JSON(200, result)
++}
++func (h *Handler) executeQuotaReset(ctx context.Context, a *coreauth.Auth, req quotaResetRequest, retry bool) quotaResetResult {
++	result := quotaResetResult{Code: "unknown"}
++	path := "/backend-api/wham/rate-limit-reset-credits/consume"
++	body := map[string]string{"redeem_request_id": req.RequestID}
++	if req.Provider == "claude" {
++		if !claudeGrantIDPattern.MatchString(req.GrantID) || !claudeUUIDPattern.MatchString(req.OrganizationID) {
++			return quotaResetResult{Code: "unavailable"}
++		}
++		if !retry {
++			options, err := h.quotaResetOptions(ctx, a)
++			if err != nil {
++				return quotaResetResult{Code: "unavailable"}
++			}
++			valid := false
++			for _, grant := range options.Status.Grants {
++				if grant.ID == req.GrantID && claudeGrantUsable(options.Status, grant, time.Now()) {
++					valid = true
++				}
++			}
++			if !valid || options.OrganizationID != strings.ToLower(req.OrganizationID) {
++				return quotaResetResult{Code: "ineligible"}
++			}
++		}
++		path = "/api/organizations/" + strings.ToLower(req.OrganizationID) + "/reset_rate_limits"
++		body = map[string]string{"program": "cedar_ember", "grant_id": req.GrantID, "request_id": req.RequestID}
++	} else {
++		if !retry {
++			options, err := h.quotaResetOptions(ctx, a)
++			if err != nil || !codexResetEligible(options.Credits, req.CreditID, time.Now()) {
++				return quotaResetResult{Code: "unavailable"}
++			}
++		}
++		if req.CreditID != "" {
++			body["credit_id"] = req.CreditID
++		}
++	}
++	current := h.authByIndex(req.AuthIndex)
++	if current == nil || resetIdentity(current) != resetIdentity(a) {
++		return quotaResetResult{Code: "unavailable"}
++	}
++	code, data, err := h.resetProviderCall(ctx, current, "POST", path, body)
++	if err != nil {
++		return result
++	}
++	if code == 429 {
++		return quotaResetResult{Code: "rate_limited"}
++	}
++	if code == 401 || code == 403 {
++		return quotaResetResult{Code: "auth_error"}
++	}
++	if code < 200 || code >= 300 {
++		return result
++	}
++	var response struct {
++		Code         string `json:"code"`
++		Result       string `json:"result"`
++		WindowsReset int    `json:"windows_reset"`
++	}
++	if json.Unmarshal(data, &response) != nil {
++		return result
++	}
++	value := response.Code
++	if req.Provider == "claude" {
++		value = response.Result
++	}
++	switch value {
++	case "reset", "already_redeemed", "already_used", "not_limited", "cooldown", "ineligible", "unavailable":
++		result.Code = value
++	}
++	result.WindowsReset = response.WindowsReset
++	if result.Code == "reset" || result.Code == "already_redeemed" || result.Code == "already_used" {
++		current = h.authByIndex(req.AuthIndex)
++		if current == nil || resetIdentity(current) != resetIdentity(a) || h.authManager == nil {
++			result.RecoveryFailed = true
++		} else {
++			updated, _, err := h.authManager.ResetQuota(ctx, a.ID)
++			result.RecoveryFailed = err != nil || updated == nil
++		}
++	}
++	return result
++}
++
++func validQuotaResetRequestID(provider, id string) bool {
++	if claudeUUIDPattern.MatchString(id) {
++		return true
++	}
++	if provider != "claude" || len(id) != 32 {
++		return false
++	}
++	_, err := hex.DecodeString(id)
++	return err == nil
++}
++func codexResetEligible(raw json.RawMessage, creditID string, now time.Time) bool {
++	var data struct {
++		Available *int `json:"available_count"`
++		Credits   []struct {
++			ID      string `json:"id"`
++			Status  string `json:"status"`
++			Type    string `json:"reset_type"`
++			Expires string `json:"expires_at"`
++		} `json:"credits"`
++	}
++	if json.Unmarshal(raw, &data) != nil {
++		return false
++	}
++	if creditID == "" && data.Available != nil {
++		return *data.Available > 0
++	}
++	for _, credit := range data.Credits {
++		expiry, err := time.Parse(time.RFC3339Nano, credit.Expires)
++		if credit.Status == "available" && credit.Type == "codex_rate_limits" && err == nil && now.Before(expiry) && (creditID == "" || credit.ID == creditID) {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/internal/api/handlers/management/quota_reset_grants.go b/internal/api/handlers/management/quota_reset_grants.go
+new file mode 100644
+index 00000000..47e04d7c
+--- /dev/null
++++ b/internal/api/handlers/management/quota_reset_grants.go
+@@ -0,0 +1,154 @@
++package management
++
++import (
++	"encoding/json"
++	"regexp"
++	"sort"
++	"strings"
++	"time"
++	"unicode"
++)
++
++var claudeGrantIDPattern = regexp.MustCompile(`^[a-z0-9_-]{1,40}$`)
++var claudeUUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
++
++type ClaudeResetGrant struct {
++	ID               string   `json:"id"`
++	Label            string   `json:"label,omitempty"`
++	ResetsTotal      int      `json:"resetsTotal"`
++	ResetsLeft       int      `json:"resetsLeft"`
++	StartsAt         string   `json:"startsAt,omitempty"`
++	EndsAt           string   `json:"endsAt,omitempty"`
++	Clears           []string `json:"clears"`
++	Paused           bool     `json:"paused"`
++	UsableNow        bool     `json:"usableNow"`
++	UseRequiresLimit bool     `json:"useRequiresLimit"`
++}
++
++type ClaudeResetGrantStatus struct {
++	Eligible         bool               `json:"eligible"`
++	IneligibleReason string             `json:"ineligibleReason,omitempty"`
++	AtLimit          bool               `json:"atLimit"`
++	Grants           []ClaudeResetGrant `json:"grants"`
++	NextGrantID      string             `json:"nextGrantId,omitempty"`
++	WeeklyResetsAt   string             `json:"weeklyResetsAt,omitempty"`
++	CooldownUntil    string             `json:"cooldownUntil,omitempty"`
++	AvailableCount   int                `json:"availableCount"`
++}
++
++// Validate optional reset metadata without affecting ordinary quota observations.
++func parseClaudeResetGrants(raw json.RawMessage) *ClaudeResetGrantStatus {
++	var block struct {
++		Eligible         *bool   `json:"eligible"`
++		IneligibleReason *string `json:"ineligible_reason"`
++		AtLimit          *bool   `json:"at_limit"`
++		Grants           []struct {
++			ID            string   `json:"id"`
++			Label         string   `json:"label"`
++			Total         *int     `json:"resets_total"`
++			Left          *int     `json:"resets_left"`
++			Starts        *string  `json:"starts_at"`
++			Ends          *string  `json:"ends_at"`
++			Clears        []string `json:"clears"`
++			Paused        *bool    `json:"paused"`
++			Usable        *bool    `json:"usable_now"`
++			RequiresLimit *bool    `json:"use_requires_limit"`
++		} `json:"grants"`
++		Next     *string `json:"next_grant_id"`
++		Weekly   *string `json:"weekly_resets_at"`
++		Cooldown *string `json:"cooldown_until"`
++	}
++	if json.Unmarshal(raw, &block) != nil || block.Eligible == nil || len(block.Grants) > 64 || !claudeOptionalTimeValid(block.Weekly) || !claudeOptionalTimeValid(block.Cooldown) {
++		return nil
++	}
++	status := &ClaudeResetGrantStatus{Eligible: *block.Eligible, AtLimit: block.AtLimit != nil && *block.AtLimit, Grants: []ClaudeResetGrant{}, WeeklyResetsAt: optionalClaudeString(block.Weekly), CooldownUntil: optionalClaudeString(block.Cooldown)}
++	if block.IneligibleReason != nil {
++		switch *block.IneligibleReason {
++		case "config_off", "tier", "seat", "mobile", "surface", "cli_version", "no_grant", "tenure", "other_experiment", "unavailable", "unknown":
++			status.IneligibleReason = *block.IneligibleReason
++		default:
++			status.IneligibleReason = "unknown"
++		}
++	}
++	seen := map[string]bool{}
++	for _, g := range block.Grants {
++		if !claudeGrantIDPattern.MatchString(g.ID) || seen[g.ID] || g.Total == nil || g.Left == nil || *g.Total < 0 || *g.Left < 0 || *g.Left > *g.Total || !claudeOptionalTimeValid(g.Starts) || !claudeOptionalTimeValid(g.Ends) {
++			return nil
++		}
++		seen[g.ID] = true
++		// Validate optional reset metadata without affecting ordinary quota observations.
++		clears := append([]string{}, g.Clears...)
++		label := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
++			if unicode.IsControl(r) {
++				return ' '
++			}
++			return r
++		}, g.Label)), " ")
++		if len([]rune(label)) > 120 {
++			label = string([]rune(label)[:120])
++		}
++		status.Grants = append(status.Grants, ClaudeResetGrant{ID: g.ID, Label: label, ResetsTotal: *g.Total, ResetsLeft: *g.Left, StartsAt: optionalClaudeString(g.Starts), EndsAt: optionalClaudeString(g.Ends), Clears: clears, Paused: g.Paused != nil && *g.Paused, UsableNow: g.Usable != nil && *g.Usable, UseRequiresLimit: g.RequiresLimit == nil || *g.RequiresLimit})
++		// Validate optional reset metadata without affecting ordinary quota observations.
++		if *g.Left > int(^uint(0)>>1)-status.AvailableCount {
++			return nil
++		}
++		status.AvailableCount += *g.Left
++	}
++	if block.Next != nil && seen[*block.Next] {
++		status.NextGrantID = *block.Next
++	}
++	return status
++}
++
++func optionalClaudeString(value *string) string {
++	if value == nil {
++		return ""
++	}
++	return *value
++}
++func claudeOptionalTimeValid(value *string) bool {
++	if value == nil {
++		return true
++	}
++	_, err := time.Parse(time.RFC3339Nano, *value)
++	return err == nil
++}
++
++func claudeGrantUsable(status *ClaudeResetGrantStatus, grant ClaudeResetGrant, now time.Time) bool {
++	if status == nil || !status.Eligible || grant.Paused || !grant.UsableNow || grant.ResetsLeft <= 0 || (grant.UseRequiresLimit && !status.AtLimit) {
++		return false
++	}
++	for _, bound := range []struct {
++		value string
++		start bool
++	}{{grant.StartsAt, true}, {grant.EndsAt, false}, {status.CooldownUntil, true}} {
++		if bound.value == "" {
++			continue
++		}
++		at, err := time.Parse(time.RFC3339Nano, bound.value)
++		if err != nil || (bound.start && now.Before(at)) || (!bound.start && !now.Before(at)) {
++			return false
++		}
++	}
++	return true
++}
++
++func selectClaudeResetGrant(status *ClaudeResetGrantStatus, now time.Time) *ClaudeResetGrant {
++	if status == nil {
++		return nil
++	}
++	usable := []ClaudeResetGrant{}
++	for _, grant := range status.Grants {
++		if claudeGrantUsable(status, grant, now) {
++			if grant.ID == status.NextGrantID {
++				return &grant
++			}
++			usable = append(usable, grant)
++		}
++	}
++	sort.Slice(usable, func(i, j int) bool { return usable[i].ID < usable[j].ID })
++	if len(usable) == 0 {
++		return nil
++	}
++	return &usable[0]
++}
+diff --git a/internal/api/handlers/management/quota_reset_test.go b/internal/api/handlers/management/quota_reset_test.go
+new file mode 100644
+index 00000000..15fdc744
+--- /dev/null
++++ b/internal/api/handlers/management/quota_reset_test.go
+@@ -0,0 +1,284 @@
++package management
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++)
++
++type resetDoer func(*http.Request) (*http.Response, error)
++
++func (f resetDoer) Do(r *http.Request) (*http.Response, error) { return f(r) }
++func resetReply(body string) *http.Response {
++	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}
++}
++func resetFixture(t *testing.T, provider string) (*Handler, *coreauth.Auth) {
++	t.Helper()
++	manager := coreauth.NewManager(nil, nil, nil)
++	a := &coreauth.Auth{ID: "reset-test", Index: "reset-index", Provider: provider, Metadata: map[string]any{"access_token": "synthetic-token", "account_id": "synthetic-account"}, Attributes: map[string]string{"runtime_only": "true"}, Quota: coreauth.QuotaState{Exceeded: true}, Unavailable: true}
++	if _, err := manager.Register(context.Background(), a); err != nil {
++		t.Fatal(err)
++	}
++	h := &Handler{cfg: &config.Config{AuthDir: t.TempDir()}, authManager: manager}
++	return h, a
++}
++func resetRequest(h *Handler, id, provider, choice string) *httptest.ResponseRecorder {
++	rec := httptest.NewRecorder()
++	ctx, _ := gin.CreateTestContext(rec)
++	ctx.Request = httptest.NewRequest("POST", "/v8/management/quota/reset", strings.NewReader(`{"auth_index":"reset-index","provider":"`+provider+`","request_id":"`+id+`"`+choice+`}`))
++	ctx.Request.Header.Set("Content-Type", "application/json")
++	h.RedeemQuotaReset(ctx)
++	return rec
++}
++
++const resetID = "11111111-1111-4111-8111-111111111111"
++const otherResetID = "22222222-2222-4222-8222-222222222222"
++const resetCredits = `{"available_count":2,"credits":[{"id":"later","status":"available","reset_type":"codex_rate_limits","expires_at":"2099-01-01T00:00:00Z"},{"id":"soon","status":"available","reset_type":"codex_rate_limits","expires_at":"2098-01-01T00:00:00Z"}]}`
++
++func TestSharedResetAutomaticExplicitAndReplay(t *testing.T) {
++	for _, choice := range []string{"", `,"credit_id":"later"`} {
++		t.Run(choice, func(t *testing.T) {
++			h, _ := resetFixture(t, "codex")
++			posts := 0
++			h.resetHTTPClient = resetDoer(func(r *http.Request) (*http.Response, error) {
++				if r.URL.Host != "chatgpt.com" || r.Header.Get("Authorization") != "Bearer synthetic-token" {
++					t.Fatal("wrong provider authentication")
++				}
++				if r.Method == "GET" {
++					return resetReply(resetCredits), nil
++				}
++				posts++
++				var body map[string]string
++				if json.NewDecoder(r.Body).Decode(&body) != nil {
++					t.Fatal("invalid provider body")
++				}
++				if body["redeem_request_id"] != resetID {
++					t.Fatal("request ID changed")
++				}
++				if choice == "" && len(body) != 1 {
++					t.Fatal("automatic credit selection changed")
++				}
++				if choice != "" && body["credit_id"] != "later" {
++					t.Fatal("explicit credit choice lost")
++				}
++				return resetReply(`{"code":"reset","windows_reset":2}`), nil
++			})
++			for range 2 {
++				rec := resetRequest(h, resetID, "codex", choice)
++				if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"code":"reset"`) {
++					t.Fatal(rec.Code, rec.Body.String())
++				}
++			}
++			if posts != 1 {
++				t.Fatal("duplicate spend", posts)
++			}
++			a, _ := h.authManager.GetByID("reset-test")
++			if a.Quota.Exceeded || a.Unavailable {
++				t.Fatal("cooldown not cleared")
++			}
++			// Restart loads the successful result rather than spending again.
++			restarted := &Handler{cfg: h.cfg, authManager: h.authManager, resetHTTPClient: resetDoer(func(*http.Request) (*http.Response, error) { t.Fatal("replayed provider call"); return nil, nil })}
++			if rec := resetRequest(restarted, resetID, "codex", choice); rec.Code != 200 {
++				t.Fatal(rec.Body.String())
++			}
++			if rec := resetRequest(restarted, resetID, "codex", `,"credit_id":"soon"`); rec.Code != 409 {
++				t.Fatal("payload conflict accepted")
++			}
++		})
++	}
++}
++func TestSharedResetUnknownRequiresSameIDAndKeepsCooldown(t *testing.T) {
++	h, _ := resetFixture(t, "codex")
++	posts := 0
++	h.resetHTTPClient = resetDoer(func(r *http.Request) (*http.Response, error) {
++		if r.Method == "GET" {
++			return resetReply(resetCredits), nil
++		}
++		posts++
++		if posts == 1 {
++			return nil, errors.New("lost response")
++		}
++		return resetReply(`{"code":"already_redeemed"}`), nil
++	})
++	if rec := resetRequest(h, resetID, "codex", ""); !strings.Contains(rec.Body.String(), `"unknown"`) {
++		t.Fatal(rec.Body.String())
++	}
++	a, _ := h.authManager.GetByID("reset-test")
++	if !a.Quota.Exceeded {
++		t.Fatal("unknown outcome cleared cooldown")
++	}
++	if rec := resetRequest(h, otherResetID, "codex", ""); rec.Code != 409 {
++		t.Fatal("new ID allowed while ambiguous")
++	}
++	if rec := resetRequest(h, resetID, "codex", ""); !strings.Contains(rec.Body.String(), `"already_redeemed"`) {
++		t.Fatal(rec.Body.String())
++	}
++	if posts != 2 {
++		t.Fatal(posts)
++	}
++}
++func TestSharedResetConcurrentAccountProtection(t *testing.T) {
++	h, _ := resetFixture(t, "codex")
++	entered := make(chan struct{})
++	release := make(chan struct{})
++	var posts atomic.Int32
++	h.resetHTTPClient = resetDoer(func(r *http.Request) (*http.Response, error) {
++		if r.Method == "GET" {
++			return resetReply(resetCredits), nil
++		}
++		posts.Add(1)
++		close(entered)
++		<-release
++		return resetReply(`{"code":"reset"}`), nil
++	})
++	done := make(chan *httptest.ResponseRecorder)
++	go func() { done <- resetRequest(h, resetID, "codex", "") }()
++	<-entered
++	for _, id := range []string{resetID, otherResetID} {
++		if rec := resetRequest(h, id, "codex", ""); rec.Code != 409 {
++			t.Fatal("concurrent reset accepted")
++		}
++	}
++	close(release)
++	if rec := <-done; rec.Code != 200 {
++		t.Fatal(rec.Body.String())
++	}
++	if posts.Load() != 1 {
++		t.Fatal("duplicate provider call")
++	}
++}
++func TestSharedResetClaudeEligibilityAndChoice(t *testing.T) {
++	const org = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
++	h, _ := resetFixture(t, "claude")
++	posts := 0
++	h.resetHTTPClient = resetDoer(func(r *http.Request) (*http.Response, error) {
++		if strings.Contains(r.URL.Path, "profile") {
++			return resetReply(`{"organization":{"uuid":"` + org + `"}}`), nil
++		}
++		if r.Method == "GET" {
++			return resetReply(`{"cedar_ember":{"eligible":true,"at_limit":true,"next_grant_id":"first","grants":[{"id":"first","resets_total":2,"resets_left":2,"usable_now":true},{"id":"chosen","resets_total":1,"resets_left":1,"usable_now":true}]}}`), nil
++		}
++		posts++
++		var body map[string]string
++		_ = json.NewDecoder(r.Body).Decode(&body)
++		if body["grant_id"] != "chosen" || body["request_id"] != resetID || body["program"] != "cedar_ember" || r.URL.Path != "/api/organizations/"+org+"/reset_rate_limits" {
++			t.Fatal("Claude choice changed", body)
++		}
++		return resetReply(`{"result":"reset"}`), nil
++	})
++	options, err := h.quotaResetOptions(context.Background(), h.authByIndex("reset-index"))
++	if err != nil || options.SelectedGrantID != "first" {
++		t.Fatal("shared selection", options, err)
++	}
++	if rec := resetRequest(h, otherResetID, "claude", `,"grant_id":"missing","organization_id":"`+org+`"`); !strings.Contains(rec.Body.String(), "ineligible") {
++		t.Fatal(rec.Body.String())
++	}
++	if posts != 0 {
++		t.Fatal("ineligible grant spent")
++	}
++	if rec := resetRequest(h, resetID, "claude", `,"grant_id":"chosen","organization_id":"`+org+`"`); !strings.Contains(rec.Body.String(), `"reset"`) {
++		t.Fatal(rec.Body.String())
++	}
++	if posts != 1 {
++		t.Fatal(posts)
++	}
++}
++func TestSharedResetExpiredCreditAndProviderReplacement(t *testing.T) {
++	if codexResetEligible(json.RawMessage(`{"available_count":1,"credits":[{"id":"old","status":"available","reset_type":"codex_rate_limits","expires_at":"2000-01-01T00:00:00Z"}]}`), "old", time.Now()) {
++		t.Fatal("expired explicit credit accepted")
++	}
++	h, _ := resetFixture(t, "codex")
++	if rec := resetRequest(h, resetID, "claude", ""); rec.Code != 409 {
++		t.Fatal("provider replacement accepted")
++	}
++}
++
++func TestSharedResetClaudePolicyGates(t *testing.T) {
++	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
++	for _, tc := range []struct {
++		name   string
++		change func(*ClaudeResetGrantStatus, *ClaudeResetGrant)
++	}{
++		{"ineligible", func(s *ClaudeResetGrantStatus, g *ClaudeResetGrant) { s.Eligible = false }},
++		{"paused", func(s *ClaudeResetGrantStatus, g *ClaudeResetGrant) { g.Paused = true }},
++		{"not usable", func(s *ClaudeResetGrantStatus, g *ClaudeResetGrant) { g.UsableNow = false }},
++		{"exhausted", func(s *ClaudeResetGrantStatus, g *ClaudeResetGrant) { g.ResetsLeft = 0 }},
++		{"requires limit", func(s *ClaudeResetGrantStatus, g *ClaudeResetGrant) { s.AtLimit = false }},
++		{"future", func(s *ClaudeResetGrantStatus, g *ClaudeResetGrant) {
++			g.StartsAt = now.Add(time.Hour).Format(time.RFC3339)
++		}},
++		{"expired", func(s *ClaudeResetGrantStatus, g *ClaudeResetGrant) { g.EndsAt = now.Format(time.RFC3339) }},
++		{"cooldown", func(s *ClaudeResetGrantStatus, g *ClaudeResetGrant) {
++			s.CooldownUntil = now.Add(time.Hour).Format(time.RFC3339)
++		}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			status := &ClaudeResetGrantStatus{Eligible: true, AtLimit: true}
++			grant := ClaudeResetGrant{ID: "test", ResetsLeft: 1, UsableNow: true, UseRequiresLimit: true}
++			if !claudeGrantUsable(status, grant, now) {
++				t.Fatal("valid grant blocked")
++			}
++			tc.change(status, &grant)
++			if claudeGrantUsable(status, grant, now) {
++				t.Fatal("unsafe grant accepted")
++			}
++		})
++	}
++}
++
++func TestSharedResetInvalidJournalFailsClosed(t *testing.T) {
++	for _, data := range []string{"null", "{", "{\"invalid\":null}"} {
++		t.Run(data, func(t *testing.T) {
++			h, _ := resetFixture(t, "codex")
++			if err := os.WriteFile(h.resetJournalPath(), []byte(data), 0600); err != nil {
++				t.Fatal(err)
++			}
++			h.resetHTTPClient = resetDoer(func(*http.Request) (*http.Response, error) {
++				t.Fatal("provider called with invalid journal")
++				return nil, nil
++			})
++			if rec := resetRequest(h, resetID, "codex", ""); rec.Code != 503 {
++				t.Fatal(rec.Code, rec.Body.String())
++			}
++		})
++	}
++}
++func TestSharedResetStorageRequiredBeforeSpending(t *testing.T) {
++	h, _ := resetFixture(t, "codex")
++	h.cfg.AuthDir = filepath.Join(h.cfg.AuthDir, "missing")
++	posts := 0
++	h.resetHTTPClient = resetDoer(func(r *http.Request) (*http.Response, error) {
++		if r.Method == "GET" {
++			return resetReply(resetCredits), nil
++		}
++		posts++
++		return resetReply("{\"code\":\"reset\"}"), nil
++	})
++	if rec := resetRequest(h, resetID, "codex", ""); rec.Code != 503 || posts != 0 {
++		t.Fatal("spent without persistence", rec.Code, posts)
++	}
++	if err := os.Mkdir(h.cfg.AuthDir, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if rec := resetRequest(h, resetID, "codex", ""); rec.Code != 200 || posts != 1 {
++		t.Fatal("failed to recover from storage error", rec.Code, posts)
++	}
++	h, _ = resetFixture(t, "codex")
++	h.cfg.AuthDir = ""
++	if rec := resetRequest(h, resetID, "codex", ""); rec.Code != 503 {
++		t.Fatal("allowed nonpersistent reset", rec.Code)
++	}
++}
+diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
+index 892d97b4..a2aa3912 100644
+--- a/internal/api/server_management_v8.go
++++ b/internal/api/server_management_v8.go
+@@ -40,6 +40,8 @@ func (s *Server) registerManagementV8Routes() {
+ 	v8.GET("/server/latest-version", s.mgmt.GetLatestVersion)
+ 	v8.POST("/requests/api-call", s.mgmt.APICall)
+ 	v8.POST("/routing/cooldown/reset", s.mgmt.ResetQuota)
++	v8.GET("/quota/reset-options", s.mgmt.GetQuotaResetOptions)
++	v8.POST("/quota/reset", s.mgmt.RedeemQuotaReset)
+ 	v8.GET("/routing/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
+ 	v8.POST("/routing/model-definitions/refresh", s.mgmt.RefreshModelDefinitions)
+ 	v8.POST("/models/refresh", s.mgmt.RefreshModelDefinitions)

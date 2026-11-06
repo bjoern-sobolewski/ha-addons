@@ -1,0 +1,3465 @@
+diff --git a/internal/cpa/client.go b/internal/cpa/client.go
+index ed05e9b4..2854be5b 100644
+--- a/internal/cpa/client.go
++++ b/internal/cpa/client.go
+@@ -3,6 +3,7 @@ package cpa
+ import (
+ 	"bytes"
+ 	"context"
++	"cpa-usage-keeper/internal/cpa/dto/quotareset"
+ 	"crypto/tls"
+ 	"encoding/json"
+ 	"errors"
+@@ -624,3 +625,14 @@ func firstNonEmptyString(values []string) string {
+ 	}
+ 	return ""
+ }
++
++func (c *Client) QuotaResetOptions(ctx context.Context, index string) (quotareset.Options, error) {
++	var out quotareset.Options
++	_, _, err := c.doManagementJSONRequest(ctx, "/v8/management/quota/reset-options?auth_index="+url.QueryEscape(index), &out, "reset options")
++	return out, err
++}
++func (c *Client) RedeemQuotaReset(ctx context.Context, request quotareset.Request) (quotareset.Result, error) {
++	var out quotareset.Result
++	_, _, err := c.doManagementJSONPostRequest(ctx, "/v8/management/quota/reset", request, &out, "quota reset")
++	return out, err
++}
+diff --git a/internal/cpa/dto/quotareset/reset.go b/internal/cpa/dto/quotareset/reset.go
+new file mode 100644
+index 00000000..d6e5ba9d
+--- /dev/null
++++ b/internal/cpa/dto/quotareset/reset.go
+@@ -0,0 +1,24 @@
++package quotareset
++
++import "encoding/json"
++
++type Request struct {
++	AuthIndex      string `json:"auth_index"`
++	Provider       string `json:"provider"`
++	RequestID      string `json:"request_id"`
++	GrantID        string `json:"grant_id,omitempty"`
++	OrganizationID string `json:"organization_id,omitempty"`
++	CreditID       string `json:"credit_id,omitempty"`
++}
++type Options struct {
++	Provider        string          `json:"provider"`
++	Credits         json.RawMessage `json:"credits"`
++	Status          json.RawMessage `json:"status"`
++	SelectedGrantID string          `json:"selectedGrantId"`
++	OrganizationID  string          `json:"organizationId"`
++}
++type Result struct {
++	Code           string `json:"code"`
++	WindowsReset   int    `json:"windowsReset"`
++	RecoveryFailed bool   `json:"recoveryFailed"`
++}
+diff --git a/internal/quota/claude_reset.go b/internal/quota/claude_reset.go
+index 7f3c54bb..a06fbe3f 100644
+--- a/internal/quota/claude_reset.go
++++ b/internal/quota/claude_reset.go
+@@ -5,15 +5,12 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"strings"
+-	"time"
+ 
+-	"cpa-usage-keeper/internal/cpa/dto/apicall"
+ 	"cpa-usage-keeper/internal/repository"
++	"encoding/json"
+ 	"gorm.io/gorm"
+ )
+ 
+-const claudeClaimTimeout = 25 * time.Second
+-
+ type ClaudeResetGrantsResponse struct {
+ 	AuthIndex       string                  `json:"authIndex"`
+ 	Status          *ClaudeResetGrantStatus `json:"status"`
+@@ -47,76 +44,20 @@ func (s *Service) GetClaudeResetGrants(ctx context.Context, authIndex string) (C
+ }
+ 
+ func (p claudeProvider) ListClaudeResetGrants(ctx context.Context, input ProviderInput) (ClaudeResetGrantsResponse, error) {
+-	output, err := p.Check(ctx, input)
++	client, err := sharedReset(p.caller)
+ 	if err != nil {
+ 		return ClaudeResetGrantsResponse{}, err
+ 	}
+-	result := output.Result.(ClaudeResult)
+-	response := ClaudeResetGrantsResponse{AuthIndex: input.Identity.Identity}
+-	now := time.Now()
+-	// 弹窗只展示本次可用权益，普通额度刷新仍保留完整官方 grants。
+-	if original := result.Usage.ResetGrants; original != nil {
+-		status := *original
+-		status.Grants = []ClaudeResetGrant{}
+-		status.AvailableCount = 0
+-		for _, grant := range original.Grants {
+-			if claudeGrantUsable(original, grant, now) {
+-				status.Grants = append(status.Grants, grant)
+-				status.AvailableCount += grant.ResetsLeft
+-			}
+-		}
+-		response.Status = &status
+-	}
+-	if grant := selectClaudeResetGrant(response.Status, now); grant != nil {
+-		response.SelectedGrantID = grant.ID
++	options, err := client.QuotaResetOptions(ctx, input.Identity.Identity)
++	if err != nil {
++		return ClaudeResetGrantsResponse{}, err
+ 	}
+-	if result.Profile != nil && result.Profile.Organization != nil && claudeUUIDPattern.MatchString(result.Profile.Organization.UUID) {
+-		response.OrganizationID = strings.ToLower(result.Profile.Organization.UUID)
++	var status *ClaudeResetGrantStatus
++	if err = json.Unmarshal(options.Status, &status); err != nil {
++		return ClaudeResetGrantsResponse{}, err
+ 	}
+-	return response, nil
++	return ClaudeResetGrantsResponse{AuthIndex: input.Identity.Identity, Status: status, SelectedGrantID: options.SelectedGrantID, OrganizationID: options.OrganizationID}, nil
+ }
+-
+ func (p claudeProvider) ResetClaude(ctx context.Context, input ProviderInput, grantID, organizationID string) (ProviderResetOutput, error) {
+-	// 弹窗提供已展示的 grant 和组织；确认只检查参数格式，是否允许消费由官方接口判断。
+-	if !claudeGrantIDPattern.MatchString(grantID) || !claudeUUIDPattern.MatchString(organizationID) {
+-		return ProviderResetOutput{Code: "unavailable"}, nil
+-	}
+-	requestID, err := newRedeemRequestID()
+-	if err != nil {
+-		return ProviderResetOutput{}, err
+-	}
+-	claimCtx, cancel := context.WithTimeout(ctx, claudeClaimTimeout)
+-	defer cancel()
+-	response, err := p.caller.CallManagementAPI(claimCtx, apicall.Request{AuthIndex: input.Identity.Identity, Method: "POST", URL: "https://api.anthropic.com/api/organizations/" + strings.ToLower(organizationID) + "/reset_rate_limits", Header: copyHeaders(DefaultProviderConfigs().ClaudeUsage.Headers), Data: map[string]string{"program": "cedar_ember", "grant_id": grantID, "request_id": requestID}})
+-	output := ProviderResetOutput{Code: "unknown"}
+-	// 断连或非预期响应可能发生在官方已经处理之后，不自动重试，也不执行路由恢复。
+-	if err != nil || response == nil {
+-		return output, nil
+-	}
+-	if response.StatusCode == 429 {
+-		output.Code = "rate_limited"
+-		return output, nil
+-	}
+-	if response.StatusCode == 401 || response.StatusCode == 403 {
+-		output.Code = "auth_error"
+-		return output, nil
+-	}
+-	if response.StatusCode < 200 || response.StatusCode >= 300 {
+-		return output, nil
+-	}
+-	object, err := parseResponseObject(response)
+-	if err != nil {
+-		return output, nil
+-	}
+-	switch code := stringField(object, "result"); code {
+-	case "reset", "already_used", "not_limited", "cooldown", "ineligible", "unavailable":
+-		output.Code = code
+-	}
+-	if output.Code == "reset" || output.Code == "already_used" {
+-		client, ok := p.caller.(interface {
+-			ResetQuota(context.Context, string) error
+-		})
+-		output.RecoveryFailed = !ok || client.ResetQuota(ctx, input.Identity.Identity) != nil
+-	}
+-	return output, nil
++	return redeemSharedReset(ctx, p.caller, input, "claude", grantID, organizationID)
+ }
+diff --git a/internal/quota/claude_reset_grants.go b/internal/quota/claude_reset_grants.go
+index c36e3d10..18520700 100644
+--- a/internal/quota/claude_reset_grants.go
++++ b/internal/quota/claude_reset_grants.go
+@@ -3,7 +3,6 @@ package quota
+ import (
+ 	"encoding/json"
+ 	"regexp"
+-	"sort"
+ 	"strings"
+ 	"time"
+ 	"unicode"
+@@ -113,42 +112,3 @@ func claudeOptionalTimeValid(value *string) bool {
+ 	_, err := time.Parse(time.RFC3339Nano, *value)
+ 	return err == nil
+ }
+-
+-func claudeGrantUsable(status *ClaudeResetGrantStatus, grant ClaudeResetGrant, now time.Time) bool {
+-	if status == nil || !status.Eligible || grant.Paused || !grant.UsableNow || grant.ResetsLeft <= 0 || (grant.UseRequiresLimit && !status.AtLimit) {
+-		return false
+-	}
+-	for _, bound := range []struct {
+-		value string
+-		start bool
+-	}{{grant.StartsAt, true}, {grant.EndsAt, false}, {status.CooldownUntil, true}} {
+-		if bound.value == "" {
+-			continue
+-		}
+-		at, err := time.Parse(time.RFC3339Nano, bound.value)
+-		if err != nil || (bound.start && now.Before(at)) || (!bound.start && !now.Before(at)) {
+-			return false
+-		}
+-	}
+-	return true
+-}
+-
+-func selectClaudeResetGrant(status *ClaudeResetGrantStatus, now time.Time) *ClaudeResetGrant {
+-	if status == nil {
+-		return nil
+-	}
+-	usable := []ClaudeResetGrant{}
+-	for _, grant := range status.Grants {
+-		if claudeGrantUsable(status, grant, now) {
+-			if grant.ID == status.NextGrantID {
+-				return &grant
+-			}
+-			usable = append(usable, grant)
+-		}
+-	}
+-	sort.Slice(usable, func(i, j int) bool { return usable[i].ID < usable[j].ID })
+-	if len(usable) == 0 {
+-		return nil
+-	}
+-	return &usable[0]
+-}
+diff --git a/internal/quota/codex.go b/internal/quota/codex.go
+index bd60a663..9fe09ed1 100644
+--- a/internal/quota/codex.go
++++ b/internal/quota/codex.go
+@@ -2,14 +2,13 @@ package quota
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"net/url"
+ 	"strings"
+ 	"time"
+ 
+ 	"cpa-usage-keeper/internal/cpa/dto/apicall"
+ 	"cpa-usage-keeper/internal/entities"
+-
+-	"github.com/sirupsen/logrus"
+ )
+ 
+ type codexProvider struct {
+@@ -44,7 +43,7 @@ func (p codexProvider) Check(ctx context.Context, input ProviderInput) (Provider
+ 	}
+ 	// usage 未明确给出 reset credit 数量时，按 CPAMC 的 best-effort 语义补查详情接口；明确 0 不触发额外请求。
+ 	if usage.RateLimitResetCredits == nil || usage.RateLimitResetCredits.AvailableCount == nil {
+-		credits, creditsErr := p.ListResetCredits(ctx, input)
++		credits, creditsErr := p.listResetCreditsForUsage(ctx, input)
+ 		if creditsErr == nil {
+ 			availableCount := credits.AvailableCount
+ 			// 兼容详情接口只有可用 credit 明细而缺少聚合 count 的响应。
+@@ -87,52 +86,19 @@ func optionalAccountID(value *string) string {
+ }
+ 
+ func (p codexProvider) Reset(ctx context.Context, input ProviderInput) (ProviderResetOutput, error) {
+-	headers := p.requestHeaders(input.Identity)
+-	// reset 与普通限额刷新共用同一份 auth header，但调用官方 consume 端点消费一次 reset credit。
+-	redeemRequestID, err := newRedeemRequestID()
+-	if err != nil {
+-		return ProviderResetOutput{}, err
+-	}
+-	request := apicall.Request{
+-		AuthIndex: input.Identity.Identity,
+-		Method:    "POST",
+-		URL:       CodexRateLimitResetCreditsConsumeURL,
+-		Header:    headers,
+-		Data:      map[string]string{"redeem_request_id": redeemRequestID},
+-	}
+-	response, err := p.caller.CallManagementAPI(ctx, request)
+-	if err != nil {
+-		return ProviderResetOutput{}, err
+-	}
+-	output, err := parseCodexResetCreditResponse(response)
+-	if err != nil {
+-		return ProviderResetOutput{}, err
+-	}
+-	// 官方重置已消费次数；随后清除 CPA 的路由冷却，失败只标记部分成功，避免重复消费。
+-	if err := p.caller.ResetQuota(ctx, input.Identity.Identity); err != nil {
+-		output.RecoveryFailed = true
+-		logrus.WithError(err).WithField("auth_index", input.Identity.Identity).Warn("Codex quota reset succeeded but CPA account recovery failed")
+-	}
+-	return output, nil
++	return redeemSharedReset(ctx, p.caller, input, "codex", "", "")
+ }
+-
+ func (p codexProvider) ListResetCredits(ctx context.Context, input ProviderInput) (ProviderResetCreditsOutput, error) {
+-	// 过期明细只由弹窗按需调用，不进入手动、自动或 Header quota cache 链路。
+-	headers := mergeHeaders(p.requestHeaders(input.Identity), map[string]string{
+-		"Accept":      "application/json",
+-		"OpenAI-Beta": "codex-1",
+-		"Originator":  "Codex Desktop",
+-	})
+-	response, err := p.caller.CallManagementAPI(ctx, apicall.Request{
+-		AuthIndex: input.Identity.Identity,
+-		Method:    "GET",
+-		URL:       CodexRateLimitResetCreditsURL,
+-		Header:    headers,
+-	})
++	client, err := sharedReset(p.caller)
+ 	if err != nil {
+ 		return ProviderResetCreditsOutput{}, err
+ 	}
+-	return parseCodexResetCreditsResponse(response)
++	options, err := client.QuotaResetOptions(ctx, input.Identity.Identity)
++	if err != nil {
++		return ProviderResetCreditsOutput{}, err
++	}
++	body, _ := json.Marshal(string(options.Credits))
++	return parseCodexResetCreditsResponse(&apicall.Response{StatusCode: 200, Body: body, BodyText: string(options.Credits)})
+ }
+ 
+ func (p codexProvider) requestHeaders(identity entities.UsageIdentity) map[string]string {
+@@ -142,3 +108,12 @@ func (p codexProvider) requestHeaders(identity entities.UsageIdentity) map[strin
+ 	}
+ 	return headers
+ }
++
++// Ordinary quota refresh keeps its optional observation call and diagnostics.
++func (p codexProvider) listResetCreditsForUsage(ctx context.Context, input ProviderInput) (ProviderResetCreditsOutput, error) {
++	response, err := p.caller.CallManagementAPI(ctx, apicall.Request{AuthIndex: input.Identity.Identity, Method: "GET", URL: CodexRateLimitResetCreditsURL, Header: mergeHeaders(p.requestHeaders(input.Identity), map[string]string{"Accept": "application/json", "OpenAI-Beta": "codex-1", "Originator": "Codex Desktop"})})
++	if err != nil {
++		return ProviderResetCreditsOutput{}, err
++	}
++	return parseCodexResetCreditsResponse(response)
++}
+diff --git a/internal/quota/reset.go b/internal/quota/reset.go
+index 2825106a..d0218cf1 100644
+--- a/internal/quota/reset.go
++++ b/internal/quota/reset.go
+@@ -2,7 +2,6 @@ package quota
+ 
+ import (
+ 	"context"
+-	"crypto/rand"
+ 	"errors"
+ 	"fmt"
+ 	"strings"
+@@ -14,6 +13,7 @@ import (
+ )
+ 
+ type ResetRequest struct {
++	RequestID      string `json:"request_id"`
+ 	AuthIndex      string `json:"auth_index"`
+ 	GrantID        string `json:"grant_id,omitempty"`
+ 	OrganizationID string `json:"organization_id,omitempty"`
+@@ -78,8 +78,8 @@ func (s *Service) Reset(ctx context.Context, request ResetRequest) (ResetRespons
+ 		return ResetResponse{}, errors.New("quota service is nil")
+ 	}
+ 	authIndex := strings.TrimSpace(request.AuthIndex)
+-	if authIndex == "" {
+-		return ResetResponse{}, fmt.Errorf("%w: auth_index is required", ErrValidation)
++	if authIndex == "" || !claudeUUIDPattern.MatchString(request.RequestID) {
++		return ResetResponse{}, fmt.Errorf("%w: auth_index and UUID request_id are required", ErrValidation)
+ 	}
+ 
+ 	// reset 会真实消费官方次数；同一 auth_index 同时只能有一个请求进入 provider。
+@@ -105,11 +105,11 @@ func (s *Service) Reset(ctx context.Context, request ResetRequest) (ResetRespons
+ 		if !supported {
+ 			return ResetResponse{}, ErrUnsupportedType
+ 		}
+-		output, err := resetter.ResetClaude(ctx, ProviderInput{Identity: identity}, request.GrantID, request.OrganizationID)
++		output, err := resetter.ResetClaude(ctx, ProviderInput{Identity: identity, ResetRequestID: request.RequestID}, request.GrantID, request.OrganizationID)
+ 		if err != nil {
+ 			return ResetResponse{}, err
+ 		}
+-		return ResetResponse{AuthIndex: authIndex, Code: output.Code, RecoveryFailed: output.RecoveryFailed}, nil
++		return ResetResponse{AuthIndex: authIndex, Code: output.Code, WindowsReset: output.WindowsReset, RecoveryFailed: output.RecoveryFailed}, nil
+ 	}
+ 	if !ok || resolvedType != "codex" {
+ 		return ResetResponse{}, fmt.Errorf("%w: %s", ErrUnsupportedType, normalizeIdentityType(identity.Provider))
+@@ -119,7 +119,7 @@ func (s *Service) Reset(ctx context.Context, request ResetRequest) (ResetRespons
+ 	if !ok {
+ 		return ResetResponse{}, fmt.Errorf("%w: %s", ErrUnsupportedType, normalizeIdentityType(identity.Provider))
+ 	}
+-	output, err := resetter.Reset(ctx, ProviderInput{Identity: identity})
++	output, err := resetter.Reset(ctx, ProviderInput{Identity: identity, ResetRequestID: request.RequestID})
+ 	if err != nil {
+ 		return ResetResponse{}, err
+ 	}
+@@ -155,14 +155,3 @@ func (s *Service) finishReset(authIndex string) {
+ 	defer s.resetMu.Unlock()
+ 	delete(s.resetInFlight, authIndex)
+ }
+-
+-func newRedeemRequestID() (string, error) {
+-	// Codex consume 接口要求每次请求携带新的 UUID v4，用于服务端去重和审计。
+-	var b [16]byte
+-	if _, err := rand.Read(b[:]); err != nil {
+-		return "", err
+-	}
+-	b[6] = (b[6] & 0x0f) | 0x40
+-	b[8] = (b[8] & 0x3f) | 0x80
+-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+-}
+diff --git a/internal/quota/shared_reset.go b/internal/quota/shared_reset.go
+new file mode 100644
+index 00000000..659fd2fc
+--- /dev/null
++++ b/internal/quota/shared_reset.go
+@@ -0,0 +1,42 @@
++package quota
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/cpa/dto/quotareset"
++	"errors"
++)
++
++type sharedResetClient interface {
++	QuotaResetOptions(context.Context, string) (quotareset.Options, error)
++	RedeemQuotaReset(context.Context, quotareset.Request) (quotareset.Result, error)
++}
++
++func sharedReset(caller ManagementAPICaller) (sharedResetClient, error) {
++	client, ok := caller.(sharedResetClient)
++	if !ok {
++		return nil, errors.New("CPA shared reset API unavailable")
++	}
++	return client, nil
++}
++func (c upstreamResponseRecordingCaller) QuotaResetOptions(ctx context.Context, index string) (quotareset.Options, error) {
++	client, err := sharedReset(c.ManagementClient)
++	if err != nil {
++		return quotareset.Options{}, err
++	}
++	return client.QuotaResetOptions(ctx, index)
++}
++func (c upstreamResponseRecordingCaller) RedeemQuotaReset(ctx context.Context, req quotareset.Request) (quotareset.Result, error) {
++	client, err := sharedReset(c.ManagementClient)
++	if err != nil {
++		return quotareset.Result{}, err
++	}
++	return client.RedeemQuotaReset(ctx, req)
++}
++func redeemSharedReset(ctx context.Context, caller ManagementAPICaller, input ProviderInput, provider, grant, org string) (ProviderResetOutput, error) {
++	client, err := sharedReset(caller)
++	if err != nil {
++		return ProviderResetOutput{}, err
++	}
++	out, err := client.RedeemQuotaReset(ctx, quotareset.Request{AuthIndex: input.Identity.Identity, Provider: provider, RequestID: input.ResetRequestID, GrantID: grant, OrganizationID: org})
++	return ProviderResetOutput{Code: out.Code, WindowsReset: out.WindowsReset, RecoveryFailed: out.RecoveryFailed}, err
++}
+diff --git a/internal/quota/test/claude_reset_grants_test.go b/internal/quota/test/claude_reset_grants_test.go
+index a41a8c61..cca35268 100644
+--- a/internal/quota/test/claude_reset_grants_test.go
++++ b/internal/quota/test/claude_reset_grants_test.go
+@@ -160,18 +160,6 @@ func (c *claudeResetCaller) ResetQuota(context.Context, string) error {
+ 	c.recoveryCalls++
+ 	return c.recoveryErr
+ }
+-func (c *claudeResetCaller) posts() []apicall.Request {
+-	c.mu.Lock()
+-	defer c.mu.Unlock()
+-	var out []apicall.Request
+-	for _, r := range c.requests {
+-		if r.Method == "POST" {
+-			out = append(out, r)
+-		}
+-	}
+-	return out
+-}
+-
+ func claudeResetFixture(t *testing.T, caller *claudeResetCaller) (*quota.Service, *gorm.DB) {
+ 	t.Helper()
+ 	db := openQuotaTestDB(t)
+@@ -180,143 +168,3 @@ func claudeResetFixture(t *testing.T, caller *claudeResetCaller) (*quota.Service
+ 	service := newQuotaServiceWithRegistry(t, db, quota.NewProviderRegistry(map[string]quota.ProviderHandler{"claude": quota.NewClaudeProvider(caller, config.ClaudeUsage, config.ClaudeProfile)}))
+ 	return service, db
+ }
+-
+-const claudeTestOrg = "11111111-1111-1111-1111-111111111111"
+-
+-func claudeManualReset() quota.ResetRequest {
+-	return quota.ResetRequest{AuthIndex: "claude", GrantID: "spring", OrganizationID: claudeTestOrg}
+-}
+-
+-func TestClaudeResetPopupReadsUsageAndProfileButConfirmationOnlyClaims(t *testing.T) {
+-	caller := &claudeResetCaller{result: "reset"}
+-	service, _ := claudeResetFixture(t, caller)
+-	details, err := service.GetClaudeResetGrants(context.Background(), "claude")
+-	if err != nil || details.SelectedGrantID != "spring" || details.OrganizationID != claudeTestOrg || len(caller.requests) != 2 {
+-		t.Fatalf("popup: %+v %v requests=%d", details, err, len(caller.requests))
+-	}
+-	for range 2 {
+-		result, err := service.Reset(context.Background(), claudeManualReset())
+-		if err != nil || result.Code != "reset" || result.RecoveryFailed {
+-			t.Fatalf("reset: %+v %v", result, err)
+-		}
+-	}
+-	if len(caller.requests) != 4 || caller.recoveryCalls != 2 {
+-		t.Fatalf("confirmation repeated a read: %+v", caller.requests)
+-	}
+-	posts := caller.posts()
+-	ids := map[string]bool{}
+-	for _, request := range posts {
+-		data := request.Data.(map[string]string)
+-		id := data["request_id"]
+-		if len(id) != 36 || ids[id] || data["program"] != "cedar_ember" || data["grant_id"] != "spring" || request.URL != "https://api.anthropic.com/api/organizations/"+claudeTestOrg+"/reset_rate_limits" || request.Header["Authorization"] != "Bearer $TOKEN$" {
+-			t.Fatalf("wrong claim: %+v", request)
+-		}
+-		ids[id] = true
+-	}
+-}
+-
+-func TestClaudeResetRejectsMalformedParametersWithoutUpstreamRequests(t *testing.T) {
+-	for _, request := range []quota.ResetRequest{
+-		{AuthIndex: "claude"}, {AuthIndex: "claude", GrantID: "../escape", OrganizationID: claudeTestOrg},
+-		{AuthIndex: "claude", GrantID: "spring", OrganizationID: "https://example.com"},
+-	} {
+-		caller := &claudeResetCaller{result: "reset"}
+-		service, _ := claudeResetFixture(t, caller)
+-		result, err := service.Reset(context.Background(), request)
+-		if err != nil || result.Code != "unavailable" || len(caller.requests) != 0 {
+-			t.Fatalf("invalid parameters dispatched: %+v %v", result, err)
+-		}
+-	}
+-}
+-
+-func TestClaudeResetUpstreamResultsAndRecovery(t *testing.T) {
+-	for _, code := range []string{"reset", "already_used", "not_limited", "cooldown", "ineligible", "unavailable", "auth_error", "rate_limited", "unknown", "unexpected", "http_failure"} {
+-		t.Run(code, func(t *testing.T) {
+-			caller := &claudeResetCaller{result: code, recoveryErr: errors.New("recovery unavailable")}
+-			service, _ := claudeResetFixture(t, caller)
+-			result, err := service.Reset(context.Background(), claudeManualReset())
+-			expected := code
+-			if code == "unexpected" || code == "http_failure" {
+-				expected = "unknown"
+-			}
+-			success := code == "reset" || code == "already_used"
+-			if err != nil || result.Code != expected || result.RecoveryFailed != success || len(caller.requests) != 1 || (caller.recoveryCalls == 1) != success {
+-				t.Fatalf("outcome: %+v %v calls=%d", result, err, caller.recoveryCalls)
+-			}
+-		})
+-	}
+-}
+-
+-func TestClaudeResetUsesExistingSameAuthInFlightLock(t *testing.T) {
+-	caller := &claudeResetCaller{result: "reset", postEntered: make(chan struct{}, 1), postRelease: make(chan struct{})}
+-	service, _ := claudeResetFixture(t, caller)
+-	done := make(chan error, 1)
+-	go func() { _, err := service.Reset(context.Background(), claudeManualReset()); done <- err }()
+-	<-caller.postEntered
+-	_, err := service.Reset(context.Background(), claudeManualReset())
+-	if !errors.Is(err, quota.ErrResetInProgress) || len(caller.posts()) != 1 {
+-		t.Fatal("concurrent claim was not blocked", err)
+-	}
+-	close(caller.postRelease)
+-	if err := <-done; err != nil {
+-		t.Fatal(err)
+-	}
+-}
+-
+-func TestClaudeGrantCannotFallThroughToCodexConsumption(t *testing.T) {
+-	caller := &claudeResetCaller{result: "reset"}
+-	_, db := claudeResetFixture(t, caller)
+-	config := quota.DefaultProviderConfigs()
+-	service := newQuotaServiceWithRegistry(t, db, quota.NewProviderRegistry(map[string]quota.ProviderHandler{"claude": quota.NewClaudeProvider(caller, config.ClaudeUsage, config.ClaudeProfile), "codex": quota.NewCodexProvider(caller, config.Codex)}))
+-	if err := db.Model(&entities.UsageIdentity{}).Where("identity = ?", "claude").Updates(map[string]any{"type": "codex", "provider": "codex"}).Error; err != nil {
+-		t.Fatal(err)
+-	}
+-	result, err := service.Reset(context.Background(), claudeManualReset())
+-	if err != nil || result.Code != "unavailable" || len(caller.posts()) != 0 {
+-		t.Fatalf("Claude popup spent Codex credit: %+v %v", result, err)
+-	}
+-	result, err = service.Reset(context.Background(), quota.ResetRequest{AuthIndex: "claude"})
+-	if err != nil || result.Code != "reset" || len(caller.posts()) != 1 || caller.posts()[0].URL != quota.CodexRateLimitResetCreditsConsumeURL {
+-		t.Fatalf("Codex changed: %+v %v", result, err)
+-	}
+-}
+-
+-func TestClaudeResetPopupMissingOrganizationCannotConfirm(t *testing.T) {
+-	for _, caller := range []*claudeResetCaller{{org: "malformed"}, {profileErr: errors.New("profile unavailable")}} {
+-		service, _ := claudeResetFixture(t, caller)
+-		details, err := service.GetClaudeResetGrants(context.Background(), "claude")
+-		if err != nil || details.OrganizationID != "" || details.Status == nil || len(caller.requests) != 2 {
+-			t.Fatalf("profile failure lost usage or supplied org: %+v %v", details, err)
+-		}
+-	}
+-}
+-
+-func TestClaudeResetPopupOnlyListsUsableGrantsAndCountsTheirRemainingUses(t *testing.T) {
+-	caller := &claudeResetCaller{grantBlock: `{"eligible":true,"at_limit":true,"grants":[
+- {"id":"ready","resets_total":3,"resets_left":2,"usable_now":true,"clears":["five_hour"]},
+- {"id":"paused","resets_total":3,"resets_left":3,"usable_now":true,"paused":true},
+- {"id":"future","resets_total":2,"resets_left":2,"usable_now":true,"starts_at":"2099-01-01T00:00:00Z"},
+- {"id":"expired","resets_total":1,"resets_left":1,"usable_now":true,"ends_at":"2000-01-01T00:00:00Z"},
+- {"id":"notusable","resets_total":1,"resets_left":1,"usable_now":false},
+- {"id":"empty","resets_total":1,"resets_left":0,"usable_now":true}]}`}
+-	service, _ := claudeResetFixture(t, caller)
+-	raw, err := service.Check(context.Background(), quota.CheckRequest{AuthIndex: "claude"})
+-	if err != nil || raw.ClaudeResetGrants.AvailableCount != 9 || len(raw.ClaudeResetGrants.Grants) != 6 {
+-		t.Fatal("ordinary quota no longer retains original grants", err)
+-	}
+-	details, err := service.GetClaudeResetGrants(context.Background(), "claude")
+-	if err != nil || details.SelectedGrantID != "ready" || details.Status.AvailableCount != 2 || len(details.Status.Grants) != 1 {
+-		t.Fatalf("popup: %+v %v", details, err)
+-	}
+-	for _, block := range []string{
+-		strings.Replace(caller.grantBlock, `"eligible":true`, `"eligible":false`, 1),
+-		strings.Replace(caller.grantBlock, `"at_limit":true`, `"at_limit":false`, 1),
+-		strings.Replace(caller.grantBlock, `"at_limit":true`, `"at_limit":true,"cooldown_until":"2099-01-01T00:00:00Z"`, 1),
+-	} {
+-		caller.grantBlock = block
+-		details, err := service.GetClaudeResetGrants(context.Background(), "claude")
+-		if err != nil || details.SelectedGrantID != "" || details.Status.AvailableCount != 0 || len(details.Status.Grants) != 0 {
+-			t.Fatalf("unavailable grant listed: %+v %v", details, err)
+-		}
+-	}
+-}
+diff --git a/internal/quota/test/codex_test.go b/internal/quota/test/codex_test.go
+index 01bc50fa..078f8cb2 100644
+--- a/internal/quota/test/codex_test.go
++++ b/internal/quota/test/codex_test.go
+@@ -4,7 +4,6 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"math"
+-	"regexp"
+ 	"testing"
+ 
+ 	"cpa-usage-keeper/internal/cpa/dto/apicall"
+@@ -178,11 +177,11 @@ func TestCodexProviderListsAvailableRateLimitResetCredits(t *testing.T) {
+ 		t.Fatalf("expected one management API request, got %d", len(caller.requests))
+ 	}
+ 	request := caller.requests[0]
+-	if request.AuthIndex != "codex-auth" || request.Method != "GET" || request.URL != quota.CodexRateLimitResetCreditsURL {
++	if request.AuthIndex != "codex-auth" || request.Method != "GET" || request.URL != "/v8/management/quota/reset-options" {
+ 		t.Fatalf("unexpected reset credit request: %+v", request)
+ 	}
+-	if request.Header["Chatgpt-Account-Id"] != "acct_123" || request.Header["Accept"] != "application/json" || request.Header["OpenAI-Beta"] != "codex-1" || request.Header["Originator"] != "Codex Desktop" {
+-		t.Fatalf("unexpected reset credit request headers: %+v", request.Header)
++	if len(request.Header) != 0 {
++		t.Fatal("Keeper supplied provider headers to shared reset options")
+ 	}
+ }
+ 
+@@ -356,68 +355,6 @@ func TestCodexProviderRejectsNonSuccessUsageResponse(t *testing.T) {
+ 	}
+ }
+ 
+-func TestCodexProviderConsumesRateLimitResetCredit(t *testing.T) {
+-	resetJSON := `{"code":"reset","windows_reset":2}`
+-	caller := &recordingManagementCaller{responses: []*apicall.Response{quotaAPIResponse(200, resetJSON)}}
+-	provider := quota.NewCodexProvider(caller, quota.DefaultProviderConfigs().Codex)
+-	resetter, ok := provider.(quota.ProviderResetter)
+-	if !ok {
+-		t.Fatalf("expected codex provider to implement ProviderResetter")
+-	}
+-
+-	output, err := resetter.Reset(context.Background(), quota.ProviderInput{Identity: entities.UsageIdentity{
+-		Identity:  "codex-auth",
+-		AccountID: new("acct_123"),
+-	}})
+-	if err != nil {
+-		t.Fatalf("Reset returned error: %v", err)
+-	}
+-	if output.Code != "reset" || output.WindowsReset != 2 {
+-		t.Fatalf("unexpected reset output: %+v", output)
+-	}
+-	if len(caller.requests) != 1 {
+-		t.Fatalf("expected one api-call request, got %d", len(caller.requests))
+-	}
+-	request := caller.requests[0]
+-	if request.AuthIndex != "codex-auth" || request.Method != "POST" || request.URL != quota.CodexRateLimitResetCreditsConsumeURL {
+-		t.Fatalf("unexpected api-call request: %+v", request)
+-	}
+-	if request.Header["Chatgpt-Account-Id"] != "acct_123" {
+-		t.Fatalf("unexpected api-call headers: %+v", request.Header)
+-	}
+-	dataMap, ok := request.Data.(map[string]string)
+-	if !ok || dataMap["redeem_request_id"] == "" {
+-		t.Fatalf("expected redeem_request_id in data map, got %#v", request.Data)
+-	}
+-	uuidV4Pattern := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+-	if !uuidV4Pattern.MatchString(dataMap["redeem_request_id"]) {
+-		t.Fatalf("expected redeem_request_id to be UUID v4, got %q", dataMap["redeem_request_id"])
+-	}
+-}
+-
+-func TestCodexProviderRejectsResetResponse(t *testing.T) {
+-	for _, tc := range []struct {
+-		name               string
+-		status             int
+-		body, errorMessage string
+-	}{
+-		{"non-success", 429, `{"error":{"message":"rate limited"}}`, "HTTP 429: rate limited"},
+-		{"empty object", 200, `{}`, ""},
+-		{"non reset code", 200, `{"code":"noop","windows_reset":2}`, ""},
+-		{"missing windows reset", 200, `{"code":"reset"}`, ""},
+-	} {
+-		t.Run(tc.name, func(t *testing.T) {
+-			caller := &recordingManagementCaller{responses: []*apicall.Response{quotaAPIResponse(tc.status, tc.body)}}
+-			provider := quota.NewCodexProvider(caller, quota.DefaultProviderConfigs().Codex)
+-			resetter := provider.(quota.ProviderResetter)
+-			_, err := resetter.Reset(context.Background(), quota.ProviderInput{Identity: entities.UsageIdentity{Identity: "codex-auth"}})
+-			if err == nil || (tc.errorMessage != "" && err.Error() != tc.errorMessage) {
+-				t.Fatalf("unexpected reset error: %v", err)
+-			}
+-		})
+-	}
+-}
+-
+ func assertWindowUsage(t *testing.T, row quota.QuotaRow, tokens int64, cost float64) {
+ 	t.Helper()
+ 	if row.WindowUsageTokens == nil || *row.WindowUsageTokens != tokens {
+diff --git a/internal/quota/test/provider_helpers_test.go b/internal/quota/test/provider_helpers_test.go
+index a8080b3a..e6a98ab1 100644
+--- a/internal/quota/test/provider_helpers_test.go
++++ b/internal/quota/test/provider_helpers_test.go
+@@ -2,7 +2,9 @@ package test
+ 
+ import (
+ 	"context"
++	"cpa-usage-keeper/internal/cpa/dto/quotareset"
+ 	"encoding/json"
++	"fmt"
+ 	"strings"
+ 
+ 	"cpa-usage-keeper/internal/cpa/dto/apicall"
+@@ -38,3 +40,26 @@ func contains(value, substr string) bool {
+ func quotaAPIResponse(status int, body string) *apicall.Response {
+ 	return &apicall.Response{StatusCode: status, BodyText: body, Body: json.RawMessage(body)}
+ }
++
++func (c *recordingManagementCaller) QuotaResetOptions(ctx context.Context, index string) (quotareset.Options, error) {
++	response, err := c.CallManagementAPI(ctx, apicall.Request{AuthIndex: index, Method: "GET", URL: "/v8/management/quota/reset-options"})
++	if err != nil {
++		return quotareset.Options{}, err
++	}
++	if response.StatusCode != 200 {
++		return quotareset.Options{}, fmt.Errorf("reset options unavailable")
++	}
++	raw := response.Body
++	if len(raw) == 0 {
++		raw = json.RawMessage(response.BodyText)
++	}
++	var encoded string
++	if json.Unmarshal(raw, &encoded) == nil {
++		raw = json.RawMessage(encoded)
++	}
++	return quotareset.Options{Provider: "codex", Credits: raw}, nil
++}
++
++func (c *recordingManagementCaller) RedeemQuotaReset(context.Context, quotareset.Request) (quotareset.Result, error) {
++	return quotareset.Result{}, fmt.Errorf("unexpected reset in read-only fixture")
++}
+diff --git a/internal/quota/test/reset_recovery_test.go b/internal/quota/test/reset_recovery_test.go
+index d19ef149..3dcd7430 100644
+--- a/internal/quota/test/reset_recovery_test.go
++++ b/internal/quota/test/reset_recovery_test.go
+@@ -2,153 +2,103 @@ package test
+ 
+ import (
+ 	"context"
++	"cpa-usage-keeper/internal/cpa"
++	"cpa-usage-keeper/internal/cpa/dto/quotareset"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
+ 	"encoding/json"
+ 	"errors"
+ 	"net/http"
+ 	"net/http/httptest"
+-	"reflect"
++	"sync"
+ 	"testing"
+ 	"time"
+-
+-	"cpa-usage-keeper/internal/cpa"
+-	"cpa-usage-keeper/internal/cpa/dto/apicall"
+-	"cpa-usage-keeper/internal/entities"
+-	"cpa-usage-keeper/internal/quota"
+ )
+ 
+-func TestCodexResetRecoversCPARoutingAfterOfficialSuccess(t *testing.T) {
+-	for _, tc := range []struct {
+-		name            string
+-		consumeStatus   int
+-		consumeBody     string
+-		recoveryStatus  int
+-		recordResponses bool
+-		wantResetError  bool
+-	}{
+-		{name: "success", consumeStatus: 200, consumeBody: `{"code":"reset","windows_reset":2}`, recoveryStatus: 200},
+-		{name: "response recording enabled", consumeStatus: 200, consumeBody: `{"code":"reset","windows_reset":2}`, recoveryStatus: 200, recordResponses: true},
+-		{name: "recovery failure preserves consumed credit", consumeStatus: 200, consumeBody: `{"code":"reset","windows_reset":2}`, recoveryStatus: 500},
+-		{name: "older CPA without recovery endpoint", consumeStatus: 200, consumeBody: `{"code":"reset","windows_reset":2}`, recoveryStatus: 404},
+-		{name: "official rejection skips recovery", consumeStatus: 429, consumeBody: `{"error":"exhausted"}`, wantResetError: true},
+-		{name: "invalid official success skips recovery", consumeStatus: 200, consumeBody: `{"code":"unknown"}`, wantResetError: true},
+-	} {
+-		t.Run(tc.name, func(t *testing.T) {
+-			calls := make(chan string, 4)
+-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+-				calls <- r.URL.Path
+-				if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer test-management-key" || r.Header.Get("Content-Type") != "application/json" {
+-					t.Errorf("unexpected method or management authentication")
+-				}
+-				w.Header().Set("Content-Type", "application/json")
+-				switch r.URL.Path {
+-				case "/v8/management/requests/api-call":
+-					var request apicall.Request
+-					if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.AuthIndex != "codex-auth" || request.URL != quota.CodexRateLimitResetCreditsConsumeURL {
+-						t.Errorf("unexpected consume request: %+v, error: %v", request, err)
+-					}
+-					_ = json.NewEncoder(w).Encode(map[string]any{"status_code": tc.consumeStatus, "body": tc.consumeBody})
+-				case "/v8/management/routing/cooldown/reset":
+-					var request map[string]string
+-					if err := json.NewDecoder(r.Body).Decode(&request); err != nil || !reflect.DeepEqual(request, map[string]string{"auth_index": "codex-auth"}) {
+-						t.Errorf("recovery must target only the current auth_index: %v, error: %v", request, err)
+-					}
+-					w.WriteHeader(tc.recoveryStatus)
+-					_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "auth_index": "codex-auth"})
+-				default:
+-					t.Errorf("unexpected CPA operation: %s", r.URL.Path)
+-					w.WriteHeader(http.StatusNotFound)
+-				}
+-			}))
+-			defer server.Close()
+-			db := openQuotaTestDatabase(t)
+-			disabled := true
+-			seedUsageIdentity(t, db, entities.UsageIdentity{Identity: "codex-auth", Provider: "codex", Type: "codex", AuthType: entities.UsageIdentityAuthTypeCredential, Disabled: &disabled})
+-			service := quota.NewServiceWithOptions(db, cpa.NewClient(server.URL, "test-management-key", time.Second, false), quota.ServiceOptions{
+-				QuotaUpstreamResponsesEnabled: tc.recordResponses,
+-			})
+-			t.Cleanup(service.StopRefreshTasks)
++const sharedRequestID = "11111111-1111-4111-8111-111111111111"
+ 
+-			response, err := service.Reset(context.Background(), quota.ResetRequest{AuthIndex: " codex-auth "})
+-			if (err != nil) != tc.wantResetError {
+-				t.Fatalf("Reset error = %v, want error %v", err, tc.wantResetError)
+-			}
+-			wantCalls := []string{"/v8/management/requests/api-call"}
+-			if !tc.wantResetError {
+-				wantCalls = append(wantCalls, "/v8/management/routing/cooldown/reset")
+-				if response.AuthIndex != "codex-auth" || response.Code != "reset" || response.WindowsReset != 2 {
+-					t.Fatalf("official reset result lost: %+v", response)
+-				}
+-				encoded, err := json.Marshal(response)
+-				if err != nil {
+-					t.Fatal(err)
+-				}
+-				var payload struct {
+-					RecoveryFailed bool `json:"recoveryFailed"`
++func TestKeeperUsesSharedResetEndpoint(t *testing.T) {
++	for _, provider := range []string{"codex", "claude"} {
++		for _, recording := range []bool{false, true} {
++			t.Run(provider, func(t *testing.T) {
++				var requests []quotareset.Request
++				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++					if r.URL.Path != "/v8/management/quota/reset" || r.Method != "POST" || r.Header.Get("Authorization") != "Bearer synthetic-management-key" {
++						t.Error("unexpected request", r.URL.Path)
++						w.WriteHeader(404)
++						return
++					}
++					var req quotareset.Request
++					_ = json.NewDecoder(r.Body).Decode(&req)
++					requests = append(requests, req)
++					_ = json.NewEncoder(w).Encode(quotareset.Result{Code: "reset", WindowsReset: 2, RecoveryFailed: true})
++				}))
++				defer server.Close()
++				db := openQuotaTestDatabase(t)
++				seedUsageIdentity(t, db, entities.UsageIdentity{Identity: "synthetic", Provider: provider, Type: provider, AuthType: entities.UsageIdentityAuthTypeCredential})
++				service := quota.NewServiceWithOptions(db, cpa.NewClient(server.URL, "synthetic-management-key", time.Second, false), quota.ServiceOptions{QuotaUpstreamResponsesEnabled: recording})
++				t.Cleanup(service.StopRefreshTasks)
++				request := quota.ResetRequest{AuthIndex: "synthetic", RequestID: sharedRequestID}
++				if provider == "claude" {
++					request.GrantID = "chosen"
++					request.OrganizationID = sharedRequestID
+ 				}
+-				if err := json.Unmarshal(encoded, &payload); err != nil {
+-					t.Fatal(err)
++				out, err := service.Reset(context.Background(), request)
++				if err != nil || out.Code != "reset" || out.WindowsReset != 2 || !out.RecoveryFailed {
++					t.Fatal(out, err)
+ 				}
+-				if payload.RecoveryFailed != (tc.recoveryStatus != 200) {
+-					t.Errorf("partial success must expose recoveryFailed: %s", encoded)
++				if len(requests) != 1 || requests[0].Provider != provider || requests[0].RequestID != sharedRequestID || requests[0].GrantID != request.GrantID || requests[0].OrganizationID != request.OrganizationID || requests[0].CreditID != "" {
++					t.Fatal("choice or request ID lost", requests)
+ 				}
+-			}
+-			var gotCalls []string
+-			for len(calls) > 0 {
+-				gotCalls = append(gotCalls, <-calls)
+-			}
+-			if !reflect.DeepEqual(gotCalls, wantCalls) {
+-				t.Errorf("CPA calls = %v, want %v", gotCalls, wantCalls)
+-			}
+-		})
++			})
++		}
+ 	}
+ }
+ 
+-type blockingQuotaRecoveryCaller struct {
++type sharedBlockingCaller struct {
+ 	recordingManagementCaller
+ 	entered chan struct{}
+ 	release chan struct{}
++	once    sync.Once
+ }
+ 
+-func (c *blockingQuotaRecoveryCaller) ResetQuota(ctx context.Context, _ string) error {
+-	close(c.entered)
++func (c *sharedBlockingCaller) RedeemQuotaReset(ctx context.Context, req quotareset.Request) (quotareset.Result, error) {
++	c.once.Do(func() { close(c.entered) })
+ 	select {
+ 	case <-c.release:
+-		return nil
++		return quotareset.Result{Code: "reset"}, nil
+ 	case <-ctx.Done():
+-		return ctx.Err()
++		return quotareset.Result{}, ctx.Err()
+ 	}
+ }
+-
+-func TestCodexResetBlocksDuplicateConsumptionDuringCPARecovery(t *testing.T) {
++func TestKeeperResetValidationAndConcurrentClicks(t *testing.T) {
+ 	db := openQuotaTestDatabase(t)
+-	seedUsageIdentity(t, db, entities.UsageIdentity{Identity: "codex-auth", Provider: "codex", Type: "codex", AuthType: entities.UsageIdentityAuthTypeCredential})
+-	caller := &blockingQuotaRecoveryCaller{
+-		recordingManagementCaller: recordingManagementCaller{responses: []*apicall.Response{{StatusCode: 200, BodyText: `{"code":"reset","windows_reset":2}`}}},
+-		entered:                   make(chan struct{}), release: make(chan struct{}),
+-	}
++	seedUsageIdentity(t, db, entities.UsageIdentity{Identity: "synthetic", Provider: "codex", Type: "codex", AuthType: entities.UsageIdentityAuthTypeCredential})
++	caller := &sharedBlockingCaller{entered: make(chan struct{}), release: make(chan struct{})}
+ 	service := quota.NewService(db, caller)
+ 	t.Cleanup(service.StopRefreshTasks)
+-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	if _, err := service.Reset(context.Background(), quota.ResetRequest{AuthIndex: "synthetic"}); !errors.Is(err, quota.ErrValidation) {
++		t.Fatal("missing request ID accepted", err)
++	}
++	request := quota.ResetRequest{AuthIndex: "synthetic", RequestID: sharedRequestID}
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+ 	defer cancel()
+ 	done := make(chan error, 1)
+-	go func() {
+-		_, err := service.Reset(ctx, quota.ResetRequest{AuthIndex: "codex-auth"})
+-		done <- err
+-	}()
++	go func() { _, err := service.Reset(ctx, request); done <- err }()
+ 	select {
+ 	case <-caller.entered:
+ 	case <-ctx.Done():
+-		t.Fatal("reset did not reach CPA recovery")
++		t.Fatal("shared reset never entered")
+ 	}
+-	_, err := service.Reset(ctx, quota.ResetRequest{AuthIndex: "codex-auth"})
+-	if !errors.Is(err, quota.ErrResetInProgress) {
+-		t.Errorf("duplicate reset during recovery should be rejected, got %v", err)
++	if _, err := service.Reset(ctx, request); !errors.Is(err, quota.ErrResetInProgress) {
++		t.Fatal(err)
+ 	}
+ 	close(caller.release)
+ 	if err := <-done; err != nil {
+-		t.Fatalf("original reset failed: %v", err)
++		t.Fatal(err)
+ 	}
+-	if len(caller.requests) != 1 {
+-		t.Fatalf("consumed reset credit %d times, want 1", len(caller.requests))
++	request.GrantID = "claude-choice"
++	if out, err := service.Reset(ctx, request); err != nil || out.Code != "unavailable" {
++		t.Fatal("Claude choice fell through to Codex", out, err)
+ 	}
+ }
+diff --git a/internal/quota/test/service_refresh_test.go b/internal/quota/test/service_refresh_test.go
+index 2430b6ca..38f47ff6 100644
+--- a/internal/quota/test/service_refresh_test.go
++++ b/internal/quota/test/service_refresh_test.go
+@@ -99,7 +99,7 @@ func TestResetConsumesCodexCredit(t *testing.T) {
+ 	handler := &resetHandlerStub{resetOutput: ProviderResetOutput{Code: "reset", WindowsReset: 2}}
+ 	service := newQuotaRefreshService(t, db, NewProviderRegistry(map[string]ProviderHandler{"codex": handler}))
+ 
+-	response, err := service.Reset(context.Background(), ResetRequest{AuthIndex: " codex-auth "})
++	response, err := service.Reset(context.Background(), ResetRequest{RequestID: "11111111-1111-4111-8111-111111111111", AuthIndex: " codex-auth "})
+ 	if err != nil {
+ 		t.Fatalf("Reset returned error: %v", err)
+ 	}
+@@ -177,7 +177,7 @@ func TestResetRejectsUnsupportedProvider(t *testing.T) {
+ 	handler := &resetHandlerStub{resetOutput: ProviderResetOutput{Code: "reset", WindowsReset: 1}}
+ 	service := newQuotaRefreshService(t, db, NewProviderRegistry(map[string]ProviderHandler{"claude": handler}))
+ 
+-	_, err := service.Reset(context.Background(), ResetRequest{AuthIndex: "claude-auth"})
++	_, err := service.Reset(context.Background(), ResetRequest{RequestID: "11111111-1111-4111-8111-111111111111", AuthIndex: "claude-auth"})
+ 	if !errors.Is(err, ErrUnsupportedType) {
+ 		t.Fatalf("expected unsupported type error, got %v", err)
+ 	}
+@@ -186,7 +186,7 @@ func TestResetRejectsUnsupportedProvider(t *testing.T) {
+ func TestResetRejectsEmptyAuthIndex(t *testing.T) {
+ 	service := newQuotaRefreshService(t, openQuotaTestDatabase(t), NewProviderRegistry(nil))
+ 
+-	_, err := service.Reset(context.Background(), ResetRequest{AuthIndex: "   "})
++	_, err := service.Reset(context.Background(), ResetRequest{RequestID: "11111111-1111-4111-8111-111111111111", AuthIndex: "   "})
+ 	if !errors.Is(err, ErrValidation) {
+ 		t.Fatalf("expected validation error, got %v", err)
+ 	}
+@@ -195,7 +195,7 @@ func TestResetRejectsEmptyAuthIndex(t *testing.T) {
+ func TestResetRejectsNilServiceWithoutInProgressError(t *testing.T) {
+ 	var service *Service
+ 
+-	_, err := service.Reset(context.Background(), ResetRequest{AuthIndex: "codex-auth"})
++	_, err := service.Reset(context.Background(), ResetRequest{RequestID: "11111111-1111-4111-8111-111111111111", AuthIndex: "codex-auth"})
+ 	if err == nil {
+ 		t.Fatal("expected nil service error")
+ 	}
+@@ -210,7 +210,7 @@ func TestResetRejectsNilServiceWithoutInProgressError(t *testing.T) {
+ func TestResetReturnsNotFoundForMissingAuthIndex(t *testing.T) {
+ 	service := newQuotaRefreshService(t, openQuotaTestDatabase(t), NewProviderRegistry(nil))
+ 
+-	_, err := service.Reset(context.Background(), ResetRequest{AuthIndex: "missing-auth"})
++	_, err := service.Reset(context.Background(), ResetRequest{RequestID: "11111111-1111-4111-8111-111111111111", AuthIndex: "missing-auth"})
+ 	if !errors.Is(err, ErrNotFound) {
+ 		t.Fatalf("expected not found error, got %v", err)
+ 	}
+@@ -227,7 +227,7 @@ func TestResetRejectsConcurrentRequestsForSameAuthIndex(t *testing.T) {
+ 	results := make(chan error, 2)
+ 	for range 2 {
+ 		wg.Go(func() {
+-			_, err := service.Reset(context.Background(), ResetRequest{AuthIndex: "codex-auth"})
++			_, err := service.Reset(context.Background(), ResetRequest{RequestID: "11111111-1111-4111-8111-111111111111", AuthIndex: "codex-auth"})
+ 			results <- err
+ 		})
+ 	}
+@@ -275,7 +275,7 @@ func TestResetAllowsConcurrentRequestsForDifferentAuthIndexes(t *testing.T) {
+ 	results := make(chan error, 2)
+ 	for _, authIndex := range []string{"codex-auth-1", "codex-auth-2"} {
+ 		wg.Go(func() {
+-			_, err := service.Reset(context.Background(), ResetRequest{AuthIndex: authIndex})
++			_, err := service.Reset(context.Background(), ResetRequest{RequestID: "11111111-1111-4111-8111-111111111111", AuthIndex: authIndex})
+ 			results <- err
+ 		})
+ 	}
+diff --git a/internal/quota/types.go b/internal/quota/types.go
+index fe404e4f..42440652 100644
+--- a/internal/quota/types.go
++++ b/internal/quota/types.go
+@@ -18,7 +18,8 @@ type ManagementClient interface {
+ }
+ 
+ type ProviderInput struct {
+-	Identity entities.UsageIdentity
++	ResetRequestID string
++	Identity       entities.UsageIdentity
+ }
+ 
+ type ProviderOutput struct {
+diff --git a/web/src/components/usage/ActivityHeatmapGrid.tsx b/web/src/components/usage/ActivityHeatmapGrid.tsx
+index 3db0b80a..99978f2d 100644
+--- a/web/src/components/usage/ActivityHeatmapGrid.tsx
++++ b/web/src/components/usage/ActivityHeatmapGrid.tsx
+@@ -1,3 +1,4 @@
++import { browserDateTimeFormat, browserTimeZone } from '@/utils/browserDateTime';
+ import { disambiguateTimeLabels } from '@/utils/usage/timeLabels';
+ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+ import { createPortal } from 'react-dom';
+@@ -37,26 +38,11 @@ export function parseActivityTime(value?: string): number {
+   return Number.isFinite(parsed) ? parsed : 0;
+ }
+ 
+-export function createActivityDateTimeFormatter(timeZone?: string): Intl.DateTimeFormat {
+-  const options: Intl.DateTimeFormatOptions = {
+-    month: '2-digit',
+-    day: '2-digit',
+-    hour: '2-digit',
+-    minute: '2-digit',
+-    hourCycle: 'h23',
+-    timeZone,
+-  };
+-  try {
+-    return new Intl.DateTimeFormat('en-US', options);
+-  } catch {
+-    return new Intl.DateTimeFormat('en-US', { ...options, timeZone: undefined });
+-  }
++export function createActivityDateTimeFormatter(_timeZone?: string): Intl.DateTimeFormat {
++ return browserDateTimeFormat({ month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+ }
+-
+ export function formatActivityDateTime(timestamp: number, formatter: Intl.DateTimeFormat): string {
+-  const parts = formatter.formatToParts(new Date(timestamp));
+-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+-  return `${values.month}/${values.day} ${values.hour}:${values.minute}`;
++ return formatter.format(new Date(timestamp));
+ }
+ 
+ export interface ActivityHeatmapGridProps {
+@@ -87,8 +73,8 @@ export function ActivityHeatmapGrid({
+   const dateTimeFormatter = useMemo(() => createActivityDateTimeFormatter(timeZone), [timeZone]);
+   const timeLabels = useMemo(() => {
+     const values = blocks.flatMap((block) => [block.start_time, block.end_time].map((value) => new Date(parseActivityTime(value)).toISOString()));
+-    return disambiguateTimeLabels(values, timeZone, (value) => formatActivityDateTime(parseActivityTime(value), dateTimeFormatter));
+-  }, [blocks, timeZone, dateTimeFormatter]);
++    return disambiguateTimeLabels(values, browserTimeZone(), (value) => formatActivityDateTime(parseActivityTime(value), dateTimeFormatter));
++  }, [blocks, dateTimeFormatter]);
+   // render 阶段只对 identity 不一致的旧 tooltip 做一次幂等清理，避免 A→B→A 恢复陈旧状态。
+   if (activeTooltip && activeTooltip.requestIdentity !== requestIdentity) {
+     setActiveTooltip(null);
+diff --git a/web/src/components/usage/CustomRangePanel.tsx b/web/src/components/usage/CustomRangePanel.tsx
+index f7c3ec05..542584a3 100644
+--- a/web/src/components/usage/CustomRangePanel.tsx
++++ b/web/src/components/usage/CustomRangePanel.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale, browserTimeZone } from '@/utils/browserDateTime';
+ import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import type { UsageCustomRange, UsageCustomRangeUnit } from '@/lib/types';
+@@ -33,22 +34,21 @@ const parseDayKey = (value: string): Date => {
+   return new Date(Date.UTC(year, month - 1, day));
+ };
+ 
+-const formatEndpoint = (value: string, unit: UsageCustomRangeUnit, timeZone: string, locale?: string): string => {
++const formatEndpoint = (value: string, unit: UsageCustomRangeUnit, _timeZone: string, _locale?: string): string => {
+   if (unit === 'day') {
+-    return new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })
++    return new Intl.DateTimeFormat(browserDateLocale(), { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })
+       .format(parseDayKey(value));
+   }
+-  return new Intl.DateTimeFormat(locale, {
+-    timeZone,
++  return new Intl.DateTimeFormat(browserDateLocale(), {
++    timeZone: browserTimeZone(),
+     month: 'short',
+     day: 'numeric',
+     hour: '2-digit',
+     minute: '2-digit',
+-    hourCycle: 'h23',
+   }).format(new Date(value));
+ };
+ 
+-const formatCalendarDay = (value: string, locale?: string): string => new Intl.DateTimeFormat(locale, {
++const formatCalendarDay = (value: string, _locale?: string): string => new Intl.DateTimeFormat(browserDateLocale(), {
+   weekday: 'long',
+   year: 'numeric',
+   month: 'long',
+@@ -141,7 +141,7 @@ function CustomRangeSummary({
+       </div>
+       <div className={styles.customRangeMeta}>
+         <span>{t(value.unit === 'hour' ? 'usage_stats.range_custom_hours_count' : 'usage_stats.range_custom_days_count', { count: slotCount })}</span>
+-        <strong>{timeZone}</strong>
++        <strong>{value.unit === 'hour' ? browserTimeZone() : timeZone}</strong>
+       </div>
+       {value.unit === 'day' && (
+         <small className={styles.customRangeLimitHint} data-custom-range-limit-hint>
+@@ -316,7 +316,7 @@ export function CustomRangePanel({ value, timeZone, locale, anchorMs, maxDayRang
+               onClick={() => setVisibleMonth((month) => shiftMonth(month, -1))}
+               aria-label={t('usage_stats.range_custom_previous_month')}
+             ><IconChevronLeft size={14} /></button>
+-            <strong>{new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'long', timeZone: 'UTC' }).format(parseDayKey(`${visibleMonth}-01`))}</strong>
++            <strong>{new Intl.DateTimeFormat(browserDateLocale(), { year: 'numeric', month: 'long', timeZone: 'UTC' }).format(parseDayKey(`${visibleMonth}-01`))}</strong>
+             <button
+               type="button"
+               disabled={visibleMonth >= currentMonth}
+diff --git a/web/src/components/usage/OverviewQuotaPanel.tsx b/web/src/components/usage/OverviewQuotaPanel.tsx
+index 066d58e7..c47556ee 100644
+--- a/web/src/components/usage/OverviewQuotaPanel.tsx
++++ b/web/src/components/usage/OverviewQuotaPanel.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { useEffect, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { ApiError, fetchAdminProviderQuota, fetchKeyQuota, fetchReadOnlyQuota, type ViewerQuotaAccount, type ViewerQuotaRow } from '@/lib/api';
+@@ -40,7 +41,7 @@ export function observationAge(captured: number, now: number): { minutes: number
+ }
+ 
+ export function localizedResetDate(reset: number): string {
+-  return new Intl.DateTimeFormat(undefined, {
++  return new Intl.DateTimeFormat(browserDateLocale(), {
+     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+   }).format(new Date(reset));
+ }
+@@ -100,13 +101,13 @@ export function OverviewQuotaTable({ accounts, now, notice }: {
+               const tooltipKey = `${account.kind}:${account.provider}:${account.label}:${index}`;
+               const details = [account.label, `${t('overview_limits.window')}: ${label}`,
+                 ...(Number.isFinite(reset) ? [`${t('key_quota.resets')}: ${localizedResetDate(reset)}`] : []),
+-                Number.isFinite(captured) ? `${t('key_quota.updated')}: ${new Date(captured).toLocaleString()} · ${t('overview_limits.observed_ago', observationAge(captured, now))}` : t('overview_limits.capture_unknown'),
++                Number.isFinite(captured) ? `${t('key_quota.updated')}: ${new Date(captured).toLocaleString(browserDateLocale())} · ${t('overview_limits.observed_ago', observationAge(captured, now))}` : t('overview_limits.capture_unknown'),
+                 quotaSourceLabel(row.source),
+                 ...(stale ? [t('overview_limits.stale')] : []),
+               ];
+               tooltipDetails.set(tooltipKey, details);
+               const value = percent != null ? `${percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`
+-                : row.remaining != null ? `${row.remaining.toLocaleString(undefined, { maximumFractionDigits: 2 })}${row.limit != null ? ` / ${row.limit.toLocaleString()}` : ''}` : '—';
++                : row.remaining != null ? `${row.remaining.toLocaleString(undefined, { maximumFractionDigits: 2 })}${row.limit != null ? ` / ${row.limit.toLocaleString(browserDateLocale())}` : ''}` : '—';
+               return <tr key={`${account.kind}:${account.label}:${index}`} className={index > 0 ? styles.continuation : undefined}>
+                 {index === 0 && <td rowSpan={rows.length}><strong className={styles.account}>{account.label}</strong></td>}
+                 <td><div className={styles.limit}>
+diff --git a/web/src/components/usage/OverviewRealtimePanel.tsx b/web/src/components/usage/OverviewRealtimePanel.tsx
+index 4d15b0e8..ee20de1c 100644
+--- a/web/src/components/usage/OverviewRealtimePanel.tsx
++++ b/web/src/components/usage/OverviewRealtimePanel.tsx
+@@ -1,4 +1,5 @@
+-import { disambiguateTimeLabels, getIntlTimeZone } from '@/utils/usage/timeLabels';
++import { formatBrowserDateTime, browserTimeZone } from '@/utils/browserDateTime';
++import { disambiguateTimeLabels } from '@/utils/usage/timeLabels';
+ import { ChartLifecycleProvider, type ChartRefreshSignal } from './charts/chartLifecycle';
+ import { RealtimeModelSpeedCard } from './model-speed/RealtimeModelSpeedCard';
+ import { RealtimeCacheChart, RealtimeDiagnostics, RealtimeWindowCards } from './RealtimeInsights';
+@@ -116,42 +117,9 @@ const emptyRealtime = (window: OverviewRealtimeWindow): OverviewRealtimeBlock =>
+   cache_level: [],
+ });
+ 
+-const formatBucketLabelFromLiteral = (bucket: string): string | null => {
+-  const match = bucket.match(/^\d{4}-\d{2}-\d{2}[T\s](\d{2}):(\d{2})(?::(\d{2}))?/);
+-  if (!match) return null;
+-  const hour = Number(match[1]);
+-  const minute = Number(match[2]);
+-  const second = match[3] ? Number(match[3]) : 0;
+-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return null;
+-  const label = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+-  return second === 0 ? label : `${label}:${String(second).padStart(2, '0')}`;
+-};
+-
+-const formatBucketLabel = (bucket: string, timezone?: string): string => {
+-  const parsed = Date.parse(bucket);
+-  if (!Number.isFinite(parsed)) return bucket;
+-  const date = new Date(parsed);
+-  const timeZone = getIntlTimeZone(timezone);
+-  try {
+-    const parts = new Intl.DateTimeFormat('en-GB', {
+-      hour: '2-digit',
+-      minute: '2-digit',
+-      second: '2-digit',
+-      hourCycle: 'h23',
+-      timeZone,
+-    }).formatToParts(date);
+-    const hour = parts.find((part) => part.type === 'hour')?.value ?? '00';
+-    const minute = parts.find((part) => part.type === 'minute')?.value ?? '00';
+-    const second = parts.find((part) => part.type === 'second')?.value ?? '00';
+-    return second === '00' ? `${hour}:${minute}` : `${hour}:${minute}:${second}`;
+-  } catch {
+-    const literalLabel = formatBucketLabelFromLiteral(bucket);
+-    if (literalLabel) return literalLabel;
+-  }
+-  const h = date.getHours().toString().padStart(2, '0');
+-  const m = date.getMinutes().toString().padStart(2, '0');
+-  const s = date.getSeconds().toString().padStart(2, '0');
+-  return s === '00' ? `${h}:${m}` : `${h}:${m}:${s}`;
++const formatBucketLabel = (bucket: string, _timezone?: string): string => {
++ const date = new Date(bucket);
++ return formatBrowserDateTime(date, { hour: '2-digit', minute: '2-digit', ...(date.getSeconds() ? { second: '2-digit' } : {}) });
+ };
+ 
+ const safeNumber = (value: unknown): number => {
+@@ -538,13 +506,13 @@ export function OverviewRealtimePanel({ realtime, loading, error, window, onWind
+   const showErrorOnly = Boolean(error && !hasRealtimeData);
+   const [activeDimension, setActiveDimension] = useState<RealtimeDimensionKey>('models');
+   const throughputPoints = useMemo(() => buildRealtimeThroughputPoints(data), [data]);
+-  const labels = useMemo(() => disambiguateTimeLabels(throughputPoints.map((point) => point.bucket), data.timezone ?? timezone, (bucket) => formatBucketLabel(bucket, data.timezone ?? timezone), 'seconds'), [data.timezone, throughputPoints, timezone]);
+-  const cacheLabels = useMemo(() => disambiguateTimeLabels(data.cache_level.map((point) => point.bucket), data.timezone ?? timezone, (bucket) => formatBucketLabel(bucket, data.timezone ?? timezone), 'seconds'), [data.cache_level, data.timezone, timezone]);
++  const labels = useMemo(() => disambiguateTimeLabels(throughputPoints.map((point) => point.bucket), browserTimeZone(), (bucket) => formatBucketLabel(bucket, data.timezone ?? timezone), 'seconds'), [data.timezone, throughputPoints, timezone]);
++  const cacheLabels = useMemo(() => disambiguateTimeLabels(data.cache_level.map((point) => point.bucket), browserTimeZone(), (bucket) => formatBucketLabel(bucket, data.timezone ?? timezone), 'seconds'), [data.cache_level, data.timezone, timezone]);
+ 
+   const tokenValues = useMemo(() => throughputPoints.map((point) => point.tokensPerMinute), [throughputPoints]);
+   const requestValues = useMemo(() => throughputPoints.map((point) => point.requestsPerMinute), [throughputPoints]);
+   const cacheValues = useMemo(() => data.cache_level.map((point) => point.cache_read_rate == null ? null : safeNumber(point.cache_read_rate)), [data.cache_level]);
+-  const outcomeLabels = useMemo(() => disambiguateTimeLabels((data.insights?.outcomes ?? []).map(point => point.bucket), data.timezone ?? timezone, (bucket) => formatBucketLabel(bucket, data.timezone ?? timezone), 'seconds'), [data.insights?.outcomes, data.timezone, timezone]);
++  const outcomeLabels = useMemo(() => disambiguateTimeLabels((data.insights?.outcomes ?? []).map(point => point.bucket), browserTimeZone(), (bucket) => formatBucketLabel(bucket, data.timezone ?? timezone), 'seconds'), [data.insights?.outcomes, data.timezone, timezone]);
+   const latencyScatter = data.latency_scatter ?? { points: [], total_points: 0, p95_ttft_ms: 0, p95_latency_ms: 0, max_ttft_ms: 0, max_latency_ms: 0 };
+   const throughputEmptyLabel = throughputPoints.length === 0 ? t('usage_stats.overview_realtime_throughput_empty') : undefined;
+   const latencyEmptyLabel = latencyScatter.total_points === 0 ? t('usage_stats.no_data') : undefined;
+diff --git a/web/src/components/usage/QuotaFreshness.tsx b/web/src/components/usage/QuotaFreshness.tsx
+index 70b83a85..ffb478a8 100644
+--- a/web/src/components/usage/QuotaFreshness.tsx
++++ b/web/src/components/usage/QuotaFreshness.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { useQuotaAgeClock, quotaAgeLabel } from '@/lib/quotaAgeClock';
+ import { quotaSourceLabel } from './quotaSourceLabel';
+ import { useId, useState } from "react";
+@@ -29,7 +30,7 @@ export function QuotaFreshness({
+     seconds > 900 ||
+     (resetAt && Date.parse(resetAt) <= now),
+   );
+-  const details = `${account}\n${quotaSourceLabel(source)}\n${Number.isFinite(at) ? new Date(at).toLocaleString() : "Capture time unavailable"}\n${old ? "Stale observation" : "Cached observation"}`;
++  const details = `${account}\n${quotaSourceLabel(source)}\n${Number.isFinite(at) ? new Date(at).toLocaleString(browserDateLocale()) : "Capture time unavailable"}\n${old ? "Stale observation" : "Cached observation"}`;
+   return (
+     <span
+       style={{
+diff --git a/web/src/components/usage/RequestEventsDetailsCard.tsx b/web/src/components/usage/RequestEventsDetailsCard.tsx
+index 6ae73a71..89479848 100644
+--- a/web/src/components/usage/RequestEventsDetailsCard.tsx
++++ b/web/src/components/usage/RequestEventsDetailsCard.tsx
+@@ -1,3 +1,4 @@
++import { formatBrowserDateTime } from '@/utils/browserDateTime';
+ import React, {
+   useCallback,
+   useEffect,
+@@ -422,14 +423,11 @@ const toNumber = (value: unknown): number => {
+   return parsed;
+ };
+ 
+-const formatRequestEventTimestamp = (timestamp: string): { time: string; date: string } => {
+-  const match = timestamp.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2}):(\d{2})/);
+-  if (!match) return { time: timestamp || '-', date: '' };
+-  return {
+-    time: `${match[4]}:${match[5]}:${match[6]}`,
+-    date: `${match[1]}/${match[2]}/${match[3]}`,
+-  };
+-};
++const formatRequestEventTimestamp = (timestamp: string): {time: string; date: string} => ({
++ time: formatBrowserDateTime(timestamp, {hour: '2-digit', minute: '2-digit', second: '2-digit'}),
++ date: formatBrowserDateTime(timestamp, {year: 'numeric', month: '2-digit', day: '2-digit'}),
++})
++
+ 
+ const formatCacheReadRate = (cacheReadTokens: number, inputTokens: number): string => {
+   const value = calculateCacheReadRate({ inputTokens, cacheReadTokens });
+diff --git a/web/src/components/usage/analysis/analysisTimeLabels.ts b/web/src/components/usage/analysis/analysisTimeLabels.ts
+index bb76a523..b6a4d12b 100644
+--- a/web/src/components/usage/analysis/analysisTimeLabels.ts
++++ b/web/src/components/usage/analysis/analysisTimeLabels.ts
+@@ -1,44 +1,16 @@
+ import type { AnalysisResponse } from '@/lib/types';
++import { browserDateTimeFormat, browserTimeZone } from '@/utils/browserDateTime';
++import { disambiguateTimeLabels } from '@/utils/usage/timeLabels';
+ 
+-import { disambiguateTimeLabels, getIntlTimeZone } from '@/utils/usage/timeLabels';
+-
+-const formatBucketLabelFromLiteral = (bucket: string, granularity: AnalysisResponse['granularity']) => {
+-  const match = bucket.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}))?/);
+-  if (!match) return null;
+-  const month = Number(match[2]);
+-  const day = Number(match[3]);
+-  const hour = match[4] ? Number(match[4]) : NaN;
+-  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+-  if (granularity === 'daily') {
+-    return `${month}/${day}`;
+-  }
+-  if (!Number.isFinite(hour) || hour < 0 || hour > 23) return null;
+-  return `${String(hour).padStart(2, '0')}:00`;
+-};
+-
+-export const formatBucketLabel = (bucket: string, granularity: AnalysisResponse['granularity'], timezone?: string) => {
+-  const date = new Date(bucket);
+-  if (Number.isNaN(date.getTime())) return bucket;
+-  const timeZone = getIntlTimeZone(timezone);
+-  // Analysis bucket 已按项目 TZ 聚合，前端必须显式使用响应 TZ，避免被 CI 或浏览器本地时区二次换算。
+-  try {
+-    if (granularity === 'daily') {
+-      return new Intl.DateTimeFormat('en-US', { month: 'numeric', day: 'numeric', timeZone }).format(date);
+-    }
+-    const hour = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone }).format(date);
+-    return `${hour}:00`;
+-  } catch {
+-    const literalLabel = formatBucketLabelFromLiteral(bucket, granularity);
+-    if (literalLabel) return literalLabel;
+-  }
+-  if (granularity === 'daily') {
+-    return `${date.getMonth() + 1}/${date.getDate()}`;
+-  }
+-  return `${String(date.getHours()).padStart(2, '0')}:00`;
++export const formatBucketLabel = (bucket: string, granularity: AnalysisResponse['granularity'], _timezone?: string) => {
++ const calendarDay = granularity === 'daily' && /^\d{4}-\d{2}-\d{2}$/.test(bucket);
++ const date = new Date(calendarDay ? bucket + 'T12:00:00Z' : bucket);
++ if (!Number.isFinite(date.getTime())) return bucket;
++ return browserDateTimeFormat(granularity === 'daily'
++  ? { month: 'numeric', day: 'numeric', ...(calendarDay ? { timeZone: 'UTC' } : {}) }
++  : { hour: '2-digit', minute: '2-digit' }).format(date);
+ };
+-
+ export const formatBucketLabels = (buckets: readonly string[], granularity: AnalysisResponse['granularity'], timezone?: string) => (
+-  granularity === 'daily'
+-    ? buckets.map((bucket) => formatBucketLabel(bucket, granularity, timezone))
+-    : disambiguateTimeLabels(buckets, timezone, (bucket) => formatBucketLabel(bucket, granularity, timezone), 'hours')
++ granularity === 'daily' ? buckets.map(bucket => formatBucketLabel(bucket, granularity, timezone))
++ : disambiguateTimeLabels(buckets, browserTimeZone(), bucket => formatBucketLabel(bucket, granularity, timezone), 'hours')
+ );
+diff --git a/web/src/components/usage/analysis/test/AnalysisPanel.logic.test.tsx b/web/src/components/usage/analysis/test/AnalysisPanel.logic.test.tsx
+index 1eaf2d97..9d985385 100644
+--- a/web/src/components/usage/analysis/test/AnalysisPanel.logic.test.tsx
++++ b/web/src/components/usage/analysis/test/AnalysisPanel.logic.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ 
+ import React from 'react';
+diff --git a/web/src/components/usage/analysis/test/AnalysisPanel.top-models.test.tsx b/web/src/components/usage/analysis/test/AnalysisPanel.top-models.test.tsx
+index 44a74071..808f6744 100644
+--- a/web/src/components/usage/analysis/test/AnalysisPanel.top-models.test.tsx
++++ b/web/src/components/usage/analysis/test/AnalysisPanel.top-models.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ 
+ import React, { act } from 'react';
+diff --git a/web/src/components/usage/analysis/test/analysisTimeLabels.test.ts b/web/src/components/usage/analysis/test/analysisTimeLabels.test.ts
+index 39f8567a..c78d4703 100644
+--- a/web/src/components/usage/analysis/test/analysisTimeLabels.test.ts
++++ b/web/src/components/usage/analysis/test/analysisTimeLabels.test.ts
+@@ -1,22 +1,18 @@
+-import { describe, expect, it } from 'vitest';
+-import { formatBucketLabel, formatBucketLabels } from '../analysisTimeLabels';
+-
+-describe('Analysis shared time labels', () => {
+-  it('uses only the hour in the response timezone for hourly buckets', () => {
+-    expect(formatBucketLabel('2026-10-08T00:00:00Z', 'hourly', 'Asia/Shanghai')).toBe('08:00');
+-    expect(formatBucketLabel('2026-10-08T00:00:00Z', 'hourly', 'America/New_York')).toBe('20:00');
+-    expect(formatBucketLabel('2026-10-08T16:00:00Z', 'hourly', 'Asia/Shanghai')).toBe('00:00');
+-  });
+-
+-  it('uses short month/day in the response timezone for daily buckets', () => {
+-    expect(formatBucketLabel('2026-10-08T16:00:00Z', 'daily', 'Asia/Shanghai')).toBe('10/9');
+-    expect(formatBucketLabel('2026-10-08T00:00:00Z', 'daily', 'America/New_York')).toBe('10/7');
+-  });
+-
+-  it('keeps Shanghai batches identical and tags repeated DST hours', () => {
+-    const values = ['2026-10-25T02:00:00+02:00', '2026-10-25T02:00:00+01:00'];
+-    expect(formatBucketLabels(values, 'hourly', 'Europe/Berlin')).toEqual(['02:00 UTC+02:00', '02:00 UTC+01:00']);
+-    expect(formatBucketLabels(values, 'hourly', 'Asia/Shanghai')).toEqual(values.map(value => formatBucketLabel(value, 'hourly', 'Asia/Shanghai')));
+-  });
+-
+-});
++import { describe, expect, it } from 'vitest'
++import { setupBrowserPreferences, setBrowserPreferences } from '@/../tests/browserPreferences'
++import { formatBucketLabel, formatBucketLabels } from '../analysisTimeLabels'
++setupBrowserPreferences('Europe/Berlin', 'de-DE')
++describe('Analysis browser time labels', () => {
++ it('uses browser time instead of the response zone', () => {
++  for (const zone of ['Asia/Shanghai', 'America/New_York']) {
++   expect(formatBucketLabel('2026-10-08T00:00:00Z','hourly',zone)).toBe('02:00')
++   expect(formatBucketLabel('2026-10-08T23:00:00Z','daily',zone)).toBe('9.10.')
++  }
++ })
++ it('keeps calendar-only days and distinguishes browser DST hours', () => {
++  expect(formatBucketLabel('2026-10-08','daily','Asia/Shanghai')).toBe('8.10.')
++  expect(formatBucketLabels(['2026-10-25T00:00:00Z','2026-10-25T01:00:00Z'],'hourly','Asia/Shanghai')).toEqual(['02:00 UTC+02:00','02:00 UTC+01:00'])
++  setBrowserPreferences('UTC','en-US')
++  expect(formatBucketLabel('2026-10-25T00:00:00Z','hourly','Asia/Shanghai')).toBe('12:00 AM')
++ })
++})
+diff --git a/web/src/components/usage/credentials/CredentialErrorEventsList.tsx b/web/src/components/usage/credentials/CredentialErrorEventsList.tsx
+index b0916085..cc713cc1 100644
+--- a/web/src/components/usage/credentials/CredentialErrorEventsList.tsx
++++ b/web/src/components/usage/credentials/CredentialErrorEventsList.tsx
+@@ -1,3 +1,4 @@
++import { formatBrowserDateTime } from '@/utils/browserDateTime';
+ import { useCallback, useEffect, useRef, type UIEvent } from 'react'
+ import { useVirtualizer } from '@tanstack/react-virtual'
+ import { useTranslation } from 'react-i18next'
+@@ -22,12 +23,8 @@ interface CredentialErrorEventsListProps {
+   onLoadMore: () => void
+ }
+ 
+-const formatErrorTimestamp = (timestamp: string | undefined): string => {
+-  const value = String(timestamp ?? '')
+-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2}):(\d{2})/)
+-  if (!match) return value || '-'
+-  return `${match[1]}/${match[2]}/${match[3]} ${match[4]}:${match[5]}:${match[6]}`
+-}
++const formatErrorTimestamp = (timestamp: string | undefined): string => timestamp ? formatBrowserDateTime(timestamp) : '-'
++
+ 
+ export function CredentialErrorEventsList({
+   events,
+diff --git a/web/src/components/usage/credentials/CredentialHealthPanel.tsx b/web/src/components/usage/credentials/CredentialHealthPanel.tsx
+index 178efe4e..a78600ca 100644
+--- a/web/src/components/usage/credentials/CredentialHealthPanel.tsx
++++ b/web/src/components/usage/credentials/CredentialHealthPanel.tsx
+@@ -1,3 +1,4 @@
++import { formatBrowserDateTime } from '@/utils/browserDateTime';
+ import { useMemo } from 'react'
+ import { useTranslation } from 'react-i18next'
+ import type { UsageCredentialHealth } from '@/lib/types'
+@@ -398,52 +399,15 @@ function safeCount(value: number): number {
+ }
+ 
+ function formatHealthTime(date: Date): string {
+-  const hours = String(date.getHours()).padStart(2, '0')
+-  const minutes = String(date.getMinutes()).padStart(2, '0')
+-  return `${hours}:${minutes}`
++ return formatBrowserDateTime(date, {hour: '2-digit', minute: '2-digit'})
+ }
+-
+-// API 已按项目时区写出时间字符串，这里直接读取 HH:mm，避免浏览器时区二次转换。
+ function formatHealthTimeFromAPIValue(value: string | undefined, fallback: Date): string {
+-  const minutes = parseAPIClockMinutes(value)
+-  return minutes === undefined ? formatHealthTime(fallback) : formatClockMinutes(minutes)
++ return formatHealthTime(parseDate(value) ?? fallback)
+ }
+-
+ function formatHealthTimeFromAPIBase(value: string | undefined, offsetMinutes: number, fallback: Date): string {
+-  const minutes = parseAPIClockMinutes(value)
+-  return minutes === undefined ? formatHealthTime(fallback) : formatClockMinutes(minutes + offsetMinutes)
+-}
+-
+-function parseAPIClockMinutes(value: string | undefined): number | undefined {
+-  const match = value?.match(/T(\d{2}):(\d{2})/)
+-  if (!match) {
+-    return undefined
+-  }
+-  return Number(match[1]) * 60 + Number(match[2])
+-}
+-
+-function formatClockMinutes(value: number): string {
+-  const normalized = ((Math.round(value) % 1440) + 1440) % 1440
+-  const hours = String(Math.floor(normalized / 60)).padStart(2, '0')
+-  const minutes = String(normalized % 60).padStart(2, '0')
+-  return `${hours}:${minutes}`
++ const base = parseDate(value)
++ return formatHealthTime(base ? new Date(base.getTime() + offsetMinutes * 60000) : fallback)
+ }
+-
+-function formatCredentialHealthDate(value: string | undefined, dateSeparator: '-' | '/' = '/'): string {
+-  if (!value) {
+-    return ''
+-  }
+-  const apiDateTime = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/)
+-  if (apiDateTime) {
+-    return `${apiDateTime[2]}${dateSeparator}${apiDateTime[3]} ${apiDateTime[4]}:${apiDateTime[5]}`
+-  }
+-  const date = new Date(value)
+-  if (Number.isNaN(date.getTime())) {
+-    return ''
+-  }
+-  const month = String(date.getMonth() + 1).padStart(2, '0')
+-  const day = String(date.getDate()).padStart(2, '0')
+-  const hours = String(date.getHours()).padStart(2, '0')
+-  const minutes = String(date.getMinutes()).padStart(2, '0')
+-  return `${month}${dateSeparator}${day} ${hours}:${minutes}`
++function formatCredentialHealthDate(value: string | undefined, _dateSeparator: '-' | '/' = '/'): string {
++ return value ? formatBrowserDateTime(value, {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'}) : ''
+ }
+diff --git a/web/src/components/usage/credentials/CredentialRequestEventsList.tsx b/web/src/components/usage/credentials/CredentialRequestEventsList.tsx
+index 7da6a7df..eab85b13 100644
+--- a/web/src/components/usage/credentials/CredentialRequestEventsList.tsx
++++ b/web/src/components/usage/credentials/CredentialRequestEventsList.tsx
+@@ -1,3 +1,4 @@
++import { browserDateTimeFormat } from '@/utils/browserDateTime';
+ import {
+   useCallback,
+   useEffect,
+@@ -350,15 +351,18 @@ const toNumber = (value: unknown): number => {
+   return Number.isFinite(parsed) ? Math.max(parsed, 0) : 0
+ }
+ 
+-const formatTimestamp = (timestamp: string): { time: string; date: string } => {
+-  const match = timestamp.match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2}):(\d{2})/)
+-  if (!match) return { time: timestamp || '-', date: '' }
+-  return {
+-    time: `${match[4]}:${match[5]}:${match[6]}`,
+-    date: `${match[1]}/${match[2]}/${match[3]}`,
++const createTimestampFormatter = () => {
++  const timeFormatter = browserDateTimeFormat({hour: '2-digit', minute: '2-digit', second: '2-digit'})
++  const dateFormatter = browserDateTimeFormat({year: 'numeric', month: '2-digit', day: '2-digit'})
++  return (timestamp: string) => {
++    const date = new Date(timestamp)
++    return Number.isFinite(date.getTime())
++      ? {time: timeFormatter.format(date), date: dateFormatter.format(date)}
++      : {time: '—', date: '—'}
+   }
+ }
+ 
++
+ const formatSpeed = (value: unknown): string => {
+   const speed = Number(value)
+   return Number.isFinite(speed) && speed > 0 ? `${speed.toFixed(1)} t/s` : '-'
+@@ -413,6 +417,7 @@ const buildRow = (
+   event: UsageEvent,
+   index: number,
+   t: (key: string) => string,
++  formatTimestamp: ReturnType<typeof createTimestampFormatter>,
+ ): CredentialRequestEventRow => {
+   const timestamp = String(event.timestamp ?? '')
+   const modelDisplay = getUsageModelDisplay(event.model, event.response_model, event.model_alias)
+@@ -544,7 +549,10 @@ export function CredentialRequestEventsList({
+     return () => document.removeEventListener('keydown', handleTooltipEscape, true)
+   }, [dismissTooltip, tooltipVisible])
+ 
+-  const rows = useMemo(() => events.map((event, index) => buildRow(event, index, t)), [events, t])
++  const rows = useMemo(() => {
++    const formatTimestamp = createTimestampFormatter()
++    return events.map((event, index) => buildRow(event, index, t, formatTimestamp))
++  }, [events, t])
+   const virtualizeRows = rows.length >= VIRTUALIZATION_THRESHOLD
+   // TanStack Virtual 依赖内部可变测量状态，不参与 React Compiler 自动记忆化。
+   // eslint-disable-next-line react-hooks/incompatible-library
+diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
+index 2d43b18e..e3a2ab97 100644
+--- a/web/src/components/usage/credentials/CredentialsSection.tsx
++++ b/web/src/components/usage/credentials/CredentialsSection.tsx
+@@ -1,3 +1,5 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
++import { formatBrowserDateTime } from '@/utils/browserDateTime'
+ import { useCallback, useEffect, useId, useRef, useState, type Ref } from 'react'
+ import { createPortal } from 'react-dom'
+ import { useTranslation } from 'react-i18next'
+@@ -746,23 +748,8 @@ function ClaudeResetDetails({ details, failed, message, disabled, groupName, onS
+   )
+ }
+ 
+-const RESET_CREDIT_TIME_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+-  timeZone: 'Asia/Shanghai',
+-  year: 'numeric',
+-  month: '2-digit',
+-  day: '2-digit',
+-  hour: '2-digit',
+-  minute: '2-digit',
+-  second: '2-digit',
+-  hour12: false,
+-})
+-
+ export function formatResetCreditExpiry(value: string): string {
+-  const date = new Date(value)
+-  if (Number.isNaN(date.getTime())) {
+-    return value
+-  }
+-  return RESET_CREDIT_TIME_FORMATTER.format(date).replace(',', '')
++ return formatBrowserDateTime(value)
+ }
+ 
+ function isRowRefreshing(row: CredentialRow): boolean {
+@@ -1621,7 +1608,7 @@ export function formatInspectionCompletedAt(value: string | undefined): string {
+   if (Number.isNaN(date.getTime())) {
+     return ''
+   }
+-  return date.toLocaleString()
++  return date.toLocaleString(browserDateLocale())
+ }
+ 
+ function formatInspectionDate(value: string | undefined): string {
+@@ -1928,32 +1915,8 @@ function truncateQuotaErrorMessage(value: string): string {
+   return `${value.slice(0, QUOTA_ERROR_MESSAGE_MAX_LENGTH).trimEnd()}...`
+ }
+ 
+-export function formatQuotaResetLabel(resetAt: string, timeZone?: string): string {
+-  const resetTime = new Date(resetAt)
+-  const resetMs = resetTime.getTime()
+-  if (!Number.isFinite(resetMs)) {
+-    return ''
+-  }
+-  const normalizedTimeZone = timeZone?.trim()
+-  if (!normalizedTimeZone || normalizedTimeZone === 'Local') {
+-    return ''
+-  }
+-  try {
+-    // resetAt 保留 CPA 给出的绝对时刻，只用 Keeper 项目时区生成墙上时间，避免受浏览器时区影响。
+-    const parts = new Intl.DateTimeFormat('en-CA', {
+-      timeZone: normalizedTimeZone,
+-      month: '2-digit',
+-      day: '2-digit',
+-      hour: '2-digit',
+-      minute: '2-digit',
+-      hourCycle: 'h23',
+-    }).formatToParts(resetTime)
+-    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+-    return `${values.month}/${values.day} ${values.hour}:${values.minute}`
+-  } catch {
+-    // Go 的 Local 或浏览器不认识的 IANA 名称无法可靠映射到 Keeper 墙上时间，隐藏标签而不是猜浏览器时区。
+-    return ''
+-  }
++export function formatQuotaResetLabel(resetAt: string, _timeZone?: string): string {
++ return formatBrowserDateTime(resetAt, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+ }
+ 
+ export function formatQuotaResetDuration(resetAt: string): string {
+@@ -2049,7 +2012,7 @@ function QuotaResetCountdown({ duration, resetLabel }: { duration: string; reset
+   const tooltipId = useId()
+   const anchorRef = useRef<HTMLButtonElement>(null)
+   const { tooltip, showOnMouseEnter, hideOnMouseLeave, showOnFocus, hideOnBlur, dismiss } = usePortalTooltip({ trackAnchor: true })
+-  const label = t('usage_stats.credentials_quota_resets_at', { time: resetLabel.replace('/', '-') })
++  const label = t('usage_stats.credentials_quota_resets_at', { time: resetLabel })
+   const lines = [label]
+ 
+   useEffect(() => {
+diff --git a/web/src/components/usage/credentials/PerformancePanel.tsx b/web/src/components/usage/credentials/PerformancePanel.tsx
+index 3f96eec1..a9f4fe91 100644
+--- a/web/src/components/usage/credentials/PerformancePanel.tsx
++++ b/web/src/components/usage/credentials/PerformancePanel.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { startLiveRefresh } from '@/lib/live'
+ import { useEffect, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+@@ -71,7 +72,7 @@ export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAut
+   const chartGroups = groups.filter(group => group.days.some(point => statValue(point[basis]) != null))
+   const dates = groups[0]?.days.map(point => point.day) ?? []
+   const data: ChartData<'line', Array<number | null>, string> = {
+-    labels: dates.map(day => new Date(`${day}T00:00:00Z`).toLocaleDateString(i18n.language, { month: 'short', day: 'numeric', timeZone: 'UTC' })),
++    labels: dates.map(day => new Date(`${day}T00:00:00Z`).toLocaleDateString(browserDateLocale(), { month: 'short', day: 'numeric', timeZone: 'UTC' })),
+     datasets: chartGroups.map(group => {
+       const color = analyticsModelColor(group.model, models)
+       return { label: `${group.model} · ${modeName(group.mode)}`, data: group.days.map(point => statValue(point[basis])), borderColor: color, backgroundColor: color, borderDash: group.mode === 'fast' ? [7, 3] : group.mode === 'unknown' ? [2, 4] : [], borderWidth: 2, pointRadius: 3, spanGaps: false, tension: 0 }
+@@ -133,7 +134,7 @@ export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAut
+         <p className={styles.note}>{speed ? t('performance.speed_direction', 'Higher is faster. Slow tail uses p10: 10% of timed requests are this slow or slower.') : t('performance.time_direction', 'Lower is faster. Slow tail uses p90: 10% of timed requests take this long or longer.')}</p>
+         <p className={styles.note}>{t('performance.daily_note', 'Daily UTC buckets; today and the first day may be partial. Raw points need 3 valid timings. Matched points require 20 timings and 3 in every reference bucket; missing buckets stay gaps and never change the reference mix. The fixed mix describes the selected reporting period, not a forecast.')}</p>
+         <p className={styles.note}>{t('performance.timing_note', 'First token is the existing recorded timing and may be reasoning, tool arguments or a fallback event; first visible text is not separately recorded. Output tokens include reasoning. End-to-end TPS includes startup and reasoning time. Phase TPS approximates output divided by (completion time − first-token time), only for streaming requests with at least 32 output tokens and 250 ms after first token; it is not measured visible-text decode speed. Failed requests are counted separately and excluded from timing comparisons.')}</p>
+-        <p className={styles.meta}>{new Date(report.range_start).toLocaleString(i18n.language)} – {new Date(report.generated_at).toLocaleString(i18n.language)}</p>
++        <p className={styles.meta}>{new Date(report.range_start).toLocaleString(browserDateLocale())} – {new Date(report.generated_at).toLocaleString(browserDateLocale())}</p>
+       </details>
+     </>}
+   </div>
+diff --git a/web/src/components/usage/credentials/ProviderStatsDrawer.tsx b/web/src/components/usage/credentials/ProviderStatsDrawer.tsx
+index e7c87370..2294966e 100644
+--- a/web/src/components/usage/credentials/ProviderStatsDrawer.tsx
++++ b/web/src/components/usage/credentials/ProviderStatsDrawer.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime'
+ import { useEffect, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+ import { Modal } from '@/components/ui/Modal'
+@@ -78,7 +79,7 @@ export function ProviderUsagePanel({ provider }: { provider: string }) {
+  const theme = getUsageChartTheme(isDark)
+  const label = metric === 'value' ? t('provider_stats.api_value', 'API-equivalent value') : metric === 'requests' ? t('usage_stats.total_requests', 'Requests') : t('usage_stats.total_tokens', 'Tokens')
+  const data: ChartData<'line', Array<number | null>, string> = {
+-  labels: report?.days.map(point => new Date(point.day + 'T00:00:00Z').toLocaleDateString(i18n.language, { month: 'short', day: 'numeric', timeZone: 'UTC' })) ?? [],
++  labels: report?.days.map(point => new Date(point.day + 'T00:00:00Z').toLocaleDateString(browserDateLocale(), { month: 'short', day: 'numeric', timeZone: 'UTC' })) ?? [],
+   datasets: [{ label, data: report?.days.map(point => metric === 'value' ? point.unpriced_requests ? null : point.total_cost_usd : metric === 'requests' ? point.requests : point.total_tokens) ?? [], borderColor: '#d49b00', backgroundColor: '#d49b00', borderWidth: 2, pointRadius: 3, tension: 0, spanGaps: false }],
+  }
+  const options: ChartOptions<'line'> = { responsive: true, maintainAspectRatio: false, animation: false,
+@@ -91,7 +92,7 @@ export function ProviderUsagePanel({ provider }: { provider: string }) {
+   {loading && <p role="status">{t('common.loading', 'Loading…')}</p>}
+   {!loading && result?.error && <p role="alert">{result.error}</p>}
+   {report && <>
+-   <p className={styles.note}>{new Date(report.range_start).toLocaleString(i18n.language)} – {new Date(report.generated_at).toLocaleString(i18n.language)} · {t('provider_stats.account_count', '{{count}} accounts with requests', { count: report.accounts })}</p>
++   <p className={styles.note}>{new Date(report.range_start).toLocaleString(browserDateLocale())} – {new Date(report.generated_at).toLocaleString(browserDateLocale())} · {t('provider_stats.account_count', '{{count}} accounts with requests', { count: report.accounts })}</p>
+    <div className={providerStyles.summary}>
+     {[
+      [t('usage_stats.total_requests', 'Requests'), formatCredentialNumber(report.totals.requests)],
+diff --git a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+index 216d9408..6cd13e9d 100644
+--- a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
++++ b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+ import { Chart } from '@/components/usage/charts/UsageChart'
+@@ -15,13 +16,13 @@ export type TrendMetric = 'delivered' | 'allowance' | 'speed' | 'phase' | 'ttft'
+ const MIN_SPEED_REQUESTS = 3
+ const groupKey = (point: Pick<WeeklyTrendPoint, 'model' | 'mode'>) => JSON.stringify([point.model, point.mode])
+ 
+-export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: TrendMetric, model: string | string[], mode: string, label: (mode: string) => string, locale?: string | string[]): ChartData<'line', Array<number | null>, string> {
++export function buildWeeklyTrendChartData(points: WeeklyTrendPoint[], metric: TrendMetric, model: string | string[], mode: string, label: (mode: string) => string, _locale?: string | string[]): ChartData<'line', Array<number | null>, string> {
+   const days = [...new Set(points.map(point => point.day))].sort()
+   const models = [...new Set(points.map(point => point.model))].sort()
+   const selected = points.filter(point => (Array.isArray(model) ? model.includes(point.model) : !model || point.model === model) && (!mode || point.mode === mode))
+   const groups = [...new Map(selected.map(point => [groupKey(point), point])).values()]
+   const lookup = new Map(selected.map(point => [JSON.stringify([point.day, point.model, point.mode]), point]))
+-  return { labels: days.map(day => new Date(day).toLocaleDateString(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' })), datasets: groups.map(group => ({
++  return { labels: days.map(day => new Date(day).toLocaleDateString(browserDateLocale(), { month: 'short', day: 'numeric', timeZone: 'UTC' })), datasets: groups.map(group => ({
+     label: `${group.model || '—'} · ${label(group.mode)}`,
+     borderColor: USAGE_CHART_COMPOSITION_COLORS[models.indexOf(group.model) % USAGE_CHART_COMPOSITION_COLORS.length].base,
+     backgroundColor: USAGE_CHART_COMPOSITION_COLORS[models.indexOf(group.model) % USAGE_CHART_COMPOSITION_COLORS.length].base,
+diff --git a/web/src/components/usage/credentials/credentialViewModels.ts b/web/src/components/usage/credentials/credentialViewModels.ts
+index 58af037f..7cbb23c7 100644
+--- a/web/src/components/usage/credentials/credentialViewModels.ts
++++ b/web/src/components/usage/credentials/credentialViewModels.ts
+@@ -1,3 +1,4 @@
++import { formatBrowserDateTime } from '@/utils/browserDateTime';
+ import type { ClaudeResetGrantStatus, UsageCredentialHealth, UsageIdentity, UsageQuotaCheckResponse, UsageQuotaRow } from '@/lib/types'
+ import { calculateCacheReadRate, formatCompactTokenValue } from '@/utils/usage'
+ import { resolveCredentialSubscriptionBadge, type SubscriptionBadgeModel } from './credentialSubscription'
+@@ -489,20 +490,7 @@ function remainingDaysLabel(activeUntil?: string): string | undefined {
+ }
+ 
+ export function formatCredentialTimestamp(activeUntil?: string): string | undefined {
+-  if (!activeUntil || !Number.isFinite(Date.parse(activeUntil))) {
+-    return undefined
+-  }
+-  const match = activeUntil.trim().match(
+-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/i,
+-  )
+-  if (!match) {
+-    return undefined
+-  }
+-  const [, year, month, day, hour, minute, second, rawOffset] = match
+-  const offset = rawOffset.toUpperCase() === 'Z' || rawOffset === '+00:00' || rawOffset === '-00:00'
+-    ? 'UTC'
+-    : `UTC${rawOffset}`
+-  return `${year}-${month}-${day} ${hour}:${minute}:${second} ${offset}`
++ return activeUntil && Number.isFinite(Date.parse(activeUntil)) ? formatBrowserDateTime(activeUntil) : undefined
+ }
+ 
+ function credentialUsageStats(identity: UsageIdentity) {
+diff --git a/web/src/components/usage/credentials/quotaHistoryFormatters.ts b/web/src/components/usage/credentials/quotaHistoryFormatters.ts
+index 349da1c3..1bc26430 100644
+--- a/web/src/components/usage/credentials/quotaHistoryFormatters.ts
++++ b/web/src/components/usage/credentials/quotaHistoryFormatters.ts
+@@ -1,56 +1,13 @@
++import { browserDateTimeFormat } from '@/utils/browserDateTime'
+ import { formatCompactNumber } from '@/utils/usage'
+ import type { QuotaHistoryTimeFormatter } from './quotaHistoryTimeLabels'
+ 
+-const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>()
+-const dateTimeFormatterLimit = 16
+-const dateTimeOptions: Intl.DateTimeFormatOptions = {
+-  month: 'short',
+-  day: '2-digit',
+-  hour: '2-digit',
+-  minute: '2-digit',
+-  hourCycle: 'h23',
+-}
+-
+-function getDateTimeFormatter(key: string, locale: string, timeZone: string): Intl.DateTimeFormat {
+-  let formatter = dateTimeFormatters.get(key)
+-  if (formatter) {
+-    dateTimeFormatters.delete(key)
+-  } else {
+-    formatter = new Intl.DateTimeFormat(locale, { ...dateTimeOptions, timeZone })
+-    if (dateTimeFormatters.size >= dateTimeFormatterLimit) {
+-      dateTimeFormatters.delete(dateTimeFormatters.keys().next().value!)
+-    }
+-  }
+-  dateTimeFormatters.set(key, formatter)
+-  return formatter
+-}
+-
+-export function createQuotaHistoryDateTimeFormatter(locale?: string): QuotaHistoryTimeFormatter {
+-  // 每次建立显示上下文时解析一次默认 locale/TZ，逐个时间标签只查有界实例缓存。
+-  const resolved = new Intl.DateTimeFormat(locale).resolvedOptions()
+-  const utcKey = JSON.stringify([resolved.locale, 'utc', 'UTC'])
+-  const localKey = JSON.stringify([resolved.locale, 'local', resolved.timeZone])
+-  return (value) => {
+-    const date = new Date(value)
+-    if (!Number.isFinite(date.getTime())) return value || '—'
+-    // 沿用原 API offset 墙上时间到 UTC 的映射，不让浏览器再次换区。
+-    const offsetTime = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i)
+-    const displayDate = offsetTime
+-      ? new Date(Date.UTC(
+-        Number(offsetTime[1]),
+-        Number(offsetTime[2]) - 1,
+-        Number(offsetTime[3]),
+-        Number(offsetTime[4]),
+-        Number(offsetTime[5]),
+-        Number(offsetTime[6]),
+-      ))
+-      : date
+-    return getDateTimeFormatter(
+-      offsetTime ? utcKey : localKey,
+-      resolved.locale,
+-      offsetTime ? 'UTC' : resolved.timeZone,
+-    ).format(displayDate)
+-  }
++export function createQuotaHistoryDateTimeFormatter(_locale?: string): QuotaHistoryTimeFormatter {
++ const formatter = browserDateTimeFormat({ month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })
++ return value => {
++  const date = new Date(value)
++  return Number.isFinite(date.getTime()) ? formatter.format(date) : value || '—'
++ }
+ }
+ 
+ const summaryNumberFormatters: Partial<Record<0 | 1 | 2, Intl.NumberFormat>> = {}
+diff --git a/web/src/components/usage/credentials/quotaHistoryTimeLabels.ts b/web/src/components/usage/credentials/quotaHistoryTimeLabels.ts
+index fdbe9f62..d3f9e007 100644
+--- a/web/src/components/usage/credentials/quotaHistoryTimeLabels.ts
++++ b/web/src/components/usage/credentials/quotaHistoryTimeLabels.ts
+@@ -1,3 +1,5 @@
++import { browserTimeZone } from '@/utils/browserDateTime';
++import { createZonedPartsReader } from '@/utils/usage/timeLabels'
+ import type { CodexQuotaHistoryCycle } from '@/lib/types'
+ 
+ export type QuotaHistoryTimeFormatter = (value: string) => string
+@@ -8,18 +10,13 @@ interface OffsetTime {
+   instant: number
+ }
+ 
+-const offsetTimestamp = /^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2}):\d{2}(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/i
+-
+-function readOffsetTime(value: string): OffsetTime | null {
+-  if (typeof value !== 'string') return null
+-  const match = value.trim().match(offsetTimestamp)
+-  if (!match) return null
+-  const instant = Date.parse(value)
+-  if (!Number.isFinite(instant)) return null
+-  const zone = match[3]
+-  const offset = zone.toUpperCase() === 'Z' ? 0
+-    : (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6))) * (zone[0] === '-' ? -1 : 1)
+-  return { clock: `${match[1]}T${match[2]}`, offset, instant }
++function readOffsetTime(value: string, readParts: ReturnType<typeof createZonedPartsReader>): OffsetTime | null {
++ const instant = Date.parse(value)
++ if (!Number.isFinite(instant)) return null
++ const p = readParts(instant)
++ const wall = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second)
++ const offset = Math.round((wall - Math.floor(instant / 1000) * 1000) / 60000)
++ return { clock: [p.year, p.month, p.day, p.hour, p.minute].join(':'), offset, instant }
+ }
+ 
+ function offsetSuffix(offset: number): string {
+@@ -29,11 +26,12 @@ function offsetSuffix(offset: number): string {
+   return ` UTC${offset < 0 ? '-' : '+'}${hours}:${minutes}`
+ }
+ 
+-function collectQuotaHistoryTimeSuffixes(cycles: readonly CodexQuotaHistoryCycle[]): Set<string> {
++function collectQuotaHistoryTimeSuffixes(cycles: readonly CodexQuotaHistoryCycle[]): Map<string, string> {
++  const readParts = createZonedPartsReader(browserTimeZone())
+   const times = new Map<string, OffsetTime | null>()
+   const suffixes = new Set<string>()
+   const collect = (value: string) => {
+-    if (!times.has(value)) times.set(value, readOffsetTime(value))
++    if (!times.has(value)) times.set(value, readOffsetTime(value, readParts))
+     return times.get(value)
+   }
+   const collectPair = (start: string, end: string) => {
+@@ -70,7 +68,7 @@ function collectQuotaHistoryTimeSuffixes(cycles: readonly CodexQuotaHistoryCycle
+     const clock = clocks.get(time.clock)!
+     if (clock.offsets.size > 1 && clock.instants.size > 1) suffixes.add(value)
+   }
+-  return suffixes
++  return new Map([...suffixes].map(value => [value, offsetSuffix(times.get(value)!.offset)]))
+ }
+ 
+ // 收集函数的临时身份表可立即释放，显示回调仅保留后缀集合和原 formatter。
+@@ -81,8 +79,6 @@ export function createQuotaHistoryTimeFormatter(
+   const suffixes = collectQuotaHistoryTimeSuffixes(cycles)
+   return (value) => {
+     const label = format(value)
+-    if (!suffixes.has(value)) return label
+-    const time = readOffsetTime(value)
+-    return time ? label + offsetSuffix(time.offset) : label
++    return label + (suffixes.get(value) ?? '')
+   }
+ }
+diff --git a/web/src/components/usage/credentials/test/AiProviderCredentialsSection.test.tsx b/web/src/components/usage/credentials/test/AiProviderCredentialsSection.test.tsx
+index 78011348..78791708 100644
+--- a/web/src/components/usage/credentials/test/AiProviderCredentialsSection.test.tsx
++++ b/web/src/components/usage/credentials/test/AiProviderCredentialsSection.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('UTC')
+ import { renderToStaticMarkup } from 'react-dom/server'
+ import { describe, expect, it, vi } from 'vitest'
+ import { AiProviderCredentialsSection } from '../AiProviderCredentialsSection'
+@@ -67,7 +69,7 @@ describe('AiProviderCredentialsSection', () => {
+     expect(html).toContain('usage_stats.credentials_health_cache_short')
+     expect(html).toContain('61.75%')
+     expect(html).toContain('usage_stats.credentials_last_used')
+-    expect(html).toContain('05-10 10:00')
++    expect(html).toContain('05/10, 10:00')
+     expect(html).not.toContain('05/10 10:02')
+     expect(html).toContain('data-provider-brand-icon="claude"')
+     // 品牌图标只展示供应商，卡片开关单独表达 enabled 状态。
+diff --git a/web/src/components/usage/credentials/test/ClaudeQuotaResetAction.test.tsx b/web/src/components/usage/credentials/test/ClaudeQuotaResetAction.test.tsx
+index ebc1f708..18055f9f 100644
+--- a/web/src/components/usage/credentials/test/ClaudeQuotaResetAction.test.tsx
++++ b/web/src/components/usage/credentials/test/ClaudeQuotaResetAction.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ import { act } from 'react'
+ import { createRoot, type Root } from 'react-dom/client'
+@@ -35,11 +37,11 @@ describe('Claude reset grants in the shared Keeper action', () => {
+     await act(async () => { root.render(<QuotaResetAction authIndex="claude" provider="claude" resetCredits={count} disabled={false} loading={false} fetchClaudeGrants={read} onConfirm={confirm} />) })
+     await act(async () => container.querySelector<HTMLButtonElement>('[aria-haspopup="dialog"]')!.click())
+   }
+-  it('shows multi-use grants, GMT+8 expiry and only the selected reset scope', async () => {
++  it('shows multi-use grants, browser-local expiry and only the selected reset scope', async () => {
+     const confirm = vi.fn()
+     await render(async () => status(), confirm)
+     expect(container.textContent).toContain('claude_reset_grant_count:{"left":2}')
+-    expect(container.textContent).toContain('2026-10-20 08:00:00')
++    expect(container.textContent).toContain('10/20/2026, 08:00:00')
+     expect(container.textContent).toContain('claude_reset_no_expiry')
+     expect(container.textContent).toContain('five_hour')
+     expect(container.querySelector('[data-claude-grant="spring"]')?.textContent).not.toContain('seven_day')
+diff --git a/web/src/components/usage/credentials/test/CodexQuotaHistoryPanel.test.tsx b/web/src/components/usage/credentials/test/CodexQuotaHistoryPanel.test.tsx
+index d22d8a2b..c883baa6 100644
+--- a/web/src/components/usage/credentials/test/CodexQuotaHistoryPanel.test.tsx
++++ b/web/src/components/usage/credentials/test/CodexQuotaHistoryPanel.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences, setBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('UTC')
+ // @vitest-environment happy-dom
+ 
+ import { act } from 'react'
+@@ -392,9 +394,9 @@ describe('CodexQuotaHistoryPanel', () => {
+     expect(card().querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('true')
+     translationState.language = 'zh-CN'
+     await renderPanel()
+-    const first = new Intl.DateTimeFormat('zh-CN', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }).format(new Date(initial.cycles[1].first_observed_at))
++    const first = new Intl.DateTimeFormat('en-US-u-hc-h23', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }).format(new Date(initial.cycles[1].first_observed_at))
+     expect(card().querySelector('[data-codex-quota-transition]')?.textContent).toContain(first)
+-    expect(card().textContent).not.toBe(english)
++    expect(card().textContent).toBe(english)
+     expect(card().querySelector('button[aria-expanded]')?.getAttribute('aria-expanded')).toBe('true')
+     translationState.language = 'en-US'
+     await renderPanel()
+@@ -936,14 +938,14 @@ describe('CodexQuotaHistoryPanel', () => {
+     expect([1, 2, 3].map((dataIndex) => pointRadius({ dataIndex }))).toEqual([0, 0, 0])
+   })
+ 
+-  it('uses a 24-hour clock while preserving the project-timezone wall clock from API timestamps', async () => {
++  it('converts project offsets to the browser clock', async () => {
+     const offsetResponse = cloneResponse()
+     offsetResponse.cycles[0].first_observed_at = '2026-08-21T13:01:00+08:00'
+     offsetResponse.cycles[0].last_observed_at = '2026-08-21T14:02:00+08:00'
+     fetchCodexQuotaHistory.mockResolvedValue(offsetResponse)
+     await renderPanel()
+-    expect(document.body.textContent).toContain('"start":"Aug 21, 13:01"')
+-    expect(document.body.textContent).toContain('"end":"Aug 21, 14:02"')
++    expect(document.body.textContent).toContain('"start":"Aug 21, 05:01"')
++    expect(document.body.textContent).toContain('"end":"Aug 21, 06:02"')
+     expect(document.body.textContent).toContain('"start":"Aug 17, 00:00"')
+   })
+ 
+@@ -979,10 +981,11 @@ describe('CodexQuotaHistoryPanel', () => {
+   }
+ 
+   it.each(['en-US', 'zh-CN'])('disambiguates every fallback timestamp surface in %s before selecting or expanding cycles', async (locale) => {
++    setBrowserPreferences('America/Los_Angeles')
+     translationState.language = locale
+     fetchCodexQuotaHistory.mockResolvedValue(fallbackResponse())
+     await renderPanel()
+-    const wallLabel = (clock: string) => new Intl.DateTimeFormat(locale, {
++    const wallLabel = (clock: string) => new Intl.DateTimeFormat('en-US-u-hc-h23', {
+       month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC',
+     }).format(new Date(`2026-11-01T${clock}:00Z`))
+     const first = `${wallLabel('01:30')} UTC-07:00`
+@@ -1015,6 +1018,7 @@ describe('CodexQuotaHistoryPanel', () => {
+   })
+ 
+   it('rebuilds timestamp suffixes for a new role response and language without changing normal text', async () => {
++    setBrowserPreferences('America/Los_Angeles')
+     fetchCodexQuotaHistory.mockResolvedValueOnce(fallbackResponse())
+     await renderPanel()
+     expect(container.textContent).toContain('UTC-07:00')
+@@ -1023,10 +1027,10 @@ describe('CodexQuotaHistoryPanel', () => {
+     fetchCodexQuotaHistory.mockResolvedValueOnce(normal)
+     await click(windowButton('secondary'))
+     expect(container.textContent).not.toContain('UTC-')
+-    expect(container.querySelector('[data-codex-quota-cycle-range]')?.textContent).toContain('"start":"Aug 17, 00:00","end":"Aug 24, 00:00"')
++    expect(container.querySelector('[data-codex-quota-cycle-range]')?.textContent).toContain('"start":"Aug 16, 17:00","end":"Aug 23, 17:00"')
+     translationState.language = 'zh-CN'
+     await renderPanel()
+-    const start = new Intl.DateTimeFormat('zh-CN', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }).format(new Date('2026-08-17T00:00:00Z'))
++    const start = new Intl.DateTimeFormat('en-US-u-hc-h23', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'America/Los_Angeles' }).format(new Date('2026-08-17T00:00:00Z'))
+     expect(container.querySelector('[data-codex-quota-cycle-range]')?.textContent).toContain(start)
+     expect(container.textContent).not.toContain('UTC-')
+     fetchCodexQuotaHistory.mockResolvedValueOnce(fallbackResponse())
+diff --git a/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx b/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx
+index 7cce858e..ee6b922b 100644
+--- a/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ 
+ import { act } from 'react'
+@@ -140,28 +142,28 @@ describe('credential compact card data', () => {
+     expect(container.textContent).toContain('Claude and GPT models explanation')
+   })
+ 
+-  it('refreshes the compact reset tooltip from the current snapshot in the project timezone', async () => {
++  it('refreshes the compact reset tooltip from the current snapshot in the browser timezone', async () => {
+     const renderReset = async (resetAt: string, timeZone: string | undefined = 'Asia/Shanghai') => {
+       const row = codexRow('plus', [quota('rate_limit.primary_window', 18_000, { resetAt })])
+       await act(async () => root.render(<CredentialQuotaPanel row={row} quotaUsageMode="current" variant="compact" timeZone={timeZone} />))
+     }
+     await renderReset('2026-05-12T03:15:00-07:00')
+     const countdown = container.querySelector<HTMLButtonElement>('[data-quota-reset-countdown="true"]')!
+-    expect(countdown.getAttribute('aria-label')).toBe('Resets at 05-12 18:15')
++    expect(countdown.getAttribute('aria-label')).toBe('Resets at 05/12, 18:15')
+     await act(async () => countdown.focus())
+     const tooltip = () => document.getElementById(countdown.getAttribute('aria-describedby')!)
+-    expect(tooltip()?.textContent).toBe('Resets at 05-12 18:15')
++    expect(tooltip()?.textContent).toBe('Resets at 05/12, 18:15')
+ 
+     await renderReset('2026-05-13T03:15:00-07:00')
+ 
+     expect(container.querySelector('[data-quota-reset-countdown="true"]')).toBe(countdown)
+-    expect(countdown.getAttribute('aria-label')).toBe('Resets at 05-13 18:15')
+-    expect(tooltip()?.textContent).toBe('Resets at 05-13 18:15')
++    expect(countdown.getAttribute('aria-label')).toBe('Resets at 05/13, 18:15')
++    expect(tooltip()?.textContent).toBe('Resets at 05/13, 18:15')
+     expect(tooltip()?.textContent).not.toContain('05-12')
+ 
+     await renderReset('2026-05-13T03:15:00-07:00', 'Local')
+ 
+-    expect(container.querySelector('[data-quota-reset-countdown="true"]')).toBeNull()
+-    expect(container.textContent).not.toContain('05-13 18:15')
++    expect(container.querySelector('[data-quota-reset-countdown="true"]')).toBe(countdown)
++    expect(countdown.getAttribute('aria-label')).toBe('Resets at 05/13, 18:15')
+   })
+ })
+diff --git a/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx b/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx
+index 9188af8c..09d5ded1 100644
+--- a/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ 
+ import { act } from 'react'
+@@ -158,7 +160,7 @@ describe('CredentialHealthPanel health semantics', () => {
+     expect(quiet).toContain('usage_stats.credentials_health_summary_quiet')
+     expect(quiet).toContain('0.0%')
+     expect(quiet).toContain('—')
+-    expect(quiet).toContain(variant === 'compact' ? '07-16 14:58' : '07/16 14:58')
++    expect(quiet).toContain(variant === 'compact' ? '07/16, 14:58' : '07/16, 14:58')
+   })
+ 
+   it('keeps the same ordered buckets and tooltip details in compact cards and the default full panel', () => {
+@@ -196,8 +198,8 @@ describe('CredentialHealthPanel health semantics', () => {
+     expect(bucketTooltips(compact)).toEqual(bucketTooltips(full))
+     expect(full.textContent).toContain('Failed requests in 5h: 13 · latest 10:20 - 10:30')
+     expect(full.textContent).toContain('37.50%')
+-    expect(full.textContent).toContain('07/16 14:58')
+-    expect(full.textContent).toContain('07/16 15:00')
++    expect(full.textContent).toContain('07/16, 14:58')
++    expect(full.textContent).toContain('07/16, 15:00')
+   })
+ 
+   it('updates bucket details and accessible names when health data changes', async () => {
+diff --git a/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx b/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx
+index 6735c7c9..45086fbe 100644
+--- a/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('UTC')
+ import { renderToStaticMarkup } from 'react-dom/server'
+ import { describe, expect, it, vi } from 'vitest'
+ import { CredentialHealthPanel } from '../CredentialHealthPanel'
+@@ -39,8 +41,8 @@ describe('CredentialHealthPanel', () => {
+     expect(html).toContain('usage_stats.credentials_health_status_empty')
+     expect(html).toContain('usage_stats.credentials_health_summary_quiet')
+     expect(html).toContain('usage_stats.credentials_health_no_requests_5h')
+-    expect(html).toContain('05/10 10:00')
+-    expect(html).toContain('05/10 10:02')
++    expect(html).toContain('05/10, 10:00')
++    expect(html).toContain('05/10, 10:02')
+     expect(html).not.toContain('>usage_stats.credentials_last_used<')
+     expect(html).not.toContain('>usage_stats.credentials_stats_updated<')
+     expect(html).toContain('Provider Key usage_stats.credentials_health_grid_aria')
+@@ -77,10 +79,10 @@ describe('CredentialHealthPanel', () => {
+     expect(html.match(/role="tooltip" aria-hidden="true"/g)).toHaveLength(30)
+     expect(html).toContain('usage_stats.credentials_health_ok')
+     expect(html).toContain('usage_stats.credentials_health_fail')
+-    expect(html).toContain('10:10 - 10:20')
+-    expect(html).toContain('10:10 - 10:20 usage_stats.credentials_health_status_warning 2 1 66.7% usage_stats.credentials_health_bucket_aria')
++    expect(html).toContain('02:10 - 02:20')
++    expect(html).toContain('02:10 - 02:20 usage_stats.credentials_health_status_warning 2 1 66.7% usage_stats.credentials_health_bucket_aria')
+     expect(html).toContain('66.7%')
+     expect(html).toContain('usage_stats.credentials_health_summary_degraded')
+-    expect(html).toContain('Failed requests in 5h: 1 · latest 10:10 - 10:20')
++    expect(html).toContain('Failed requests in 5h: 1 · latest 02:10 - 02:20')
+   })
+ })
+diff --git a/web/src/components/usage/credentials/test/CredentialRequestEventsList.test.tsx b/web/src/components/usage/credentials/test/CredentialRequestEventsList.test.tsx
+index 77c5dcbb..80358c58 100644
+--- a/web/src/components/usage/credentials/test/CredentialRequestEventsList.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialRequestEventsList.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ 
+ import { act, type ComponentProps } from 'react'
+@@ -227,7 +229,7 @@ describe('CredentialRequestEventsList', () => {
+     expect(container.textContent).toContain('usage_stats.credentials_detail_pricing_style_openai')
+     expect(container.textContent).not.toContain('usage_stats.model_price_style usage_stats.model_price_style_openai')
+     expect(container.querySelector('[data-credential-request-timestamp="1"]')?.textContent)
+-      .toBe('10:00:002026/08/17')
++      .toBe('10:00:0008/17/2026')
+     expect(container.querySelector('[data-credential-request-model="1"]')?.textContent)
+       .toBe('gpt-5.6keeper-gpt')
+     expect(container.querySelector('[data-credential-request-model="1"]')?.textContent)
+diff --git a/web/src/components/usage/credentials/test/CredentialStatsReset.interaction.test.tsx b/web/src/components/usage/credentials/test/CredentialStatsReset.interaction.test.tsx
+index 2bfbf1af..fa356efd 100644
+--- a/web/src/components/usage/credentials/test/CredentialStatsReset.interaction.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialStatsReset.interaction.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ 
+ import { act, useState } from 'react'
+@@ -55,7 +57,7 @@ describe('credential stats reset confirmation', () => {
+     await act(async () => button('Reset').click())
+     expect(reset).toHaveBeenCalledExactlyOnceWith('1')
+     await act(async () => pending.resolve(resetIdentity))
+-    expect(document.body.textContent).toContain('2026-09-10 16:00:00 UTC+08:00')
++    expect(document.body.textContent).toContain('09/10/2026, 16:00:00')
+     const metrics = document.querySelector('[role="tabpanel"]')?.querySelectorAll('strong')
+     expect(Array.from(metrics ?? []).slice(0, 4).map((node) => node.textContent)).toEqual(['0', '—', '0', '—'])
+   })
+diff --git a/web/src/components/usage/credentials/test/CredentialsSection.test.ts b/web/src/components/usage/credentials/test/CredentialsSection.test.ts
+index 0332d5ca..22b8d80b 100644
+--- a/web/src/components/usage/credentials/test/CredentialsSection.test.ts
++++ b/web/src/components/usage/credentials/test/CredentialsSection.test.ts
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ import { createElement } from 'react'
+ import { renderToStaticMarkup } from 'react-dom/server'
+ import { describe, expect, it, vi } from 'vitest'
+@@ -36,14 +38,14 @@ const renderSettings = (props: Partial<Parameters<typeof QuotaAutoRefreshSetting
+ )
+ 
+ describe('CredentialsSection quota reset formatting', () => {
+-  it.each([undefined, 'Local'])('does not guess a browser timezone for %s', (timeZone) => {
+-    expect(formatQuotaResetLabel('2026-05-12T03:15:00-07:00', timeZone)).toBe('')
++  it.each([undefined, 'Local'])('uses browser time even without a project timezone (%s)', (timeZone) => {
++    expect(formatQuotaResetLabel('2026-05-12T03:15:00-07:00', timeZone)).toBe('05/12, 18:15')
+   })
+ 
+   it.each([
+-    ['2026-05-12T03:15:00-07:00', '05/12 18:15', '2d0h15m'],
+-    ['2026-05-10T07:15:00-07:00', '05/10 22:15', '4h15m'],
+-  ])('formats reset %s in the Keeper timezone', (resetAt, label, duration) => {
++    ['2026-05-12T03:15:00-07:00', '05/12, 18:15', '2d0h15m'],
++    ['2026-05-10T07:15:00-07:00', '05/10, 22:15', '4h15m'],
++  ])('formats reset %s in the browser timezone', (resetAt, label, duration) => {
+     vi.setSystemTime(new Date('2026-05-10T10:00:00Z'))
+     try {
+       expect(formatQuotaResetLabel(resetAt, 'Asia/Shanghai')).toBe(label)
+@@ -419,7 +421,7 @@ describe('CredentialsSection quota usage mode rendering', () => {
+ 
+     const html = renderToStaticMarkup(createElement(CredentialQuotaPanel, { row: noUsageRow, quotaUsageMode: 'current', timeZone: 'Asia/Shanghai' }))
+ 
+-    expect(html).toContain('05/09 20:00')
++    expect(html).toContain('05/09, 20:00')
+   })
+ 
+   it('renders xai billing spend without token usage metrics', () => {
+diff --git a/web/src/components/usage/credentials/test/QuotaResetAction.test.tsx b/web/src/components/usage/credentials/test/QuotaResetAction.test.tsx
+index f89eafdd..2d01a245 100644
+--- a/web/src/components/usage/credentials/test/QuotaResetAction.test.tsx
++++ b/web/src/components/usage/credentials/test/QuotaResetAction.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ 
+ import { act } from 'react'
+@@ -88,7 +90,7 @@ describe('QuotaResetAction reset credit details', () => {
+ 
+     expect(container.textContent).toContain('usage_stats.credentials_quota_reset_expiry_title')
+     expect(container.textContent).toContain('usage_stats.credentials_quota_reset_expiry_item:1')
+-    expect(container.textContent).toContain('2026-07-20 08:00:00')
++    expect(container.textContent).toContain('07/20/2026, 08:00:00')
+     expect(confirmButton().disabled).toBe(false)
+   })
+ 
+@@ -137,7 +139,7 @@ describe('QuotaResetAction reset credit details', () => {
+       credits: [{ id: 'credit-1', status: 'available', expiresAt: '2026-07-20T00:00:00Z' }],
+     }))
+ 
+-    expect(container.textContent).toContain('2026-07-20 08:00:00')
++    expect(container.textContent).toContain('07/20/2026, 08:00:00')
+     expect(container.textContent).toContain('usage_stats.credentials_quota_reset_expiry_failed')
+     expect(confirmButton().disabled).toBe(false)
+   })
+diff --git a/web/src/components/usage/credentials/test/credentialViewModels.test.ts b/web/src/components/usage/credentials/test/credentialViewModels.test.ts
+index 94cf3700..80469f99 100644
+--- a/web/src/components/usage/credentials/test/credentialViewModels.test.ts
++++ b/web/src/components/usage/credentials/test/credentialViewModels.test.ts
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('UTC')
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import type { UsageCredentialHealth, UsageIdentity, UsageQuotaCheckResponse, UsageQuotaRow, UsageSubscriptionInfo } from '@/lib/types'
+ import {
+@@ -204,7 +206,7 @@ describe('credentialViewModels', () => {
+     expect(rows.map((row) => row.remainingDaysLabel)).toEqual(['25d', '0d'])
+   })
+ 
+-  it('formats active-until timestamps without converting their project timezone offset', () => {
++  it('formats equivalent active-until instants identically in browser time', () => {
+     const rows = buildCredentialRows([
+       identity({ identity: 'offset-auth', active_until: '2026-08-01T00:00:00+08:00' }),
+       identity({ identity: 'utc-auth', active_until: '2026-07-31T16:00:00Z' }),
+@@ -212,8 +214,8 @@ describe('credentialViewModels', () => {
+     ])
+ 
+     expect(rows.map((row) => row.expiresAtLabel)).toEqual([
+-      '2026-08-01 00:00:00 UTC+08:00',
+-      '2026-07-31 16:00:00 UTC',
++      '07/31/2026, 16:00:00',
++      '07/31/2026, 16:00:00',
+       undefined,
+     ])
+   })
+diff --git a/web/src/components/usage/credentials/test/quotaHistoryFormatters.test.ts b/web/src/components/usage/credentials/test/quotaHistoryFormatters.test.ts
+index ecd8a554..096c0cf9 100644
+--- a/web/src/components/usage/credentials/test/quotaHistoryFormatters.test.ts
++++ b/web/src/components/usage/credentials/test/quotaHistoryFormatters.test.ts
+@@ -1,146 +1,25 @@
+-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+-import { formatCompactNumber } from '@/utils/usage'
+-
+-const NativeDateTimeFormat = Intl.DateTimeFormat
+-const NativeNumberFormat = Intl.NumberFormat
+-
+-// C3 原函数作逐字参考，包含相同 Date 解析、墙上时间映射和固定 Intl options。
+-function originalFormatDateTime(value: string, locale?: string): string {
+-  const date = new Date(value)
+-  if (!Number.isFinite(date.getTime())) return value || '—'
+-  const offsetTime = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i)
+-  const displayDate = offsetTime
+-    ? new Date(Date.UTC(
+-      Number(offsetTime[1]), Number(offsetTime[2]) - 1, Number(offsetTime[3]),
+-      Number(offsetTime[4]), Number(offsetTime[5]), Number(offsetTime[6]),
+-    ))
+-    : date
+-  return new NativeDateTimeFormat(locale, {
+-    month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+-    ...(offsetTime ? { timeZone: 'UTC' } : {}),
+-  }).format(displayDate)
+-}
+-
+-function originalSummaryRequests(value: number, browserLocale?: string): string {
+-  if (Math.abs(value) >= 1_000) return formatCompactNumber(value)
+-  return new NativeNumberFormat(browserLocale, {
+-    maximumFractionDigits: Math.abs(value) >= 100 ? 0 : Math.abs(value) >= 10 ? 1 : 2,
+-  }).format(value)
+-}
+-
+-function originalSummaryPercentage(value: number, browserLocale?: string): string {
+-  return `${new NativeNumberFormat(browserLocale, { maximumFractionDigits: 2 }).format(value)}%`
+-}
+-
+-const dateValues = [
+-  '2026-08-21T00:00:00Z', '2026-12-31T23:59:59.999999999+14:00', '2027-01-01T00:00:00-12:00',
+-  '2026-08-21T23:59:00+05:45', '2026-08-21 12:34:56+08:00', '2026-08-21T12:34:56z',
+-  '2026-11-01T01:30:00-07:00', '2026-11-01T01:30:59-08:00',
+-  '2026-04-05T01:45:00+11:00', '2026-04-05T01:45:00+10:30',
+-  '2026-03-08T01:59:59-08:00', '2026-03-08T03:00:00-07:00',
+-  '2026-08-21T12:34:56+00:00', '2026-08-21T12:34:56-00:00',
+-  '2026-08-21T12:34:56', '2026-08-21 12:34:56', '2026-08-21',
+-  'Fri, 21 Aug 2026 04:34:56 GMT', '2026-02-30T12:00:00+08:00',
+-  ' 2026-08-21T12:34:56Z ', 'invalid timestamp', '2026-08-21T12:34:56+99:00', '',
+-  undefined as unknown as string,
+-  ...Array.from({ length: 10 }, (_, digits) => `2026-08-21T12:34:56${digits ? `.${'123456789'.slice(0, digits)}` : ''}Z`),
+-]
+-
+-const numberValues = [
+-  0, -0, Number.MIN_VALUE, 0.0049, 0.005, 0.009, 1, 1.234, 9.9949, 9.995, 9.9999,
+-  10, 10.04, 10.05, 99.94, 99.95, 99.99, 99.995, 100, 100.005,
+-  999.49, 999.5, 999.99, 1000, 1001.234, 999_999.99, 1_000_000, 1_000_000_000,
+-  Number.MAX_VALUE, Number.POSITIVE_INFINITY, Number.NaN, undefined as unknown as number,
+-].flatMap((value) => [value, -value])
+-
+-beforeEach(() => vi.resetModules())
+-afterEach(() => vi.restoreAllMocks())
+-
+-describe('quota history formatter equivalence', () => {
+-  it.each([undefined, 'en', 'en-US', 'zh-CN', 'zh-TW', 'de-DE', 'ar-EG', 'en-US-u-ca-japanese-hc-h12-nu-arab', 'zz-ZZ'])(
+-    'preserves every original date string for locale %s', async (locale) => {
+-      const { createQuotaHistoryDateTimeFormatter } = await import('../quotaHistoryFormatters')
+-      const format = createQuotaHistoryDateTimeFormatter(locale)
+-      for (const value of dateValues) expect(format(value), `${locale}: ${value}`).toBe(originalFormatDateTime(value, locale))
+-      // 原函数本来不接受 null，不把它静默变成新的 fallback。
+-      expect(() => originalFormatDateTime(null as unknown as string, locale)).toThrow(TypeError)
+-      expect(() => format(null as unknown as string)).toThrow(TypeError)
+-    },
+-  )
+-
+-  it.each(['en-US', 'zh-CN', 'de-DE', 'ar-EG'])('preserves requests/percentages in browser locale %s independently of app language', async (browserLocale) => {
+-    const { createQuotaHistoryDateTimeFormatter, formatQuotaSummaryRequests, formatQuotaSummaryPercentage } = await import('../quotaHistoryFormatters')
+-    const constructors = vi.spyOn(Intl, 'NumberFormat').mockImplementation(function (locale, options) {
+-      return new NativeNumberFormat(locale ?? browserLocale, options)
+-    })
+-    for (const appLocale of ['en-US', 'zh-CN']) {
+-      const formatDate = createQuotaHistoryDateTimeFormatter(appLocale)
+-      expect(formatDate(dateValues[0])).toBe(originalFormatDateTime(dateValues[0], appLocale))
+-      for (const value of numberValues) {
+-        expect(formatQuotaSummaryRequests(value), `requests: ${value}`).toBe(originalSummaryRequests(value, browserLocale))
+-        expect(formatQuotaSummaryPercentage(value), `percentage: ${value}`).toBe(originalSummaryPercentage(value, browserLocale))
+-      }
+-    }
+-    expect(constructors).toHaveBeenCalledTimes(3)
+-    expect(constructors.mock.calls.map(([locale]) => locale)).toEqual([undefined, undefined, undefined])
+-    expect(constructors.mock.calls.map(([, options]) => options?.maximumFractionDigits).sort()).toEqual([0, 1, 2])
+-  })
+-})
+-
+-describe('quota history formatter lifetime', () => {
+-  it('resolves defaults once per context and reuses UTC/local instances without constructing Intl during lookups', async () => {
+-    const { createQuotaHistoryDateTimeFormatter } = await import('../quotaHistoryFormatters')
+-    const constructors = vi.spyOn(Intl, 'DateTimeFormat')
+-    const format = createQuotaHistoryDateTimeFormatter('en-US')
+-    expect(constructors).toHaveBeenCalledTimes(1)
+-    for (let index = 0; index < 50; index++) {
+-      expect(format('2026-08-21T00:00:00Z')).toBe(originalFormatDateTime('2026-08-21T00:00:00Z', 'en-US'))
+-      expect(format('2026-08-21T00:00:00')).toBe(originalFormatDateTime('2026-08-21T00:00:00', 'en-US'))
+-    }
+-    expect(constructors).toHaveBeenCalledTimes(3)
+-    const next = createQuotaHistoryDateTimeFormatter('en-us')
+-    next('2026-08-21T01:00:00Z')
+-    next('2026-08-21T01:00:00')
+-    expect(constructors).toHaveBeenCalledTimes(4)
+-  })
+-
+-  it('keys local formatters by the resolved browser timezone while sharing UTC formatters', async () => {
+-    const { createQuotaHistoryDateTimeFormatter } = await import('../quotaHistoryFormatters')
+-    let browserZone = 'Asia/Shanghai'
+-    const constructors = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (locale, options) {
+-      return new NativeDateTimeFormat(locale, { ...options, timeZone: options?.timeZone ?? browserZone })
+-    })
+-    const localValue = '2026-08-21T00:00:00'
+-    const utcValue = '2026-08-21T00:00:00Z'
+-    const expectedLocal = (zone: string) => new NativeDateTimeFormat('en-US', {
+-      month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: zone,
+-    }).format(new Date(localValue))
+-    const shanghai = createQuotaHistoryDateTimeFormatter('en-US')
+-    expect(shanghai(localValue)).toBe(expectedLocal(browserZone))
+-    expect(shanghai(utcValue)).toBe(originalFormatDateTime(utcValue, 'en-US'))
+-    browserZone = 'America/Los_Angeles'
+-    const losAngeles = createQuotaHistoryDateTimeFormatter('en-US')
+-    expect(losAngeles(localValue)).toBe(expectedLocal(browserZone))
+-    expect(losAngeles(utcValue)).toBe(originalFormatDateTime(utcValue, 'en-US'))
+-    expect(shanghai(localValue)).toBe(expectedLocal('Asia/Shanghai'))
+-    expect(constructors.mock.calls.filter(([, options]) => options?.month === 'short')).toHaveLength(3)
+-  })
+-
+-  it('evicts after 16 keys and retains recently used instances across responses', async () => {
+-    const { createQuotaHistoryDateTimeFormatter } = await import('../quotaHistoryFormatters')
+-    const constructors = vi.spyOn(Intl, 'DateTimeFormat')
+-    const locales = ['en-US', 'zh-CN', 'fr-FR', 'de-DE', 'ja-JP', 'ko-KR', 'es-ES', 'it-IT', 'pt-BR', 'ru-RU', 'nl-NL', 'pl-PL', 'sv-SE', 'fi-FI', 'tr-TR', 'ar-EG', 'hi-IN']
+-    const value = '2026-08-21T12:34:56Z'
+-    const formats = locales.slice(0, 16).map(createQuotaHistoryDateTimeFormatter)
+-    formats.forEach((format) => format(value))
+-    const countInstances = () => constructors.mock.calls.filter(([, options]) => options?.month === 'short').length
+-    expect(countInstances()).toBe(16)
+-    formats[0](value)
+-    createQuotaHistoryDateTimeFormatter(locales[16])(value)
+-    expect(countInstances()).toBe(17)
+-    formats[0](value)
+-    expect(countInstances()).toBe(17)
+-    expect(formats[1](value)).toBe(originalFormatDateTime(value, locales[1]))
+-    expect(countInstances()).toBe(18)
+-  })
++import {afterEach,describe,expect,it,vi} from 'vitest'
++import {formatBrowserDateTime} from '@/utils/browserDateTime'
++import {createQuotaHistoryDateTimeFormatter} from '../quotaHistoryFormatters'
++import {createQuotaHistoryTimeFormatter} from '../quotaHistoryTimeLabels'
++const Native=Intl.DateTimeFormat
++afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals()})
++describe('browser locale and timezone for every history instant',()=>{
++ it.each(['de-DE','en-US','ar-EG'])('uses %s independently of dashboard language',locale=>{
++  vi.stubGlobal('navigator',{languages:[locale]})
++  vi.spyOn(Intl,'DateTimeFormat').mockImplementation(function(l,o){return new Native(l,{...o,timeZone:o?.timeZone??'Europe/Berlin'})})
++  const value='2026-12-31T23:30:00-08:00'
++  const expected=new Native(locale,{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Berlin'}).format(new Date(value))
++  for(const language of ['en-US','zh-CN'])expect(createQuotaHistoryDateTimeFormatter(language)(value)).toBe(expected)
++  expect(formatBrowserDateTime(value)).toBe(new Native(locale,{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'Europe/Berlin'}).format(new Date(value)))
++ })
++ it('distinguishes repeated browser hours during DST fallback',()=>{
++  vi.stubGlobal('navigator',{languages:['de-DE']})
++  vi.spyOn(Intl,'DateTimeFormat').mockImplementation(function(l,o){return new Native(l,{...o,timeZone:o?.timeZone??'Europe/Berlin'})})
++  const start='2026-10-25T00:30:00Z',end='2026-10-25T01:30:00Z'
++  const cycle={window_started_at:start,reset_at:end,effective_started_at:start,effective_ended_at:end,first_observed_at:start,last_observed_at:end,status:'completed',transitions:[]}
++  const format=createQuotaHistoryTimeFormatter([cycle as never],createQuotaHistoryDateTimeFormatter())
++  expect(format(start)).toContain('UTC+02:00');expect(format(end)).toContain('UTC+01:00')
++ })
++ it('returns a safe placeholder for invalid input',()=>{expect(formatBrowserDateTime('bad')).toBe('—');expect(createQuotaHistoryDateTimeFormatter()('')).toBe('—')})
+ })
+diff --git a/web/src/components/usage/credentials/test/quotaHistoryTimeLabels.test.ts b/web/src/components/usage/credentials/test/quotaHistoryTimeLabels.test.ts
+index 51e212b5..f2f0f997 100644
+--- a/web/src/components/usage/credentials/test/quotaHistoryTimeLabels.test.ts
++++ b/web/src/components/usage/credentials/test/quotaHistoryTimeLabels.test.ts
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences, setBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('America/Los_Angeles')
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import type { CodexQuotaHistoryCycle, CodexQuotaHistoryTransition } from '@/lib/types'
+ import { createQuotaHistoryTimeFormatter } from '../quotaHistoryTimeLabels'
+@@ -33,13 +35,13 @@ describe('quota history timestamp labels', () => {
+     const first = '2026-11-01T01:30:01.123456789-07:00'
+     const second = '2026-11-01T01:30:59-08:00'
+     const format = vi.fn(base)
+-    const intl = vi.spyOn(Intl, 'DateTimeFormat')
++
+     const label = createQuotaHistoryTimeFormatter([
+       cycleAt('2026-11-01T00:00:00-07:00', { transitions: [transition(first, first)] }),
+       cycleAt(second, { id: 2 }),
+     ], format)
+     expect(format).not.toHaveBeenCalled()
+-    expect(intl).not.toHaveBeenCalled()
++
+     expect(label(first)).toBe(`${base(first)} UTC-07:00`)
+     expect(label(second)).toBe(`${base(second)} UTC-08:00`)
+     expect(format).toHaveBeenCalledTimes(2)
+@@ -49,7 +51,8 @@ describe('quota history timestamp labels', () => {
+   it.each([
+     ['LA fallback', '2026-11-01T01:45:00-07:00', '2026-11-01T01:45:00-08:00', '-07:00', '-08:00'],
+     ['Lord Howe half hour', '2026-04-05T01:45:00+11:00', '2026-04-05T01:45:00+10:30', '+11:00', '+10:30'],
+-  ])('distinguishes repeated local minutes for %s using only response offsets', (_name, first, second, firstOffset, secondOffset) => {
++  ])('distinguishes repeated local minutes for %s in the browser zone', (_name, first, second, firstOffset, secondOffset) => {
++    setBrowserPreferences(_name === 'Lord Howe half hour' ? 'Australia/Lord_Howe' : 'America/Los_Angeles')
+     const label = createQuotaHistoryTimeFormatter([cycleAt(first), cycleAt(second)], base)
+     expect(label(first)).toBe(`${base(first)} UTC${firstOffset}`)
+     expect(label(second)).toBe(`${base(second)} UTC${secondOffset}`)
+@@ -93,12 +96,12 @@ describe('quota history timestamp labels', () => {
+     expect(label(end)).toBe(`${base(end)} UTC-08:00`)
+   })
+ 
+-  it('uses a plus sign for UTC and preserves fractional/positive offsets', () => {
++  it('ignores source offset changes when the browser has no transition', () => {
+     const start = '2026-10-21T00:00:00Z'
+     const end = '2026-10-21T06:00:00+05:30'
+     const label = createQuotaHistoryTimeFormatter([cycleAt(start, { reset_at: end })], base)
+-    expect(label(start)).toBe(`${base(start)} UTC+00:00`)
+-    expect(label(end)).toBe(`${base(end)} UTC+05:30`)
++    expect(label(start)).toBe(base(start))
++    expect(label(end)).toBe(base(end))
+   })
+ 
+   it.each([
+diff --git a/web/src/components/usage/credentials/weeklyDateTime.ts b/web/src/components/usage/credentials/weeklyDateTime.ts
+index 9f3e9268..ec1fbfa9 100644
+--- a/web/src/components/usage/credentials/weeklyDateTime.ts
++++ b/web/src/components/usage/credentials/weeklyDateTime.ts
+@@ -1,14 +1,6 @@
+-// Date preferences follow the browser, independently of the dashboard language.
+-export function weeklyDateLocale(): string[] | undefined {
+-  if (typeof navigator === 'undefined') return undefined
+-  return navigator.languages?.length ? [...navigator.languages] : navigator.language ? [navigator.language] : undefined
+-}
++export { browserDateLocale as weeklyDateLocale } from '@/utils/browserDateTime'
++import { formatBrowserDateTime } from '@/utils/browserDateTime'
+ 
+ export function formatWeeklyDateTime(value: string | null | undefined): string {
+-  if (!value) return '—'
+-  const date = new Date(value)
+-  if (!Number.isFinite(date.getTime())) return value
+-  return new Intl.DateTimeFormat(weeklyDateLocale(), {
+-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+-  }).format(date)
++ return value ? formatBrowserDateTime(value, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
+ }
+diff --git a/web/src/components/usage/model-speed/analysisModelSpeed.ts b/web/src/components/usage/model-speed/analysisModelSpeed.ts
+index d9cfc98c..6abb37ce 100644
+--- a/web/src/components/usage/model-speed/analysisModelSpeed.ts
++++ b/web/src/components/usage/model-speed/analysisModelSpeed.ts
+@@ -1,3 +1,4 @@
++import { browserDateLocale, browserTimeZone } from '@/utils/browserDateTime';
+ import { disambiguateTimeLabels } from '@/utils/usage/timeLabels';
+ import type { AnalysisModelSpeedPayload, AnalysisModelSpeedSample } from '@/lib/types';
+ 
+@@ -59,8 +60,10 @@ export function modelSpeedBucketIndex(value: number, count: number) {
+   return Math.max(0, Math.min(count - 1, Math.round(value)));
+ }
+ 
+-export function formatModelSpeedTimeRange(start: string | undefined, end: string | undefined, timezone: string, locale: string, precision: 'seconds' | 'minutes' | 'date' = 'seconds', context: readonly string[] = []) {
++export function formatModelSpeedTimeRange(start: string | undefined, end: string | undefined, _timezone: string, _locale: string, precision: 'seconds' | 'minutes' | 'date' = 'seconds', context: readonly string[] = []) {
+   if (!start || !end) return '';
++  const timezone = browserTimeZone();
++  const locale = browserDateLocale();
+   try {
+     const startDate = new Date(start);
+     const endDate = new Date(end);
+@@ -68,7 +71,7 @@ export function formatModelSpeedTimeRange(start: string | undefined, end: string
+     // 按响应时区判断跨日；小时范围只留时间，跨日补月日，日粒度只显示月日。
+     const crossesDay = dayFormat.format(startDate) !== dayFormat.format(endDate);
+     const format = new Intl.DateTimeFormat(locale, {
+-      timeZone: timezone, hourCycle: 'h23',
++      timeZone: timezone,
+       ...(precision === 'date'
+         ? { month: 'numeric' as const, day: 'numeric' as const }
+         : { hour: '2-digit' as const, minute: '2-digit' as const,
+diff --git a/web/src/components/usage/model-speed/test/AnalysisModelSpeedCard.test.tsx b/web/src/components/usage/model-speed/test/AnalysisModelSpeedCard.test.tsx
+index 0cd7c77e..085d3ebb 100644
+--- a/web/src/components/usage/model-speed/test/AnalysisModelSpeedCard.test.tsx
++++ b/web/src/components/usage/model-speed/test/AnalysisModelSpeedCard.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ import { act } from 'react';
+ import { createRoot, type Root } from 'react-dom/client';
+diff --git a/web/src/components/usage/model-speed/test/RealtimeModelSpeedCard.test.tsx b/web/src/components/usage/model-speed/test/RealtimeModelSpeedCard.test.tsx
+index 0af658d7..5f79b0d5 100644
+--- a/web/src/components/usage/model-speed/test/RealtimeModelSpeedCard.test.tsx
++++ b/web/src/components/usage/model-speed/test/RealtimeModelSpeedCard.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ import { act } from 'react';
+ import { createRoot, type Root } from 'react-dom/client';
+diff --git a/web/src/components/usage/model-speed/test/analysisModelSpeed.test.ts b/web/src/components/usage/model-speed/test/analysisModelSpeed.test.ts
+index 4a4fdd42..ac1f7a90 100644
+--- a/web/src/components/usage/model-speed/test/analysisModelSpeed.test.ts
++++ b/web/src/components/usage/model-speed/test/analysisModelSpeed.test.ts
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences, setBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ import { describe, expect, it } from 'vitest';
+ import type { AnalysisModelSpeedPayload } from '@/lib/types';
+ import { formatModelSpeedTimeRange, mergeModelSpeedBuckets, modelSpeedBucketIndex, modelSpeedMean, modelSpeedTooltipRows } from '../analysisModelSpeed';
+@@ -54,7 +56,7 @@ describe('Analysis model speed groups', () => {
+       .toBe('07:55:00 – 08:05:00');
+   });
+ 
+-  it('adds short month and day only when the half range crosses midnight in the response timezone', () => {
++  it('adds short month and day only when the half range crosses midnight in the browser timezone', () => {
+     const range = formatModelSpeedTimeRange('2026-10-08T15:55:00Z', '2026-10-08T16:05:00Z', 'Asia/Shanghai', 'en');
+     expect(range).toContain('10/08');
+     expect(range).toContain('10/09');
+@@ -75,6 +77,7 @@ describe('Analysis model speed groups', () => {
+     expect(range).not.toContain(':00');
+   });
+   it('uses the complete chart context to distinguish repeated tooltip endpoints', () => {
++    setBrowserPreferences('America/Los_Angeles')
+     const first = '2026-11-01T01:00:00-07:00';
+     const second = '2026-11-01T01:00:00-08:00';
+     expect(formatModelSpeedTimeRange(first, second, 'America/Los_Angeles', 'en', 'minutes'))
+diff --git a/web/src/components/usage/pricing/PricingRecalculationModal.tsx b/web/src/components/usage/pricing/PricingRecalculationModal.tsx
+index 16b8fe2c..cac693d1 100644
+--- a/web/src/components/usage/pricing/PricingRecalculationModal.tsx
++++ b/web/src/components/usage/pricing/PricingRecalculationModal.tsx
+@@ -1,3 +1,4 @@
++import { formatBrowserDateTime } from '@/utils/browserDateTime';
+ import { Select } from '@/components/ui/Select'
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+@@ -28,15 +29,9 @@ interface PricingRecalculationModalProps {
+ 
+ const stages = ['preparing', 'events', 'updating_stats', 'finalizing'] as const
+ 
+-// 范围按服务端 RFC3339 的本地钟点显示；仅跨 DST 偏移时标出两端偏移以消除歧义。
+-function formatTaskTime(value: string, showOffset: boolean): string {
+-  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}):\d{2}(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(value)
+-  return match ? `${match[1]} ${match[2]}${showOffset ? ` UTC${match[3] === 'Z' ? '+00:00' : match[3]}` : ''}` : value
+-}
+-
+-function taskRangeHasDifferentOffsets(start: string, end: string): boolean {
+-  const offset = (value: string) => /(Z|[+-]\d{2}:\d{2})$/.exec(value)?.[1].replace('Z', '+00:00')
+-  return offset(start) !== offset(end)
++// Show instants in browser preferences, including the zone for task ranges.
++function formatTaskTime(value: string): string {
++ return formatBrowserDateTime(value, {year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', timeZoneName: 'short'})
+ }
+ 
+ // 重算确认只概览已保存基础价与规则数量，不把倍率乘入单价，也不展开编辑器内容。
+@@ -53,7 +48,7 @@ function SavedModelPricingPreview({ model }: { model: ModelPricingConfig }) {
+   </article>
+ }
+ 
+-// 服务端选项只决定合法 instant；显示和提交均使用 helper 生成的部署时区小时及偏移。
++// Server options determine legal instants; the browser determines display labels.
+ export function PricingRecalculationModal({
+   open, models, configRevision, task, starting, error, errorCode, connectionError,
+   onStart, onRefreshCurrent, onReloadPricing, onClose, onAuthRequired,
+@@ -190,7 +185,6 @@ export function PricingRecalculationModal({
+ 
+   const progress = currentTask?.stage === 'events' && currentTask.total_count !== null && currentTask.total_count > 0
+     ? Math.max(0, Math.min(100, Math.round(currentTask.processed_count / currentTask.total_count * 100))) : null
+-  const showRangeOffsets = currentTask ? taskRangeHasDifferentOffsets(currentTask.start_at, currentTask.end_at) : false
+ 
+   return <Modal open={open} width={720} title={t('usage_stats.pricing_recalculation_title')} onClose={onClose}
+     closeDisabled={starting || running} className={`${styles.modal} ${starting || running ? styles.runningModal : ''}`} footer={running ? undefined : currentTask ? <div className={styles.footer}><Button type="button" variant="secondary" appearance="action" data-recalculation-close
+@@ -206,7 +200,7 @@ export function PricingRecalculationModal({
+           {progress !== null ? <strong role="progressbar" aria-label={t('usage_stats.pricing_recalculation_events_progress')}
+             aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>{progress}%</strong> : null}
+         </div>
+-        <p className={styles.muted}>{t('usage_stats.pricing_recalculation_all_models')} · {formatTaskTime(currentTask.start_at, showRangeOffsets)} → {formatTaskTime(currentTask.end_at, showRangeOffsets)}</p>
++        <p className={styles.muted}>{t('usage_stats.pricing_recalculation_all_models')} · {formatTaskTime(currentTask.start_at)} → {formatTaskTime(currentTask.end_at)}</p>
+         <ol className={styles.stages}>{stages.map((stage, index) => {
+           // 仅依据后端阶段标记完成，不将事件百分比当成整个任务进度。
+           const currentIndex = stages.indexOf(currentTask.stage)
+@@ -242,7 +236,7 @@ export function PricingRecalculationModal({
+             <label>{t('usage_stats.pricing_recalculation_start_date')}
+               <Select dataAttributes={{ 'data-recalculation-date': true }} value={optionsLoading ? '' : selectedDate} placeholder={optionsLoading ? t('common.loading') : undefined} disabled={!dates.length || optionsLoading || reloading || starting}
+                 ariaLabel={t('usage_stats.pricing_recalculation_start_date')}
+-                options={dates.map((date) => ({ value: date, label: date }))}
++                options={dates.map((date) => ({ value: date, label: formatBrowserDateTime(date + 'T12:00:00Z', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'UTC' }) }))}
+                 onChange={(date) => {
+                   setSelectedDate(date)
+                   setSelectedHour(hours.filter((hour) => hour.date === date).at(-1)?.value ?? '')
+diff --git a/web/src/components/usage/pricing/pricingRecalculationHours.ts b/web/src/components/usage/pricing/pricingRecalculationHours.ts
+index 4bd34ee5..bfdc8f9d 100644
+--- a/web/src/components/usage/pricing/pricingRecalculationHours.ts
++++ b/web/src/components/usage/pricing/pricingRecalculationHours.ts
+@@ -1,58 +1,22 @@
+ import type { PricingRecalculationOptions } from '@/lib/types'
++import { browserDateTimeFormat, browserTimeZone } from '@/utils/browserDateTime'
++import { createZonedPartsReader, disambiguateTimeLabels } from '@/utils/usage/timeLabels'
+ 
+-export interface PricingRecalculationHour {
+-  value: string
+-  date: string
+-  hourLabel: string
+-}
+-
+-interface FormattedHour {
+-  value: string
+-  date: string
+-  clock: string
+-  offset: string
+-}
+-
+-// formatPricingHour 按服务端部署 IANA 时区还原一个绝对小时，保留该 instant 的实际 UTC 偏移。
+-function formatPricingHour(instant: number, formatter: Intl.DateTimeFormat): FormattedHour {
+-  const parts = formatter.formatToParts(new Date(instant))
+-  const valueOf = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? ''
+-  const year = valueOf('year')
+-  const month = valueOf('month')
+-  const day = valueOf('day')
+-  const clock = `${valueOf('hour')}:${valueOf('minute')}`
+-  const zone = valueOf('timeZoneName')
+-  const match = /^(?:GMT|UTC)(?:([+-])(\d{1,2})(?::(\d{2}))?)?$/.exec(zone)
+-  if (!match) throw new Error(`Unsupported timezone offset: ${zone}`)
+-  const offset = match[1] ? `${match[1]}${match[2].padStart(2, '0')}:${match[3] ?? '00'}` : '+00:00'
+-  const date = `${year}-${month}-${day}`
+-  return { value: `${date}T${clock}:00${offset}`, date, clock, offset }
+-}
++export interface PricingRecalculationHour { value: string; date: string; hourLabel: string }
+ 
+-// buildPricingRecalculationHours 从后端合法 instant 边界按 step_seconds 生成小时选项，不按浏览器时区取整。
+-// 普通小时仅显示本地钟点；DST 同日重复小时才附实际偏移，value 始终包含部署时区的 RFC3339 偏移。
++// Preserve the server's allowed instants; group and display them in browser time.
+ export function buildPricingRecalculationHours(options: PricingRecalculationOptions): PricingRecalculationHour[] {
+-  if (!options.earliest_start || !options.latest_start) return []
+-  const first = Date.parse(options.earliest_start)
+-  const last = Date.parse(options.latest_start)
+-  const step = options.step_seconds * 1000
+-  if (!Number.isFinite(first) || !Number.isFinite(last) || !Number.isSafeInteger(step) || step <= 0 || first > last) return []
+-  const formatter = new Intl.DateTimeFormat('en-GB', {
+-    timeZone: options.timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+-    hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'longOffset',
+-  })
+-  const hours: FormattedHour[] = []
+-  const labelCounts = new Map<string, number>()
+-  for (let instant = first; instant <= last; instant += step) {
+-    const hour = formatPricingHour(instant, formatter)
+-    hours.push(hour)
+-    const key = `${hour.date} ${hour.clock}`
+-    labelCounts.set(key, (labelCounts.get(key) ?? 0) + 1)
+-  }
+-  return hours.map((hour) => ({
+-    value: hour.value,
+-    date: hour.date,
+-    hourLabel: (labelCounts.get(`${hour.date} ${hour.clock}`) ?? 0) > 1
+-      ? `${hour.clock} UTC${hour.offset}` : hour.clock,
+-  }))
++ if (!options.earliest_start || !options.latest_start) return []
++ const first = Date.parse(options.earliest_start), last = Date.parse(options.latest_start), step = options.step_seconds * 1000
++ if (!Number.isFinite(first) || !Number.isFinite(last) || !Number.isSafeInteger(step) || step <= 0 || first > last) return []
++ const read = createZonedPartsReader(browserTimeZone())
++ const formatter = browserDateTimeFormat({hour: '2-digit', minute: '2-digit'})
++ const hours: PricingRecalculationHour[] = []
++ for (let instant = first; instant <= last; instant += step) {
++  const p = read(instant)
++  const date = [String(p.year), String(p.month).padStart(2, '0'), String(p.day).padStart(2, '0')].join('-')
++  hours.push({value: new Date(instant).toISOString(), date, hourLabel: formatter.format(new Date(instant))})
++ }
++ const labels = disambiguateTimeLabels(hours.map(hour => hour.value), browserTimeZone(), (_, index) => hours[index].hourLabel)
++ return hours.map((hour, index) => ({...hour, hourLabel: labels[index]}))
+ }
+diff --git a/web/src/components/usage/pricing/test/PricingRecalculationModal.test.tsx b/web/src/components/usage/pricing/test/PricingRecalculationModal.test.tsx
+index 723593c3..4116d430 100644
+--- a/web/src/components/usage/pricing/test/PricingRecalculationModal.test.tsx
++++ b/web/src/components/usage/pricing/test/PricingRecalculationModal.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences, setBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Kolkata')
+ // @vitest-environment happy-dom
+ 
+ import { act } from 'react'
+@@ -90,11 +92,11 @@ describe('PricingRecalculationModal', () => {
+       step_seconds: 3600, max_days: 30, config_revision: 7 })))
+     expect(date.disabled).toBe(false)
+     expect(hour.disabled).toBe(false)
+-    expect(date.textContent).toBe('2026-09-22')
++    expect(date.textContent).toBe('09/22/2026')
+     expect(hour.textContent).toBe('11:30')
+   })
+ 
+-  it('uses one saved model snapshot and server hours, preserving the half-hour offset in the start request', async () => {
++  it('uses one saved model snapshot and server hours, preserving the exact instant in the start request', async () => {
+     await renderModal()
+     expect(optionsCalls).toBe(1)
+     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+@@ -109,11 +111,11 @@ describe('PricingRecalculationModal', () => {
+     expect(dialog.textContent).toContain('usage_stats.pricing_recalculation_recent_days')
+     const date = dialog.querySelector<HTMLButtonElement>('[data-recalculation-date]')!
+     const hour = dialog.querySelector<HTMLButtonElement>('[data-recalculation-hour]')!
+-    expect(date.textContent).toBe('2026-09-22')
++    expect(date.textContent).toBe('09/22/2026')
+     expect(hour.textContent).toBe('11:30')
+     await act(async () => dialog.querySelector<HTMLButtonElement>('[data-recalculation-start]')!.click())
+     expect(onStart).toHaveBeenCalledTimes(1)
+-    expect(onStart).toHaveBeenCalledWith('2026-09-22T11:30:00+05:30', 7)
++    expect(onStart).toHaveBeenCalledWith('2026-09-22T06:00:00.000Z', 7)
+   })
+ 
+   it('requires an explicit reread when options revision differs from the displayed models', async () => {
+@@ -147,7 +149,7 @@ describe('PricingRecalculationModal', () => {
+   it('blocks all closing paths while running and restores return after completion', async () => {
+     await renderModal({ task: runningTask })
+     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+-    expect(dialog.textContent).toContain('2026-09-22 09:30')
++    expect(dialog.textContent).toContain('09/22/2026, 09:30')
+     expect(dialog.textContent).not.toContain('UTC+05:30')
+     expect(dialog.textContent).not.toContain('2026-09-22T09:30:00+05:30')
+     expect(dialog.querySelector('[data-recalculation-close]')).toBeNull()
+@@ -170,7 +172,7 @@ describe('PricingRecalculationModal', () => {
+     await renderModal({ models: [] })
+     expect(document.querySelector<HTMLButtonElement>('[data-recalculation-start]')?.disabled).toBe(false)
+     await act(async () => document.querySelector<HTMLButtonElement>('[data-recalculation-start]')!.click())
+-    expect(onStart).toHaveBeenCalledWith('2026-09-22T11:30:00+05:30', 7)
++    expect(onStart).toHaveBeenCalledWith('2026-09-22T06:00:00.000Z', 7)
+   })
+ 
+   it('reloads legal hours after a running task disappears on server restart', async () => {
+@@ -189,9 +191,10 @@ describe('PricingRecalculationModal', () => {
+     expect(onStart).not.toHaveBeenCalled()
+   })
+ 
+-  it('distinguishes different UTC offsets when the task range crosses a DST change', async () => {
++  it('distinguishes different UTC offsets when the browser task range crosses a DST change', async () => {
++    setBrowserPreferences('America/New_York')
+     await renderModal({ task: { ...runningTask, start_at: '2026-11-01T01:00:00-04:00', end_at: '2026-11-01T01:00:00-05:00' } })
+-    expect(document.body.textContent).toContain('2026-11-01 01:00 UTC-04:00')
+-    expect(document.body.textContent).toContain('2026-11-01 01:00 UTC-05:00')
++    expect(document.body.textContent).toContain('11/01/2026, 01:00 EDT')
++    expect(document.body.textContent).toContain('11/01/2026, 01:00 EST')
+   })
+ })
+diff --git a/web/src/components/usage/pricing/test/pricingRecalculationHours.test.ts b/web/src/components/usage/pricing/test/pricingRecalculationHours.test.ts
+index ab798a71..bb6634ed 100644
+--- a/web/src/components/usage/pricing/test/pricingRecalculationHours.test.ts
++++ b/web/src/components/usage/pricing/test/pricingRecalculationHours.test.ts
+@@ -1,45 +1,25 @@
+ import { describe, expect, it } from 'vitest'
++import { setupBrowserPreferences, setBrowserPreferences } from '@/../tests/browserPreferences'
+ import type { PricingRecalculationOptions } from '@/lib/types'
+ import { buildPricingRecalculationHours } from '../pricingRecalculationHours'
+-
+-const options = (overrides: Partial<PricingRecalculationOptions>): PricingRecalculationOptions => ({
+-  timezone: 'UTC', earliest_start: null, latest_start: null,
+-  step_seconds: 3600, max_days: 30, config_revision: 1, ...overrides,
+-})
+-
+-describe('buildPricingRecalculationHours', () => {
+-  it('preserves the deployment timezone half-hour offset while stepping by actual hours', () => {
+-    expect(buildPricingRecalculationHours(options({
+-      timezone: 'Asia/Kolkata',
+-      earliest_start: '2026-09-22T09:30:00+05:30',
+-      latest_start: '2026-09-22T11:30:00+05:30',
+-    }))).toEqual([
+-      { value: '2026-09-22T09:30:00+05:30', date: '2026-09-22', hourLabel: '09:30' },
+-      { value: '2026-09-22T10:30:00+05:30', date: '2026-09-22', hourLabel: '10:30' },
+-      { value: '2026-09-22T11:30:00+05:30', date: '2026-09-22', hourLabel: '11:30' },
+-    ])
+-  })
+-
+-  it('keeps both fall-back hours and labels their distinct offsets without adding labels to ordinary hours', () => {
+-    expect(buildPricingRecalculationHours(options({
+-      timezone: 'America/New_York',
+-      earliest_start: '2026-11-01T00:00:00-04:00',
+-      latest_start: '2026-11-01T03:00:00-05:00',
+-    }))).toEqual([
+-      { value: '2026-11-01T00:00:00-04:00', date: '2026-11-01', hourLabel: '00:00' },
+-      { value: '2026-11-01T01:00:00-04:00', date: '2026-11-01', hourLabel: '01:00 UTC-04:00' },
+-      { value: '2026-11-01T01:00:00-05:00', date: '2026-11-01', hourLabel: '01:00 UTC-05:00' },
+-      { value: '2026-11-01T02:00:00-05:00', date: '2026-11-01', hourLabel: '02:00' },
+-      { value: '2026-11-01T03:00:00-05:00', date: '2026-11-01', hourLabel: '03:00' },
+-    ])
+-  })
+-
+-  it('does not invent the missing spring-forward hour or a range when the server has no legal start', () => {
+-    expect(buildPricingRecalculationHours(options({
+-      timezone: 'America/New_York',
+-      earliest_start: '2026-03-08T01:00:00-05:00',
+-      latest_start: '2026-03-08T04:00:00-04:00',
+-    })).map((hour) => hour.hourLabel)).toEqual(['01:00', '03:00', '04:00'])
+-    expect(buildPricingRecalculationHours(options({ earliest_start: null, latest_start: null }))).toEqual([])
+-  })
++setupBrowserPreferences('Europe/Berlin','de-DE')
++const options = (overrides: Partial<PricingRecalculationOptions>): PricingRecalculationOptions => ({timezone:'UTC',earliest_start:null,latest_start:null,step_seconds:3600,max_days:30,config_revision:1,...overrides})
++describe('browser pricing hours',()=>{
++ it('preserves legal instants and steps while displaying browser time',()=>{
++  const hours=buildPricingRecalculationHours(options({timezone:'Asia/Kolkata',earliest_start:'2026-09-22T09:30:00+05:30',latest_start:'2026-09-22T11:30:00+05:30'}))
++  expect(hours.map(h=>h.value)).toEqual(['2026-09-22T04:00:00.000Z','2026-09-22T05:00:00.000Z','2026-09-22T06:00:00.000Z'])
++  expect(hours.map(h=>h.hourLabel)).toEqual(['06:00','07:00','08:00'])
++  expect(hours.every(h=>h.date==='2026-09-22')).toBe(true)
++ })
++ it('distinguishes repeated browser hours independently of server zone',()=>{
++  const hours=buildPricingRecalculationHours(options({timezone:'UTC',earliest_start:'2026-10-25T00:00:00Z',latest_start:'2026-10-25T02:00:00Z'}))
++  expect(hours.map(h=>h.hourLabel)).toEqual(['02:00 UTC+02:00','02:00 UTC+01:00','03:00'])
++  expect(new Set(hours.map(h=>h.value)).size).toBe(3)
++ })
++ it('keeps server legal steps through spring-forward and empty options',()=>{
++  setBrowserPreferences('America/New_York')
++  const hours=buildPricingRecalculationHours(options({timezone:'America/New_York',earliest_start:'2026-03-08T01:00:00-05:00',latest_start:'2026-03-08T04:00:00-04:00'}))
++  expect(hours.map(h=>h.hourLabel)).toEqual(['01:00','03:00','04:00'])
++  expect(buildPricingRecalculationHours(options({}))).toEqual([])
++ })
+ })
+diff --git a/web/src/components/usage/test/OverviewRealtimePanel.logic.test.tsx b/web/src/components/usage/test/OverviewRealtimePanel.logic.test.tsx
+index e55c6588..29e4ec43 100644
+--- a/web/src/components/usage/test/OverviewRealtimePanel.logic.test.tsx
++++ b/web/src/components/usage/test/OverviewRealtimePanel.logic.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('UTC')
+ import React from 'react';
+ import { renderToStaticMarkup } from 'react-dom/server';
+ import { afterEach, describe, expect, it, vi } from 'vitest';
+@@ -425,7 +427,7 @@ describe('OverviewRealtimePanel', () => {
+     expect(html).not.toContain('width:0%');
+   });
+ 
+-  it('formats realtime bucket labels with the realtime response timezone', () => {
++  it('formats realtime bucket labels with the browser timezone', () => {
+     renderToStaticMarkup(
+       <OverviewRealtimePanel
+         realtime={{ ...realtimeWithProjectOffset, timezone: 'Asia/Shanghai' }}
+@@ -437,7 +439,7 @@ describe('OverviewRealtimePanel', () => {
+       />
+     );
+ 
+-    expect(chartCapture.lineCalls[0].data.labels).toEqual(['11:55', '11:55:30']);
++    expect(chartCapture.lineCalls[0].data.labels).toEqual(['03:55', '03:55:30']);
+   });
+ 
+   it('keeps cache chart independent of latency scatter settings', () => {
+diff --git a/web/src/components/usage/test/RecentActivityPanel.test.tsx b/web/src/components/usage/test/RecentActivityPanel.test.tsx
+index 15522e8f..1b64bb96 100644
+--- a/web/src/components/usage/test/RecentActivityPanel.test.tsx
++++ b/web/src/components/usage/test/RecentActivityPanel.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ import { createElement, type ComponentProps } from 'react';
+ import { renderToStaticMarkup } from 'react-dom/server';
+ import { describe, expect, it, vi } from 'vitest';
+@@ -57,7 +59,7 @@ describe('RecentActivityPanel', () => {
+     const html = renderPanel({
+       activity: buildUsageActivityFixture([1_234]),
+     });
+-    const sharedWindow = '07/01 00:00 – 07/02 00:00';
++    const sharedWindow = '07/01, 08:00 – 07/02, 08:00';
+ 
+     expect(html.match(new RegExp(sharedWindow, 'g'))).toHaveLength(1);
+     expect(html.indexOf(sharedWindow)).toBeLessThan(html.indexOf('>Day</button>'));
+diff --git a/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
+index b3a13712..172b5217 100644
+--- a/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
++++ b/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ import React from 'react';
+ import { describe, expect, it } from 'vitest';
+ import { renderToStaticMarkup } from 'react-dom/server';
+@@ -92,7 +94,7 @@ describe('RequestEventsDetailsCard', () => {
+ 
+   it('formats the API timestamp as compact numeric date and time', () => {
+     const html = renderCard({ events: [{ ...events[0], timestamp: '2026-05-13T00:38:19+08:00' }] });
+-    expect(tableValues(html).Timestamp).toBe('00:38:192026/05/13');
++    expect(tableValues(html).Timestamp).toBe('00:38:1905/13/2026');
+   });
+ 
+   it.each([undefined, 0])('keeps missing or zero TTFT %s visible within Latency', (ttft) => {
+@@ -241,7 +243,7 @@ describe('RequestEventsDetailsCard', () => {
+   ])('renders only the supplied column selection %j', (props) => {
+     const html = renderCard(props);
+     expect(tableValues(html)).toEqual({
+-      Timestamp: '02:00:002026/04/23', Model: 'claude-sonnet',
++      Timestamp: '10:00:0004/23/2026', Model: 'claude-sonnet',
+       ...(props.initialVisibleColumnIds ? { Cost: '$0.1234Claude Style' } : {}),
+     });
+   });
+diff --git a/web/src/components/usage/test/ServiceHealthCard.timezone.test.tsx b/web/src/components/usage/test/ServiceHealthCard.timezone.test.tsx
+index 4756ac06..c072ccb3 100644
+--- a/web/src/components/usage/test/ServiceHealthCard.timezone.test.tsx
++++ b/web/src/components/usage/test/ServiceHealthCard.timezone.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ import { createElement } from 'react';
+ import { readFileSync } from 'node:fs';
+ import { renderToStaticMarkup } from 'react-dom/server';
+@@ -40,9 +42,9 @@ describe('Recent Activity project timezone', () => {
+       onWindowChange: vi.fn(),
+     }));
+ 
+-    expect(html.match(/07\/20 08:00 – 07\/21 08:00/g)).toHaveLength(1);
+-    expect(html.match(/07\/20 08:00 – 07\/20 08:04/g)).toHaveLength(2);
+-    expect(html).not.toContain('07/20 00:00 – 07/21 00:00');
++    expect(html.match(/07\/20, 08:00 – 07\/21, 08:00/g)).toHaveLength(1);
++    expect(html.match(/07\/20, 08:00 – 07\/20, 08:04/g)).toHaveLength(2);
++    expect(html).not.toContain('07/20, 00:00 – 07/21, 00:00');
+   });
+ });
+ 
+diff --git a/web/src/components/usage/test/UsageComparisonCharts.test.tsx b/web/src/components/usage/test/UsageComparisonCharts.test.tsx
+index c2e25819..1a89cf17 100644
+--- a/web/src/components/usage/test/UsageComparisonCharts.test.tsx
++++ b/web/src/components/usage/test/UsageComparisonCharts.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ import React, { act } from 'react';
+ import { createRoot, type Root } from 'react-dom/client';
+@@ -128,8 +130,8 @@ it('renders loading and empty states and makes a single bucket visible',async()=
+ });
+ it('formats date-only days without a timezone shift and hourly instants in the response timezone',()=>{
+   expect(formatComparisonBucket('2026-09-18','daily','America/Los_Angeles','en')).toBe('Sep 18');
+-  expect(formatComparisonBucket('2026-09-18T00:00:00Z','hourly','Asia/Shanghai','en')).toBe('08:00');
+-  expect(formatComparisonBucket('2026-09-18T08:00:00+08:00','hourly','Local','en')).toBe('08:00');
+-  expect(formatComparisonBucket('2026-09-18T08:00:00+08:00','hourly','invalid','en')).toBe('08:00');
+-  expect(formatComparisonBucket('2026-09-18T00:00:00Z','hourly','Asia/Shanghai','en',true)).toBe('Sep 18, 2026, 08:00');
++  expect(formatComparisonBucket('2026-09-18T00:00:00Z','hourly','Asia/Shanghai','en')).toBe('00:00');
++  expect(formatComparisonBucket('2026-09-18T08:00:00+08:00','hourly','Local','en')).toBe('00:00');
++  expect(formatComparisonBucket('2026-09-18T08:00:00+08:00','hourly','invalid','en')).toBe('00:00');
++  expect(formatComparisonBucket('2026-09-18T00:00:00Z','hourly','Asia/Shanghai','en',true)).toBe('Sep 18, 2026, 00:00');
+ });
+diff --git a/web/src/components/usage/usageComparisonData.ts b/web/src/components/usage/usageComparisonData.ts
+index 69b9785e..8b99e294 100644
+--- a/web/src/components/usage/usageComparisonData.ts
++++ b/web/src/components/usage/usageComparisonData.ts
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import type { UsageComparisonItem } from '@/lib/types';
+ 
+ export interface ComparisonRow extends UsageComparisonItem {
+@@ -33,18 +34,17 @@ export function buildComparisonView(items: UsageComparisonItem[], othersLabel: s
+ }
+ 
+ // 日桶是项目本地日期，不进行 UTC 转换；小时桶使用响应时区，Local 则保留 API 的本地钟面。
+-export function formatComparisonBucket(bucket: string, granularity: 'hourly' | 'daily', timezone: string | undefined, locale: string, full = false): string {
++export function formatComparisonBucket(bucket: string, granularity: 'hourly' | 'daily', timezone: string | undefined, _locale: string, full = false): string {
+   const literal = bucket.match(/^(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2}))?/);
+   if (!literal) return bucket;
+   const fallback = granularity === 'hourly' && !full ? literal[2] ?? bucket : `${literal[1]} ${granularity === 'hourly' ? literal[2] ?? '' : ''}`.trim();
+   const date = new Date(granularity === 'daily' ? `${literal[1]}T12:00:00Z` : bucket);
+   try {
+-    if (granularity === 'hourly' && (!timezone || timezone === 'Local')) return fallback;
+-    return new Intl.DateTimeFormat(locale, {
+-      timeZone: granularity === 'daily' ? 'UTC' : timezone,
++    return new Intl.DateTimeFormat(browserDateLocale(), {
++      timeZone: granularity === 'daily' ? 'UTC' : undefined,
+       ...(full ? {year: 'numeric' as const} : {}),
+       ...(granularity === 'daily' || full ? {month: 'short' as const, day: 'numeric' as const} : {}),
+-      ...(granularity === 'hourly' ? {hour: '2-digit' as const, minute: '2-digit' as const, hourCycle: 'h23' as const} : {}),
++      ...(granularity === 'hourly' ? {hour: '2-digit' as const, minute: '2-digit' as const} : {}),
+     }).format(date);
+   } catch {
+     return fallback;
+diff --git a/web/src/features/ranking/RankingPage.tsx b/web/src/features/ranking/RankingPage.tsx
+index 9b4ae7b2..de5f1e2f 100644
+--- a/web/src/features/ranking/RankingPage.tsx
++++ b/web/src/features/ranking/RankingPage.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { type KeyboardEvent, useMemo, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { Button } from '@/components/ui/Button';
+@@ -825,9 +826,9 @@ function EmptyState({ title, description }: { title: string; description: string
+   return <div className={styles.emptyState}><strong>{title}</strong><p>{description}</p></div>;
+ }
+ 
+-function formatDateTime(value: string | undefined, language: string, t: Translate): string {
++function formatDateTime(value: string | undefined, _language: string, t: Translate): string {
+   if (!value) return t('ranking.never_synced');
+   const date = new Date(value);
+   if (Number.isNaN(date.getTime())) return value;
+-  return new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short', hour12: false }).format(date);
++  return new Intl.DateTimeFormat(browserDateLocale(), { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+ }
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index 8b55954f..decefdf0 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -695,7 +695,7 @@ const resources = {
+         credentials_quota_reset_confirm: 'Reset',
+         credentials_quota_reset_failed: 'Quota reset failed. Please try again later.',
+         credentials_quota_reset_recovery_failed: 'Quota was reset, but CPA account recovery failed. Recover the account in CPA; do not reset quota again.',
+-        credentials_quota_reset_expiry_title: 'Manual reset expiry (GMT+8)',
++        credentials_quota_reset_expiry_title: 'Manual reset expiry',
+         credentials_quota_reset_expiry_loading: 'Loading expiry times...',
+         credentials_quota_reset_expiry_item: 'Reset {{index}}',
+         credentials_quota_reset_expiry_empty: 'No manual resets are currently available.',
+@@ -705,7 +705,7 @@ const resources = {
+         claude_reset_loading: 'Loading reset information...',
+         claude_reset_grant: 'Grant {{index}}',
+         claude_reset_grant_count: '{{left}} available',
+-        claude_reset_expires: 'Expires (GMT+8)',
++        claude_reset_expires: 'Expires',
+         claude_reset_no_expiry: 'No expiry provided',
+         claude_reset_scope_unknown: 'Scope not provided',
+         claude_reset_unknown: 'Could not confirm the reset result. Refresh and check quota before deciding whether to submit again.',
+@@ -1792,7 +1792,7 @@ const resources = {
+         credentials_quota_reset_confirm: '确认重置',
+         credentials_quota_reset_failed: '重置限额失败，请稍后重试。',
+         credentials_quota_reset_recovery_failed: '限额已重置，但 CPA 账号恢复失败。请在 CPA 中恢复账号，勿重复重置限额。',
+-        credentials_quota_reset_expiry_title: '主动重置过期时间（GMT+8）',
++        credentials_quota_reset_expiry_title: '主动重置过期时间',
+         credentials_quota_reset_expiry_loading: '正在获取过期时间…',
+         credentials_quota_reset_expiry_item: '第 {{index}} 次',
+         credentials_quota_reset_expiry_empty: '当前没有可用重置次数。',
+@@ -1802,7 +1802,7 @@ const resources = {
+         claude_reset_loading: '正在查询重置信息…',
+         claude_reset_grant: '权益 {{index}}',
+         claude_reset_grant_count: '可用 {{left}} 次',
+-        claude_reset_expires: '到期时间（GMT+8）',
++        claude_reset_expires: '到期时间',
+         claude_reset_no_expiry: '未提供到期时间',
+         claude_reset_scope_unknown: '未提供范围',
+         claude_reset_unknown: '无法确认重置结果，请先刷新并检查额度，再决定是否再次提交。',
+@@ -2888,7 +2888,7 @@ const resources = {
+         credentials_quota_reset_confirm: '確認重置',
+         credentials_quota_reset_failed: '重置限額失敗，請稍後重試。',
+         credentials_quota_reset_recovery_failed: '限額已重置，但 CPA 帳號恢復失敗。請在 CPA 中恢復帳號，勿重複重置限額。',
+-        credentials_quota_reset_expiry_title: '主動重置過期時間（GMT+8）',
++        credentials_quota_reset_expiry_title: '主動重置過期時間',
+         credentials_quota_reset_expiry_loading: '正在取得到期時間…',
+         credentials_quota_reset_expiry_item: '第 {{index}} 次',
+         credentials_quota_reset_expiry_empty: '目前沒有可用重置次數。',
+@@ -2898,7 +2898,7 @@ const resources = {
+         claude_reset_loading: '正在查詢重置資訊…',
+         claude_reset_grant: '權益 {{index}}',
+         claude_reset_grant_count: '可用 {{left}} 次',
+-        claude_reset_expires: '到期時間（GMT+8）',
++        claude_reset_expires: '到期時間',
+         claude_reset_no_expiry: '未提供到期時間',
+         claude_reset_scope_unknown: '未提供範圍',
+         claude_reset_unknown: '無法確認重置結果，請先重新整理並檢查額度，再決定是否再次提交。',
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index 885f9a8e..aa594281 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -1,3 +1,4 @@
++import { createResetRequestId } from '@/utils/resetRequestId'
+ import { type AnalysisLatencyDiagnostics, type AnalysisResponse, type CredentialsManagementResponse, type AuthManagedSessionsResponse, type AuthSessionResponse, type CodexQuotaHistoryResponse, type CpaApiKeyDisplayItem, type CpaApiKeyOptionsResponse, type CpaApiKeySettingsResponse, type CpaApiKeysResponse, type ErrorEventsResponse, type OverviewRealtimeBlock, type OverviewRealtimeWindow, type PricingSyncSource, type QuotaAutoRefreshSettings, type StatusResponse, type UpdateCheckResponse, type UsageActivityRequest, type UsageActivityResponse, type UsageEventModelFilterOptionsResponse, type UsageEventRequestLogResponse, type UsageEventSourceFilterOptionsResponse, type UsageRangeRequest, type UsageIdentitiesPageResponse, type UsageIdentitiesResponse, type UsageEventsResponse, type UsageIdentity, type UsageIdentityAuthType, type UsageOverviewComparisons, type UsageOverviewResponse, type UsageQuotaCacheResponse, type UsageQuotaInspectionStatusResponse, type UsageQuotaRefreshResponse, type UsageQuotaRefreshTaskResponse, type UsageQuotaResetCreditsResponse, type UsageQuotaResetResponse, type VersionResponse } from './types'
+ import type { DeletePricingModelResponse, ModelPricingConfig, PricingErrorResponse, PricingFieldError, PricingModelOptionsResponse, PricingModelsResponse, PricingRecalculationOptions, PricingRecalculationTask, PricingSyncApplyRequest, PricingSyncApplyResponse, PricingSyncFetchResponse, SavePricingModelResponse, StartPricingRecalculationRequest, StartPricingRecalculationResponse } from './types'
+ import { isCPAMCEmbed } from '@/embed/cpamcEmbed'
+@@ -857,19 +858,36 @@ export async function startUsageQuotaInspection(signal?: AbortSignal): Promise<U
+ }
+ 
+ 
++const pendingQuotaResets = new Map<string, { requestId: string; choice: string }>()
++
+ export async function resetUsageQuota(authIndex: string, signal?: AbortSignal, grantId?: string, organizationId?: string): Promise<UsageQuotaResetResponse> {
++  const choice = JSON.stringify([grantId ?? '', organizationId ?? ''])
++  const storageKey = `quota-reset:${authIndex}`
++  let pending = pendingQuotaResets.get(authIndex)
++  if (!pending) {
++    try { pending = JSON.parse(sessionStorage.getItem(storageKey) ?? 'null') } catch { /* No saved operation. */ }
++  }
++  if (pending && pending.choice !== choice) throw new Error('A reset for this account is unresolved')
++  pending ??= { requestId: createResetRequestId(), choice }
++  pendingQuotaResets.set(authIndex, pending)
++  try { sessionStorage.setItem(storageKey, JSON.stringify(pending)) } catch { /* Memory journal remains. */ }
+   const response = await apiFetch(apiPath('/quota/reset'), {
+     method: 'POST',
+     headers: {
+       'Content-Type': 'application/json',
+     },
+-    body: JSON.stringify({ auth_index: authIndex, ...(grantId ? { grant_id: grantId, organization_id: organizationId } : {}) }),
++    body: JSON.stringify({ auth_index: authIndex, request_id: pending.requestId, ...(grantId ? { grant_id: grantId, organization_id: organizationId } : {}) }),
+     signal,
+   })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to reset usage quota: ${response.status}`)
+   }
+-  return response.json()
++  const result: UsageQuotaResetResponse = await response.json()
++  if (result.code && result.code !== 'unknown') {
++    pendingQuotaResets.delete(authIndex)
++    try { sessionStorage.removeItem(storageKey) } catch { /* No persisted operation. */ }
++  }
++  return result
+ }
+ 
+ export async function fetchUsageQuotaResetCredits(authIndex: string, signal?: AbortSignal): Promise<UsageQuotaResetCreditsResponse> {
+diff --git a/web/src/lib/test/api.test.ts b/web/src/lib/test/api.test.ts
+index a0ba4019..2e5b926f 100644
+--- a/web/src/lib/test/api.test.ts
++++ b/web/src/lib/test/api.test.ts
+@@ -791,7 +791,7 @@ describe('fetchUsageEvents', () => {
+     expect(parsed.pathname).toBe('/api/v1/quota/reset');
+     expect(init).toMatchObject({ credentials: 'include', method: 'POST' });
+     expect(headerValue(init, 'Content-Type')).toBe('application/json');
+-    expect(init?.body).toBe(JSON.stringify({ auth_index: 'auth-1' }));
++    expect(JSON.parse(String(init?.body))).toMatchObject({ auth_index: 'auth-1', request_id: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+   });
+ 
+   it('loads reset credit expiries for one auth index on demand', async () => {
+diff --git a/web/src/pages/KeyQuotaPage.tsx b/web/src/pages/KeyQuotaPage.tsx
+index a532dbb7..9951e3b8 100644
+--- a/web/src/pages/KeyQuotaPage.tsx
++++ b/web/src/pages/KeyQuotaPage.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { useCallback, useEffect, useState, useRef } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { KeyViewerShell } from '@/features/key-viewer/KeyViewerShell';
+@@ -52,17 +53,17 @@ export function QuotaAccounts({accounts}: {accounts: ViewerQuotaAccount[]}) {
+   return <div className={styles.accounts}>{accounts.map((account) => <Card key={account.label}>
+       <h2>{account.label}</h2>
+       <p className={account.status === 'available' ? undefined : styles.notice}>{t(`key_quota.${account.status}`)}</p>
+-      {account.updated_at && <p>{t('key_quota.updated')}: {new Date(account.updated_at).toLocaleString()}</p>}
++      {account.updated_at && <p>{t('key_quota.updated')}: {new Date(account.updated_at).toLocaleString(browserDateLocale())}</p>}
+       {account.rows.map((row, index) => <div className={styles.row} key={index}>
+ 
+         <div><strong>{row.label}</strong>{row.metric && <span className={styles.metric}>{row.metric}</span>}</div>
+         <div>{t('key_quota.remaining')}: <strong>{quotaRemaining(row)}</strong>
+-          {row.remaining_percent == null && row.limit != null && ` / ${row.limit.toLocaleString()}`}
++          {row.remaining_percent == null && row.limit != null && ` / ${row.limit.toLocaleString(browserDateLocale())}`}
+           <QuotaFreshness capturedAt={row.captured_at ?? account.updated_at} source={row.source} account={account.label} resetAt={row.reset_at} stale={row.stale} />
+         </div>
+         {row.remaining_percent != null && <progress max={100} value={Math.max(0, Math.min(100, row.remaining_percent))} aria-label={`${row.label}: ${t('key_quota.remaining')}`} />}
+         {row.limit_reached && <p className={styles.notice}>{t('key_quota.exhausted')}</p>}
+-        {row.reset_at && <p>{t('key_quota.resets')}: {new Date(row.reset_at).toLocaleString()}</p>}
++        {row.reset_at && <p>{t('key_quota.resets')}: {new Date(row.reset_at).toLocaleString(browserDateLocale())}</p>}
+       </div>)}
+     </Card>)}</div>;
+ }
+diff --git a/web/src/pages/KeyRankingPage.tsx b/web/src/pages/KeyRankingPage.tsx
+index 8f9e4562..29a35f4b 100644
+--- a/web/src/pages/KeyRankingPage.tsx
++++ b/web/src/pages/KeyRankingPage.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { KeyViewerShell } from '@/features/key-viewer/KeyViewerShell';
+@@ -25,13 +26,12 @@ const KEY_RANKING_POLL_INTERVAL_MS = 60_000;
+ 
+ const isAbortError = (error: unknown) => error instanceof DOMException && error.name === 'AbortError';
+ 
+-const formatDateTime = (value: string, language: string): string => {
++const formatDateTime = (value: string, _language: string): string => {
+   const date = new Date(value);
+   if (Number.isNaN(date.getTime())) return value;
+-  return new Intl.DateTimeFormat(language, {
++  return new Intl.DateTimeFormat(browserDateLocale(), {
+     dateStyle: 'medium',
+     timeStyle: 'short',
+-    hour12: false,
+   }).format(date);
+ };
+ 
+diff --git a/web/src/pages/test/UsagePageCredentialTimeZone.test.tsx b/web/src/pages/test/UsagePageCredentialTimeZone.test.tsx
+index 34b51bfd..3eb39451 100644
+--- a/web/src/pages/test/UsagePageCredentialTimeZone.test.tsx
++++ b/web/src/pages/test/UsagePageCredentialTimeZone.test.tsx
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ // @vitest-environment happy-dom
+ 
+ import { act } from 'react';
+@@ -24,8 +26,8 @@ vi.mock('@/lib/api', async (importOriginal) => ({
+ import { UsagePage } from '../UsagePage';
+ 
+ const RESET_AT = '2026-05-12T03:15:00-07:00';
+-const PROJECT_RESET_LABEL = '05/12 18:15';
+-const COMPACT_RESET_LABEL = '05-12 18:15';
++const PROJECT_RESET_LABEL = '05/12, 18:15';
++const COMPACT_RESET_LABEL = '05/12, 18:15';
+ 
+ const credential = {
+   id: '1',
+diff --git a/web/src/utils/browserDateTime.ts b/web/src/utils/browserDateTime.ts
+new file mode 100644
+index 00000000..784b4f43
+--- /dev/null
++++ b/web/src/utils/browserDateTime.ts
+@@ -0,0 +1,25 @@
++// Display preferences follow the browser, independently of UI language.
++export function browserDateLocale(): string[] | undefined {
++  if (typeof navigator === 'undefined') return undefined;
++  return navigator.languages?.length ? [...navigator.languages] : navigator.language ? [navigator.language] : undefined;
++}
++export function browserTimeZone(): string {
++  return new Intl.DateTimeFormat().resolvedOptions().timeZone;
++}
++const formatters = new Map<string, Intl.DateTimeFormat>();
++export function browserDateTimeFormat(options: Intl.DateTimeFormatOptions = {}): Intl.DateTimeFormat {
++  const locales = browserDateLocale();
++  const resolved = { ...options, timeZone: options.timeZone ?? browserTimeZone() };
++  const key = JSON.stringify([locales, resolved]);
++  let formatter = formatters.get(key);
++  if (!formatter) {
++    formatter = new Intl.DateTimeFormat(locales, resolved);
++    if (formatters.size >= 64) formatters.delete(formatters.keys().next().value!);
++    formatters.set(key, formatter);
++  }
++  return formatter;
++}
++export function formatBrowserDateTime(value: string | number | Date, options: Intl.DateTimeFormatOptions = { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }): string {
++  const date = value instanceof Date ? value : new Date(value);
++  return Number.isFinite(date.getTime()) ? browserDateTimeFormat(options).format(date) : '—';
++}
+diff --git a/web/src/utils/resetRequestId.ts b/web/src/utils/resetRequestId.ts
+new file mode 100644
+index 00000000..f5bec1a2
+--- /dev/null
++++ b/web/src/utils/resetRequestId.ts
+@@ -0,0 +1,9 @@
++// getRandomValues also works when this LAN page is served over HTTP.
++export function createResetRequestId(): string {
++  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID()
++  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
++  bytes[6] = (bytes[6] & 15) | 64
++  bytes[8] = (bytes[8] & 63) | 128
++  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
++  return [hex.slice(0,8), hex.slice(8,12), hex.slice(12,16), hex.slice(16,20), hex.slice(20)].join('-')
++}
+diff --git a/web/src/utils/usage/customRange.ts b/web/src/utils/usage/customRange.ts
+index cb9910a3..385b16e0 100644
+--- a/web/src/utils/usage/customRange.ts
++++ b/web/src/utils/usage/customRange.ts
+@@ -1,3 +1,4 @@
++import { browserDateLocale, browserDateTimeFormat, browserTimeZone } from '@/utils/browserDateTime';
+ import { createZonedPartsReader, disambiguateTimeLabels, type ZonedParts } from './timeLabels';
+ import type { UsageCustomRange, UsageCustomRangeUnit, UsageTimeRange } from '@/lib/types';
+ import { isSelectableUsageRange } from './rangeQuery';
+@@ -63,12 +64,6 @@ const formatZonedRFC3339Hour = (timestampMs: number, parts: ZonedParts): string
+   return `${formatDateKey(parts)}T${pad2(parts.hour)}:00:00${sign}${pad2(Math.floor(absoluteOffset / 60))}:${pad2(absoluteOffset % 60)}`;
+ };
+ 
+-const formatDayLabel = (dateKey: string, locale?: string): string => {
+-  const [year, month, day] = dateKey.split('-').map(Number);
+-  return new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+-    .format(new Date(Date.UTC(year, month - 1, day)));
+-};
+-
+ interface CustomDayBounds {
+   firstCalendarMs: number;
+   firstDay: string;
+@@ -100,24 +95,23 @@ const getCustomDayBounds = ({ nowMs, timeZone, maxDayRangeDays }: CustomRangeClo
+   };
+ };
+ 
+-export const buildCustomWeekdayLabels = (locale?: string): string[] => {
+-  const formatter = new Intl.DateTimeFormat(locale, { weekday: 'short', timeZone: 'UTC' });
++export const buildCustomWeekdayLabels = (_locale?: string): string[] => {
++  const formatter = new Intl.DateTimeFormat(browserDateLocale(), { weekday: 'short', timeZone: 'UTC' });
+   const sunday = Date.UTC(2024, 0, 7);
+   return Array.from({ length: 7 }, (_, index) => formatter.format(new Date(sunday + index * DAY_MS)));
+ };
+ 
+ export const buildCustomDaySlots = (options: CustomRangeClockOptions): UsageCustomRangeSlot[] => {
+-  const { locale } = options;
+   const { firstCalendarMs, slotCount } = getCustomDayBounds(options);
+-  const labelFormatter = new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
++  const labelFormatter = new Intl.DateTimeFormat(browserDateLocale(), { month: 'short', day: 'numeric', timeZone: 'UTC' });
+   return Array.from({ length: slotCount }, (_, index) => {
+     const date = new Date(firstCalendarMs + index * DAY_MS);
+     const value = formatDateKey({ year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() });
+-    return { value, label: labelFormatter.format(date), dateLabel: value, current: index === slotCount - 1 };
++    return { value, label: labelFormatter.format(date), dateLabel: labelFormatter.format(date), current: index === slotCount - 1 };
+   });
+ };
+ 
+-export const buildCustomHourSlots = ({ nowMs, timeZone, locale }: CustomRangeClockOptions): UsageCustomRangeSlot[] => {
++export const buildCustomHourSlots = ({ nowMs, timeZone }: CustomRangeClockOptions): UsageCustomRangeSlot[] => {
+   const readParts = createZonedPartsReader(timeZone);
+   const current = readParts(nowMs);
+   const currentHourStartMs = nowMs
+@@ -129,12 +123,12 @@ export const buildCustomHourSlots = ({ nowMs, timeZone, locale }: CustomRangeClo
+     const parts = readParts(timestampMs);
+     return {
+       value: formatZonedRFC3339Hour(timestampMs, parts),
+-      label: `${pad2(parts.hour)}:00`,
+-      dateLabel: formatDayLabel(formatDateKey(parts), locale),
++      label: browserDateTimeFormat({hour: '2-digit', minute: '2-digit'}).format(new Date(timestampMs)),
++      dateLabel: browserDateTimeFormat({month: 'short', day: 'numeric'}).format(new Date(timestampMs)),
+       current: index === 23,
+     };
+   });
+-  const labels = disambiguateTimeLabels(slots.map((slot) => slot.value), timeZone, (_, index) => slots[index].label);
++  const labels = disambiguateTimeLabels(slots.map((slot) => slot.value), browserTimeZone(), (_, index) => slots[index].label);
+   return slots.map((slot, index) => ({ ...slot, label: labels[index] }));
+ };
+ 
+@@ -250,26 +244,25 @@ export const clampStoredUsageRangeStateToCurrentBounds = (
+ 
+ export const formatCustomRangeLabel = (
+   range: UsageCustomRange,
+-  { locale, timeZone }: { locale?: string; timeZone: string },
++  _options: { locale?: string; timeZone: string },
+ ): string => {
+   if (range.unit === 'day') {
+     const parseDateKey = (value: string) => {
+       const [year, month, day] = value.split('-').map(Number);
+       return new Date(Date.UTC(year, month - 1, day));
+     };
+-    const formatter = new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric', timeZone: 'UTC' });
++    const formatter = new Intl.DateTimeFormat(browserDateLocale(), { month: 'short', day: 'numeric', timeZone: 'UTC' });
+     return `${formatter.format(parseDateKey(range.start))} – ${formatter.format(parseDateKey(range.end))}`;
+   }
+ 
+   const start = new Date(range.start);
+   const end = new Date(range.end);
+-  const formatter = new Intl.DateTimeFormat(locale, {
+-    timeZone,
++  const formatter = new Intl.DateTimeFormat(browserDateLocale(), {
++    timeZone: browserTimeZone(),
+     hour: '2-digit',
+     minute: '2-digit',
+-    hourCycle: 'h23',
+   });
+-  const labels = disambiguateTimeLabels([range.start, range.end], timeZone, (_, index) => formatter.format(index === 0 ? start : end));
++  const labels = disambiguateTimeLabels([range.start, range.end], browserTimeZone(), (_, index) => formatter.format(index === 0 ? start : end));
+   return `${labels[0]} – ${labels[1]}`;
+ };
+ 
+diff --git a/web/src/utils/usage/test/customRange.test.ts b/web/src/utils/usage/test/customRange.test.ts
+index 688ea3f9..c97c5405 100644
+--- a/web/src/utils/usage/test/customRange.test.ts
++++ b/web/src/utils/usage/test/customRange.test.ts
+@@ -1,3 +1,5 @@
++import { setupBrowserPreferences, setBrowserPreferences } from '@/../tests/browserPreferences'
++setupBrowserPreferences('Asia/Shanghai')
+ import { describe, expect, it } from 'vitest';
+ import {
+   buildCustomDaySlots,
+@@ -27,7 +29,7 @@ describe('custom usage range slots', () => {
+ 
+   it('localizes the custom calendar weekday headings', () => {
+     expect(buildCustomWeekdayLabels('en-US')).toEqual(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
+-    expect(buildCustomWeekdayLabels('zh-CN')).toEqual(['周日', '周一', '周二', '周三', '周四', '周五', '周六']);
++    expect(buildCustomWeekdayLabels('zh-CN')).toEqual(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
+   });
+ 
+   it('builds exactly 24 project-timezone hour slots including the current hour', () => {
+@@ -95,7 +97,7 @@ describe('custom usage range slots', () => {
+     });
+   });
+ 
+-  it('formats applied custom ranges in the project timezone', () => {
++  it('formats applied custom ranges in the browser timezone', () => {
+     expect(formatCustomRangeLabel({ unit: 'day', start: '2026-06-18', end: '2026-07-17' }, {
+       locale: 'en-US',
+       timeZone: 'Asia/Shanghai',
+@@ -203,16 +205,17 @@ describe('custom usage range slots', () => {
+     expect(parseLegacyCustomRange('{"start":"not-a-date","end":"2026-07-17"}')).toBeNull();
+   });
+ 
+-  it('formats Custom hour row dates with the Keeper locale', () => {
++  it('formats Custom hour row dates with the browser locale', () => {
+     const slots = buildCustomHourSlots({
+       nowMs: SHANGHAI_NOW,
+       timeZone: 'Asia/Shanghai',
+       locale: 'zh-CN',
+     });
+ 
+-    expect(slots[0].dateLabel).toBe('7月16日');
++    expect(slots[0].dateLabel).toBe('Jul 16');
+   });
+   it('labels repeated hours while preserving RFC3339 selection values and defaults', () => {
++    setBrowserPreferences('America/Los_Angeles')
+     const options = { nowMs: Date.parse('2026-11-01T05:30:00-08:00'), timeZone: 'America/Los_Angeles', locale: 'en' };
+     const slots = buildCustomHourSlots(options);
+     const repeated = slots.filter(slot => slot.value.startsWith('2026-11-01T01:00:00'));
+diff --git a/web/tests/browserPreferences.ts b/web/tests/browserPreferences.ts
+new file mode 100644
+index 00000000..94a734bb
+--- /dev/null
++++ b/web/tests/browserPreferences.ts
+@@ -0,0 +1,14 @@
++import { afterEach, beforeEach, vi } from 'vitest'
++const NativeDateTimeFormat = Intl.DateTimeFormat
++// Give UI fixtures explicit browser preferences, independent of their API timezone.
++export function setBrowserPreferences(timeZone = 'UTC', locale = 'en-US-u-hc-h23') {
++  vi.spyOn(navigator, 'languages', 'get').mockReturnValue([locale])
++  vi.spyOn(navigator, 'language', 'get').mockReturnValue(locale)
++  vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function(locales, options) {
++    return new NativeDateTimeFormat(locales, { timeZone, ...options })
++  } as typeof Intl.DateTimeFormat)
++}
++export function setupBrowserPreferences(timeZone = 'UTC', locale = 'en-US-u-hc-h23') {
++  beforeEach(() => setBrowserPreferences(timeZone, locale))
++  afterEach(() => vi.restoreAllMocks())
++}

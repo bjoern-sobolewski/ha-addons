@@ -1,0 +1,2756 @@
+diff --git a/internal/api/live.go b/internal/api/live.go
+new file mode 100644
+index 00000000..269dfae0
+--- /dev/null
++++ b/internal/api/live.go
+@@ -0,0 +1,108 @@
++package api
++
++import (
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/live"
++	"encoding/json"
++	"fmt"
++	"github.com/gin-gonic/gin"
++	"net/http"
++	"time"
++)
++
++// Changes contain only topic names. All values still pass through the existing scoped read APIs.
++func (h *authHandler) registerLiveRoutes(router gin.IRoutes, hub *live.Hub) {
++	router.GET("/live", h.roleMiddleware(auth.RoleAdmin, auth.RoleReadOnly, auth.RoleAPIKeyViewer), func(c *gin.Context) {
++		if hub == nil {
++			c.Status(http.StatusServiceUnavailable)
++			return
++		}
++		group := ""
++		viewer := false
++		if value, ok := c.Get(authSessionContextKey); ok {
++			session := value.(auth.Session)
++			viewer = session.Role == auth.RoleAPIKeyViewer
++			if viewer {
++				resolved := c.MustGet(authResolvedContextKey).(resolvedSessionToken)
++				key, valid := h.activeViewerAPIKey(c, resolved, session)
++				if !valid {
++					c.Status(http.StatusUnauthorized)
++					return
++				}
++				group = key.APIKey
++			}
++		}
++		subscription := hub.Subscribe(group, viewer)
++		if subscription == nil {
++			c.Status(http.StatusServiceUnavailable)
++			return
++		}
++		defer subscription.Close()
++		c.Header("Content-Type", "text/event-stream")
++		c.Header("Cache-Control", "no-store")
++		c.Header("X-Accel-Buffering", "no")
++		sequence := 0
++		send := func(topics []string) bool {
++			if !h.liveSessionValid(c, group) {
++				return false
++			}
++			_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(10 * time.Second))
++			sequence++
++			payload, _ := json.Marshal(gin.H{"topics": topics})
++			_, err := fmt.Fprintf(c.Writer, "id: %d\nevent: change\ndata: %s\n\n", sequence, payload)
++			c.Writer.Flush()
++			return err == nil
++		}
++		if !send([]string{"sync"}) {
++			return
++		}
++		heartbeat := time.NewTicker(15 * time.Second)
++		defer heartbeat.Stop()
++		for {
++			select {
++			case <-c.Request.Context().Done():
++				return
++			case <-subscription.Wake:
++				timer := time.NewTimer(150 * time.Millisecond)
++				select {
++				case <-c.Request.Context().Done():
++					timer.Stop()
++					return
++				case <-timer.C:
++				}
++				topics := subscription.Drain()
++				if len(topics) == 0 {
++					continue
++				}
++				if !send(topics) {
++					return
++				}
++			case <-heartbeat.C:
++				if !send([]string{"clock"}) {
++					return
++				}
++			}
++		}
++	})
++}
++func (h *authHandler) liveSessionValid(c *gin.Context, group string) bool {
++	if h == nil || !h.config.Enabled {
++		return true
++	}
++	resolved := c.MustGet(authResolvedContextKey).(resolvedSessionToken)
++	session, ok := h.sessions.Get(resolved.Token)
++	if !ok || !sessionMatchesResolvedSource(session, resolved) {
++		return false
++	}
++	if session.Role == auth.RoleReadOnly && !h.readOnlyEnabled() {
++		return false
++	}
++	if session.Role == auth.RoleAPIKeyViewer {
++		if h.cpaAPIKeyProvider == nil {
++			return false
++		}
++		key, err := h.cpaAPIKeyProvider.FindActiveCPAAPIKeyByID(c.Request.Context(), session.CPAAPIKeyID)
++		return err == nil && key.APIKey == group
++	}
++	return session.Role == auth.RoleAdmin || session.Role == auth.RoleReadOnly
++}
+diff --git a/internal/api/router.go b/internal/api/router.go
+index 77a595b8..78f8a103 100644
+--- a/internal/api/router.go
++++ b/internal/api/router.go
+@@ -13,6 +13,7 @@ import (
+ 	"time"
+ 
+ 	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/live"
+ 	"cpa-usage-keeper/internal/logging"
+ 	"cpa-usage-keeper/internal/poller"
+ 	"cpa-usage-keeper/internal/quota"
+@@ -51,6 +52,7 @@ type StatusRouteConfig struct {
+ }
+ 
+ type OptionalProviders struct {
++	Live               *live.Hub
+ 	Ranking            rankinghttpapi.Provider
+ 	LocalRanking       rankinghttpapi.LocalProvider
+ 	CostReadGate       *service.CostReadGate
+@@ -132,6 +134,9 @@ func NewRouter(
+ 		statusConfig = optionalProviders[0].Status
+ 	}
+ 	authHandler.setCPAAPIKeyProvider(cpaAPIKeyProvider)
++	if len(optionalProviders) > 0 {
++		authHandler.registerLiveRoutes(apiV1, optionalProviders[0].Live)
++	}
+ 	requestLogDownloadTokens := newRequestLogDownloadTokenStore()
+ 
+ 	registerUsageEventRequestLogDownloadTokenRoutes(apiV1, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
+@@ -150,6 +155,18 @@ func NewRouter(
+ 
+ 	adminProtected := apiV1.Group("")
+ 	adminProtected.Use(authHandler.adminMiddleware())
++	if len(optionalProviders) > 0 && optionalProviders[0].Live != nil {
++		adminProtected.Use(func(c *gin.Context) {
++			c.Next()
++			// Cache lookups use POST but do not change state. Never turn a live
++			// cache read into another invalidation and refresh loop.
++			if c.Request.Method != "GET" && c.Request.Method != "HEAD" && c.FullPath() != basePath+"/api/v1/quota/cache" && c.Writer.Status() < 300 {
++				optionalProviders[0].Live.Publish("accounts")
++				optionalProviders[0].Live.Publish("quota")
++				optionalProviders[0].Live.Publish("usage")
++			}
++		})
++	}
+ 	adminProtected.Use(costReadMiddleware(costReadGate, basePath))
+ 	registerStatusRoutes(adminProtected, statusProvider, statusConfig)
+ 	registerUpdateRoutes(adminProtected, nil)
+diff --git a/internal/api/test/live_test.go b/internal/api/test/live_test.go
+new file mode 100644
+index 00000000..8f4527d4
+--- /dev/null
++++ b/internal/api/test/live_test.go
+@@ -0,0 +1,98 @@
++package test
++
++import (
++	"bufio"
++	"context"
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/live"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestLiveRequiresAuthScopesTopicsAndStopsRevokedSessions(t *testing.T) {
++	sessions := auth.NewSessionManager(time.Hour)
++	hub := live.New()
++	config := AuthConfig{Enabled: true, LoginPassword: "fixture", SessionTTL: time.Hour}
++	keys := &authLoginKeyStub{row: entities.CPAAPIKey{ID: 42, APIKey: "a"}}
++	router := NewRouter(nil, nil, nil, nil, config, NewAuthHandler(config, sessions), "", OptionalProviders{Live: hub, CPAAPIKeys: keys})
++	denied := serveAPIGet(router, "/api/v1/live")
++	if denied.Code != 401 {
++		t.Fatal(denied.Code)
++	}
++	server := httptest.NewServer(router)
++	defer server.Close()
++	token, _, err := sessions.CreateAPIKeyViewer(42)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	req, _ := http.NewRequestWithContext(ctx, "GET", server.URL+"/api/v1/live", nil)
++	req.AddCookie(&http.Cookie{Name: standardSessionCookieName, Value: token})
++	resp, err := server.Client().Do(req)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != 200 || resp.Header.Get("X-Accel-Buffering") != "no" {
++		t.Fatal("stream headers")
++	}
++	scanner := bufio.NewScanner(resp.Body)
++	next := func() string {
++		for scanner.Scan() {
++			if strings.HasPrefix(scanner.Text(), "data:") {
++				return scanner.Text()
++			}
++		}
++		return ""
++	}
++	if !strings.Contains(next(), "sync") {
++		t.Fatal("missing resync")
++	}
++	hub.Publish("usage", "b")
++	hub.Publish("accounts")
++	hub.Publish("quota")
++	frame := next()
++	if !strings.Contains(frame, "quota") || strings.Contains(frame, "usage") || strings.Contains(frame, "accounts") || strings.Contains(frame, token) {
++		t.Fatal("unscoped frame", frame)
++	}
++	hub.Publish("usage", "a")
++	if !strings.Contains(next(), "usage") {
++		t.Fatal("missing committed usage")
++	}
++	sessions.Delete(token)
++	hub.Publish("quota")
++	if next() != "" {
++		t.Fatal("revoked session received data")
++	}
++}
++
++func TestLiveCacheReadsDoNotPublishButMutationsDo(t *testing.T) {
++	for _, base := range []string{"", "/keeper"} {
++		hub := live.New()
++		sub := hub.Subscribe("", false)
++		router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, base, OptionalProviders{Live: hub, Quota: &quotaProviderStub{}})
++		for _, route := range []struct {
++			path string
++			want bool
++		}{{"/quota/cache", false}, {"/quota/inspection", true}} {
++			response := httptest.NewRecorder()
++			req := httptest.NewRequest("POST", base+"/api/v1"+route.path, strings.NewReader(`{"auth_indexes":["fixture"]}`))
++			req.Header.Set("Content-Type", "application/json")
++			req.Header.Set("X-CPA-Usage-Keeper-Request", "fetch")
++			router.ServeHTTP(response, req)
++			if response.Code != 200 {
++				t.Fatalf("%s: %d %s", route.path, response.Code, response.Body.String())
++			}
++			if got := len(sub.Drain()) > 0; got != route.want {
++				t.Fatalf("%s invalidated=%v, want %v", route.path, got, route.want)
++			}
++		}
++		sub.Close()
++	}
++}
+diff --git a/internal/app/app.go b/internal/app/app.go
+index f9b0c26e..1d8415fc 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -15,6 +15,7 @@ import (
+ 	"cpa-usage-keeper/internal/auth"
+ 	"cpa-usage-keeper/internal/config"
+ 	"cpa-usage-keeper/internal/cpa"
++	"cpa-usage-keeper/internal/live"
+ 	"cpa-usage-keeper/internal/logging"
+ 	"cpa-usage-keeper/internal/oidc"
+ 	"cpa-usage-keeper/internal/poller"
+@@ -156,13 +157,15 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	liveHub := live.New()
+ 	cpaClient := cpa.NewClient(cfg.CPABaseURL, cfg.CPAManagementKey, cfg.RequestTimeout, cfg.TLSSkipVerify)
+ 	localRankingService.SetAPIKeyNameWriter(cpaClient)
+ 	quotaService := quota.NewServiceWithOptions(db, cpaClient, quota.ServiceOptions{
+-		UsageHeaderSnapshotFlushInterval: time.Second,
++		UsageHeaderSnapshotFlushInterval: 250 * time.Millisecond,
+ 		RefreshWorkerLimit:               cfg.QuotaRefreshWorkerLimit,
+ 		QuotaUpstreamResponsesEnabled:    cfg.QuotaUpstreamResponsesEnabled,
+ 	})
++	quotaService.Live = liveHub
+ 	prepared := false
+ 	defer func() {
+ 		if !prepared {
+@@ -173,11 +176,13 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+ 	}()
+ 	// 单 writer aggregation runner 只维护 rollups/Identity，并在 App.Run 时主动追平。
+ 	usageAggregationRunner := poller.NewUsageAggregationRunner(db)
++	usageAggregationRunner.Live = liveHub
+ 	pluginAPIKeyRunner := poller.NewPluginAPIKeyRunner(db)
+ 	// 同一个版本协调器连接后台快照与所有凭据修改入口，网络调用仍使用原有路径锁。
+ 	credentialMetadata := &service.CredentialMetadataCoordinator{}
+ 	// syncService 仍然是 metadata 和 usage 处理共享的业务服务入口。
+ 	syncService := service.NewSyncServiceWithOptions(db, service.SyncServiceOptions{
++		Live:                  liveHub,
+ 		BaseURL:               cfg.CPABaseURL,
+ 		Client:                cpaClient,
+ 		PricingCatalog:        pricingCatalog,
+@@ -197,7 +202,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+ 	// redisProcessRunner 仍然只处理本地 inbox 到 usage_events 的消费。
+ 	redisProcessRunner := poller.NewRedisProcessRunner(syncService)
+ 	// errorEventService 同时承担 Errors runner 的直接写入和详情 API 的分页读取。
+-	errorEventService := service.NewErrorEventService(db)
++	errorEventService := service.NewErrorEventService(db, liveHub)
+ 	// Errors 使用独立 RESP source，固定订阅 errors channel，不修改或复用 Usage subscriber 生命周期。
+ 	redisErrorSubscribeSource := poller.NewRedisErrorSubscribeSource(poller.RedisSubscribeOptions{
+ 		BaseURL:       cfg.CPABaseURL,
+@@ -302,6 +307,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+ 			authHandler,
+ 			cfg.AppBasePath,
+ 			api.OptionalProviders{
++				Live:          liveHub,
+ 				UsageIdentity: usageIdentityService,
+ 				CostReadGate:  costReadGate,
+ 				ErrorEvents:   errorEventService,
+diff --git a/internal/cpa/live.go b/internal/cpa/live.go
+new file mode 100644
+index 00000000..e8330cc8
+--- /dev/null
++++ b/internal/cpa/live.go
+@@ -0,0 +1,53 @@
++package cpa
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"strings"
++	"time"
++)
++
++// WatchLive reads only CPA's local state stream. It never contacts a provider.
++func (c *Client) WatchLive(ctx context.Context, changed func([]string)) error {
++	streamCtx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	request, err := http.NewRequestWithContext(streamCtx, http.MethodGet, c.baseURL+"/v8/management/live", nil)
++	if err != nil {
++		return err
++	}
++	request.Header.Set("Authorization", "Bearer "+c.managementKey)
++	request.Header.Set("Accept", "text/event-stream")
++	client := &http.Client{Transport: c.httpClient.Transport}
++	idle := time.AfterFunc(45*time.Second, cancel)
++	defer idle.Stop()
++	response, err := client.Do(request)
++	if err != nil {
++		return fmt.Errorf("CPA live connection unavailable")
++	}
++	defer response.Body.Close()
++	if response.StatusCode != 200 || !strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
++		return fmt.Errorf("CPA live status %d", response.StatusCode)
++	}
++	scanner := bufio.NewScanner(response.Body)
++	scanner.Buffer(make([]byte, 4096), 65536)
++	for scanner.Scan() {
++		idle.Reset(45 * time.Second)
++		line := scanner.Text()
++		if !strings.HasPrefix(line, "data:") {
++			continue
++		}
++		var event struct {
++			Topics []string `json:"topics"`
++		}
++		if json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &event) == nil {
++			changed(event.Topics)
++		}
++	}
++	if err := scanner.Err(); err != nil {
++		return err
++	}
++	return fmt.Errorf("CPA live connection ended")
++}
+diff --git a/internal/cpa/live_test.go b/internal/cpa/live_test.go
+new file mode 100644
+index 00000000..f7da9e08
+--- /dev/null
++++ b/internal/cpa/live_test.go
+@@ -0,0 +1,38 @@
++package cpa
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++)
++
++func TestWatchLiveAuthenticationAndCancellation(t *testing.T) {
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/v8/management/live" || r.URL.RawQuery != "" || r.Header.Get("Authorization") != "Bearer fixture" {
++			t.Error("wrong stream request")
++		}
++		w.Header().Set("Content-Type", "text/event-stream")
++		fmt.Fprint(w, `data: {"topics":[`)
++		w.(http.Flusher).Flush()
++		fmt.Fprint(w, `"quota"]}`+"\n\n")
++		w.(http.Flusher).Flush()
++		<-r.Context().Done()
++	}))
++	defer server.Close()
++	client := &Client{baseURL: server.URL, managementKey: "fixture", httpClient: server.Client()}
++	seen := false
++	_ = client.WatchLive(ctx, func(topics []string) {
++		if len(topics) == 1 && topics[0] == "quota" {
++			seen = true
++			cancel()
++		}
++	})
++	if !seen {
++		t.Fatal("stream did not deliver fragmented change")
++	}
++}
+diff --git a/internal/cpa/quota_observations.go b/internal/cpa/quota_observations.go
+index fb82e9c0..c4481984 100644
+--- a/internal/cpa/quota_observations.go
++++ b/internal/cpa/quota_observations.go
+@@ -8,12 +8,13 @@ import (
+ )
+ 
+ type QuotaObservation struct {
+-	AuthIndex  string      `json:"auth_index"`
+-	Provider   string      `json:"provider"`
+-	Window     string      `json:"window"`
+-	Headers    http.Header `json:"headers"`
+-	ObservedAt time.Time   `json:"observed_at"`
+-	Source     string      `json:"source"`
++	ResetCreditsAvailableCount *int        `json:"reset_credits_available_count,omitempty"`
++	AuthIndex                  string      `json:"auth_index"`
++	Provider                   string      `json:"provider"`
++	Window                     string      `json:"window"`
++	Headers                    http.Header `json:"headers"`
++	ObservedAt                 time.Time   `json:"observed_at"`
++	Source                     string      `json:"source"`
+ }
+ 
+ func (c *Client) FetchQuotaObservations(ctx context.Context) ([]QuotaObservation, error) {
+diff --git a/internal/live/hub.go b/internal/live/hub.go
+new file mode 100644
+index 00000000..0eb31591
+--- /dev/null
++++ b/internal/live/hub.go
+@@ -0,0 +1,72 @@
++// Package live carries bounded, non-blocking invalidations, never account data or credentials.
++package live
++
++import "sync"
++
++type Hub struct {
++	mu          sync.Mutex
++	subscribers map[*Subscription]struct{}
++}
++type Subscription struct {
++	hub    *Hub
++	Group  string
++	Viewer bool
++	Wake   chan struct{}
++	topics map[string]bool
++}
++
++func New() *Hub { return &Hub{subscribers: make(map[*Subscription]struct{})} }
++func (h *Hub) Subscribe(group string, viewer bool) *Subscription {
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	if len(h.subscribers) >= 256 {
++		return nil
++	}
++	s := &Subscription{hub: h, Group: group, Viewer: viewer, Wake: make(chan struct{}, 1), topics: map[string]bool{}}
++	h.subscribers[s] = struct{}{}
++	return s
++}
++func (s *Subscription) Close() {
++	s.hub.mu.Lock()
++	defer s.hub.mu.Unlock()
++	delete(s.hub.subscribers, s)
++}
++func (s *Subscription) Drain() []string {
++	s.hub.mu.Lock()
++	defer s.hub.mu.Unlock()
++	out := make([]string, 0, len(s.topics))
++	for topic := range s.topics {
++		out = append(out, topic)
++	}
++	s.topics = map[string]bool{}
++	return out
++}
++func (h *Hub) Publish(topic string, groups ...string) {
++	if h == nil {
++		return
++	}
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	for s := range h.subscribers {
++		if s.Viewer && topic != "usage" && topic != "quota" {
++			continue
++		}
++		if s.Viewer && topic == "usage" && len(groups) > 0 {
++			match := false
++			for _, group := range groups {
++				if group == s.Group {
++					match = true
++					break
++				}
++			}
++			if !match {
++				continue
++			}
++		}
++		s.topics[topic] = true
++		select {
++		case s.Wake <- struct{}{}:
++		default:
++		}
++	}
++}
+diff --git a/internal/live/hub_test.go b/internal/live/hub_test.go
+new file mode 100644
+index 00000000..db087869
+--- /dev/null
++++ b/internal/live/hub_test.go
+@@ -0,0 +1,53 @@
++package live
++
++import "testing"
++
++func TestAudienceAndCoalescing(t *testing.T) {
++	h := New()
++	admin := h.Subscribe("", false)
++	a := h.Subscribe("a", true)
++	b := h.Subscribe("b", true)
++	defer admin.Close()
++	defer a.Close()
++	defer b.Close()
++	for i := 0; i < 10000; i++ {
++		h.Publish("usage", "a")
++		h.Publish("accounts")
++		h.Publish("quota")
++	}
++	if len(admin.Drain()) != 3 {
++		t.Fatal("lost topics for slow subscriber")
++	}
++	if len(a.Drain()) != 2 {
++		t.Fatal("viewer missed scoped usage/quota")
++	}
++	topics := b.Drain()
++	if len(topics) != 1 || topics[0] != "quota" {
++		t.Fatalf("cross-group notification: %v", topics)
++	}
++	a.Close()
++	h.Publish("usage", "a")
++	if len(a.Drain()) != 0 {
++		t.Fatal("closed subscriber retained")
++	}
++}
++func TestSubscriberLimit(t *testing.T) {
++	h := New()
++	var first *Subscription
++	for i := 0; i < 256; i++ {
++		s := h.Subscribe("", false)
++		if s == nil {
++			t.Fatal(i)
++		}
++		if i == 0 {
++			first = s
++		}
++	}
++	if h.Subscribe("", false) != nil {
++		t.Fatal("unbounded subscriptions")
++	}
++	first.Close()
++	if h.Subscribe("", false) == nil {
++		t.Fatal("slot not released")
++	}
++}
+diff --git a/internal/poller/usage_aggregation_runner.go b/internal/poller/usage_aggregation_runner.go
+index 420e87ce..76bda763 100644
+--- a/internal/poller/usage_aggregation_runner.go
++++ b/internal/poller/usage_aggregation_runner.go
+@@ -2,6 +2,7 @@ package poller
+ 
+ import (
+ 	"context"
++	"cpa-usage-keeper/internal/live"
+ 	"errors"
+ 	"fmt"
+ 	"sync"
+@@ -60,6 +61,8 @@ type UsageAggregationRunnerOptions struct {
+ 
+ // UsageAggregationRunner 在一个 goroutine 内公平调度共享 rollups 与既有 Identity。
+ type UsageAggregationRunner struct {
++	Live             *live.Hub
++	liveGroups       map[string]bool
+ 	db               *gorm.DB
+ 	now              func() time.Time
+ 	debounceInterval time.Duration
+@@ -137,6 +140,12 @@ func (r *UsageAggregationRunner) NotifyUsageEventsCommitted(events []entities.Us
+ 		r.pendingTargetEventID = maxEventID
+ 	}
+ 	r.identityTargetGeneration++
++	if r.liveGroups == nil {
++		r.liveGroups = map[string]bool{}
++	}
++	for _, event := range events {
++		r.liveGroups[event.APIGroupKey] = true
++	}
+ 	r.mu.Unlock()
+ 	r.signalWake()
+ }
+@@ -385,7 +394,17 @@ func (r *UsageAggregationRunner) runPreparedOnce(ctx context.Context) (UsageAggr
+ 			r.rollupsReachedTarget = true
+ 		}
+ 		r.completeRollupRoundIfReadyLocked()
++		groups := make([]string, 0, len(r.liveGroups))
++		for group := range r.liveGroups {
++			groups = append(groups, group)
++		}
++		if reachedTarget && r.pendingTargetEventID <= targetEventID {
++			r.liveGroups = nil
++		}
+ 		r.mu.Unlock()
++		if processed {
++			r.Live.Publish("usage", groups...)
++		}
+ 		return result, nil
+ 
+ 	case UsageAggregationKindIdentity:
+@@ -412,6 +431,9 @@ func (r *UsageAggregationRunner) runPreparedOnce(ctx context.Context) (UsageAggr
+ 		identityStillPending := r.identityWorkPendingLocked()
+ 		r.mu.Unlock()
+ 		result.Processed = batch.ProcessedIdentities > 0 || !batch.ReachedEnd || identityStillPending
++		if result.Processed {
++			r.Live.Publish("accounts")
++		}
+ 		return result, nil
+ 
+ 	default:
+diff --git a/internal/quota/cache_invalidation.go b/internal/quota/cache_invalidation.go
+index 3144f273..b6ebaa59 100644
+--- a/internal/quota/cache_invalidation.go
++++ b/internal/quota/cache_invalidation.go
+@@ -20,6 +20,7 @@ func (s *Service) InvalidateStoredCostCache() {
+ 	s.usageHeaderPending = make(map[string]*UsageHeaderSnapshot, usageHeaderPendingIdentityLimit)
+ 	s.usageHeaderMu.Unlock()
+ 	s.refreshMu.Unlock()
++	s.Live.Publish("quota")
+ }
+ 
+ // quotaCacheGeneration 为异步刷新和 Header 工作固定启动代数；读取必须受 refreshMu 保护。
+diff --git a/internal/quota/codex_quota_history_scheduler.go b/internal/quota/codex_quota_history_scheduler.go
+index 04673241..3dd38dfb 100644
+--- a/internal/quota/codex_quota_history_scheduler.go
++++ b/internal/quota/codex_quota_history_scheduler.go
+@@ -506,6 +506,7 @@ func (s *Service) flushCodexQuotaHistory(state *codexQuotaHistoryRunnerState, pe
+ 		return
+ 	}
+ 
++	s.Live.Publish("quota")
+ 	// 成功后稳定尾段才可从内存删除；语义变化也同步刷新五分钟物化时钟。
+ 	for _, key := range stableKeys {
+ 		delete(state.Stable, key)
+diff --git a/internal/quota/header_cache_worker.go b/internal/quota/header_cache_worker.go
+index 012b1937..5f97903b 100644
+--- a/internal/quota/header_cache_worker.go
++++ b/internal/quota/header_cache_worker.go
+@@ -19,7 +19,7 @@ import (
+ 
+ const (
+ 	// usageHeaderSnapshotFlushInterval 是 usage response header 快照的默认批量落 cache 间隔。
+-	usageHeaderSnapshotFlushInterval = time.Minute
++	usageHeaderSnapshotFlushInterval = 250 * time.Millisecond
+ 	// usageHeaderPendingIdentityLimit 限制一个窗口内不同身份的内存占用；满载只保留 ObservedAt 最新项。
+ 	usageHeaderPendingIdentityLimit = 1000
+ )
+@@ -87,7 +87,7 @@ func (s *Service) runUsageHeaderSnapshotWorker() {
+ 	defer close(s.usageHeaderDoneCh)
+ 	// 优先使用 service 构造时保存的间隔，方便测试通过 options 覆盖。
+ 	flushInterval := s.usageHeaderFlushInterval
+-	// 非正间隔没有业务意义，统一回退到 1 分钟默认值。
++	// Invalid intervals use the bounded live-cache batching window.
+ 	if flushInterval <= 0 {
+ 		flushInterval = usageHeaderSnapshotFlushInterval
+ 	}
+@@ -999,6 +999,7 @@ func (s *Service) mergeUsageHeaderQuotaCache(authIndex string, response CheckRes
+ 		RefreshedAt:       observedAt,
+ 		UpstreamResponses: upstreamResponses,
+ 	}
++	s.Live.Publish("quota")
+ 	// 返回 true 表示本次 header snapshot 已经成功写入 cache。
+ 	return true
+ }
+diff --git a/internal/quota/refresh.go b/internal/quota/refresh.go
+index 2969b711..0ead72e9 100644
+--- a/internal/quota/refresh.go
++++ b/internal/quota/refresh.go
+@@ -111,7 +111,6 @@ type RefreshTaskRecord struct {
+ }
+ 
+ func (s *Service) GetCachedQuota(ctx context.Context, request CacheRequest) (CacheResponse, error) {
+-	_ = ctx
+ 	// 缓存读取只返回已完成任务的结果，不触发新的 provider 请求。
+ 	if len(request.AuthIndexes) == 0 {
+ 		return CacheResponse{}, fmt.Errorf("%w: auth_indexes are required", ErrValidation)
+@@ -119,7 +118,6 @@ func (s *Service) GetCachedQuota(ctx context.Context, request CacheRequest) (Cac
+ 	response := CacheResponse{Items: make([]CachedQuotaItem, 0, len(request.AuthIndexes))}
+ 	now := time.Now()
+ 	s.refreshMu.Lock()
+-	defer s.refreshMu.Unlock()
+ 	s.cleanupRefreshTasksForReadLocked(now)
+ 	// 按请求顺序去重并读取每个 auth_index 最近一次完成的任务缓存。
+ 	seen := make(map[string]struct{}, len(request.AuthIndexes))
+@@ -141,6 +139,10 @@ func (s *Service) GetCachedQuota(ctx context.Context, request CacheRequest) (Cac
+ 		switch {
+ 		case task.Status == RefreshTaskStatusCompleted && task.Quota != nil:
+ 			quota := *task.Quota
++			if credit, ok := s.resetCreditsCache[authIndex]; ok && (quota.RateLimitResetCreditsAvailableCount == nil || !credit.At.Before(task.RefreshedAt)) {
++				count := credit.Count
++				quota.RateLimitResetCreditsAvailableCount = &count
++			}
+ 			refreshedAt := task.RefreshedAt
+ 			response.Items = append(response.Items, CachedQuotaItem{ProviderType: task.Type, AuthIndex: authIndex, FileName: task.FileName, Status: RefreshTaskStatusCompleted, Quota: &quota, RefreshedAt: &refreshedAt, UpstreamResponses: cloneUpstreamResponses(task.UpstreamResponses)})
+ 		case task.Status == RefreshTaskStatusFailed && task.HTTPStatusCode != nil && isRefreshCacheableHTTPStatus(*task.HTTPStatusCode):
+@@ -149,6 +151,15 @@ func (s *Service) GetCachedQuota(ctx context.Context, request CacheRequest) (Cac
+ 			response.Items = append(response.Items, CachedQuotaItem{ProviderType: task.Type, AuthIndex: authIndex, FileName: task.FileName, Status: RefreshTaskStatusFailed, Error: task.Error, HTTPStatusCode: task.HTTPStatusCode, ExpiresAt: &expiresAt, RefreshedAt: &refreshedAt, UpstreamResponses: cloneUpstreamResponses(task.UpstreamResponses)})
+ 		}
+ 	}
++	s.refreshMu.Unlock()
++	for i := range response.Items {
++		if item := &response.Items[i]; item.Quota != nil {
++			copy := *item.Quota
++			copy.Quota = append([]QuotaRow(nil), copy.Quota...)
++			copy = s.attachWindowUsageStats(ctx, item.AuthIndex, copy, now)
++			item.Quota = &copy
++		}
++	}
+ 	return response, nil
+ }
+ 
+@@ -513,6 +524,7 @@ func (s *Service) markRefreshTaskRunning(task *RefreshTaskRecord) (string, Refre
+ 	}
+ 	// 把任务状态切到 running，前端轮询会看到正在刷新。
+ 	task.Status = RefreshTaskStatusRunning
++	s.Live.Publish("quota")
+ 	// 记录开始时间，便于前端展示或后续排查耗时。
+ 	task.StartedAt = now
+ 	// 返回任务记录中的 auth_index，保证后续使用锁内确认过的值。
+@@ -544,6 +556,7 @@ func (s *Service) markRefreshTaskCompleted(task *RefreshTaskRecord, response Che
+ 	task.Quota = &response
+ 	// raw 响应与当前 quota 同生命周期；同 auth_index 的下一次刷新会整体覆盖任务记录。
+ 	task.UpstreamResponses = cloneUpstreamResponses(upstreamResponses)
++	s.Live.Publish("quota")
+ }
+ 
+ func (s *Service) markQueuedRefreshTasksFailed(tasks []*RefreshTaskRecord, err error) {
+@@ -576,6 +589,7 @@ func (s *Service) markRefreshTaskFailed(task *RefreshTaskRecord, err error, upst
+ 	task.RefreshedAt = now
+ 	// 写入前端展示的错误信息。
+ 	task.Error = message
++	s.Live.Publish("quota")
+ 	// 写入可选 HTTP 状态码，cache 接口会用它判断是否可恢复展示。
+ 	task.HTTPStatusCode = httpStatusCode
+ 	// 即使 provider 返回非 2xx 或解析失败，也保留已经收到的上游响应用于生产排障。
+diff --git a/internal/quota/reset.go b/internal/quota/reset.go
+index e9a07079..2825106a 100644
+--- a/internal/quota/reset.go
++++ b/internal/quota/reset.go
+@@ -6,6 +6,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"strings"
++	"time"
+ 
+ 	"cpa-usage-keeper/internal/repository"
+ 
+@@ -62,6 +63,9 @@ func (s *Service) GetResetCredits(ctx context.Context, request ResetCreditsReque
+ 	if err != nil {
+ 		return ResetCreditsResponse{}, err
+ 	}
++	if output.AvailableCount != nil {
++		s.cacheResetCredits(authIndex, *output.AvailableCount, time.Now())
++	}
+ 	return ResetCreditsResponse{
+ 		AuthIndex:      authIndex,
+ 		AvailableCount: output.AvailableCount,
+diff --git a/internal/quota/service.go b/internal/quota/service.go
+index fe9172bd..54dd90f7 100644
+--- a/internal/quota/service.go
++++ b/internal/quota/service.go
+@@ -2,6 +2,7 @@ package quota
+ 
+ import (
+ 	"context"
++	"cpa-usage-keeper/internal/live"
+ 	"errors"
+ 	"fmt"
+ 	"slices"
+@@ -30,6 +31,7 @@ type ServiceOptions struct {
+ }
+ 
+ type Service struct {
++	Live     *live.Hub
+ 	db       *gorm.DB
+ 	registry ProviderRegistry
+ 	// quotaUpstreamResponsesEnabled 控制刷新任务是否把 CPA 转发的完整上游响应写入最新限额缓存。
+@@ -42,8 +44,9 @@ type Service struct {
+ 	// nextRefreshTaskCleanupAt 由 refreshMu 保护，只限制读取接口的全量清理频率。
+ 	nextRefreshTaskCleanupAt time.Time
+ 	// resetInFlight 按 auth_index 记录正在消费的 reset credit，避免并发重复扣减官方次数。
+-	resetMu       sync.Mutex
+-	resetInFlight map[string]struct{}
++	resetMu           sync.Mutex
++	resetInFlight     map[string]struct{}
++	resetCreditsCache map[string]resetCreditObservation // protected by refreshMu; numeric cache only
+ 	// inspectionCompletedAt 只记录用户手动启动巡检后，该巡检轮次完成的时间。
+ 	inspectionCompletedAt       time.Time
+ 	inspectionRoundActive       bool
+diff --git a/internal/quota/test/header_cache_worker_test.go b/internal/quota/test/header_cache_worker_test.go
+index 18d0935a..770975fe 100644
+--- a/internal/quota/test/header_cache_worker_test.go
++++ b/internal/quota/test/header_cache_worker_test.go
+@@ -961,8 +961,8 @@ func TestUsageHeaderWorkerStaysSilentWithoutSnapshotsAndDoesNotResetActiveWindow
+ 		synctest.Wait()
+ 		select {
+ 		case activeTimer = <-timers:
+-			if activeTimer.delay != time.Minute {
+-				t.Fatalf("expected one-minute default window, got %s", activeTimer.delay)
++			if activeTimer.delay != 250*time.Millisecond {
++				t.Fatalf("expected 250ms live-cache window, got %s", activeTimer.delay)
+ 			}
+ 		case <-time.After(time.Second):
+ 			t.Fatal("expected first Header to create a timer")
+diff --git a/internal/quota/traffic_reset_credits.go b/internal/quota/traffic_reset_credits.go
+new file mode 100644
+index 00000000..fdd8d78a
+--- /dev/null
++++ b/internal/quota/traffic_reset_credits.go
+@@ -0,0 +1,53 @@
++package quota
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/cpa"
++	"cpa-usage-keeper/internal/entities"
++	"time"
++)
++
++type resetCreditObservation struct {
++	Count int
++	At    time.Time
++}
++
++func (s *Service) cacheResetCredits(index string, count int, at time.Time) {
++	if count < 0 || count > 10000 {
++		return
++	}
++	s.refreshMu.Lock()
++	if s.resetCreditsCache == nil {
++		s.resetCreditsCache = map[string]resetCreditObservation{}
++	}
++	old, exists := s.resetCreditsCache[index]
++	if (exists && !at.After(old.At)) || (!exists && len(s.resetCreditsCache) >= 4096) {
++		s.refreshMu.Unlock()
++		return
++	}
++	s.resetCreditsCache[index] = resetCreditObservation{count, at}
++	if task := s.refreshTasks[index]; task != nil && task.Quota != nil && (task.Quota.RateLimitResetCreditsAvailableCount == nil || !at.Before(task.RefreshedAt)) {
++		response := *task.Quota
++		value := count
++		response.RateLimitResetCreditsAvailableCount = &value
++		task.Quota = &response
++	}
++	s.refreshMu.Unlock()
++	s.Live.Publish("quota")
++}
++func (s *Service) applyTrafficResetCredits(ctx context.Context, item cpa.QuotaObservation) {
++	if item.ResetCreditsAvailableCount == nil {
++		return
++	}
++	s.refreshMu.Lock()
++	old, exists := s.resetCreditsCache[item.AuthIndex]
++	s.refreshMu.Unlock()
++	if exists && !item.ObservedAt.After(old.At) {
++		return
++	}
++	var identity entities.UsageIdentity
++	if s.db.WithContext(ctx).Where("identity = ? AND is_deleted = ?", item.AuthIndex, false).First(&identity).Error != nil || !usageHeaderIdentityIsCodex(identity) || (identity.Disabled != nil && *identity.Disabled) {
++		return
++	}
++	s.cacheResetCredits(item.AuthIndex, *item.ResetCreditsAvailableCount, item.ObservedAt)
++}
+diff --git a/internal/quota/traffic_reset_credits_test.go b/internal/quota/traffic_reset_credits_test.go
+new file mode 100644
+index 00000000..3c3d6e02
+--- /dev/null
++++ b/internal/quota/traffic_reset_credits_test.go
+@@ -0,0 +1,22 @@
++package quota
++
++import (
++	"testing"
++	"time"
++)
++
++func TestResetCreditCacheKeepsNewestAndPreservesHeaderMerge(t *testing.T) {
++	at := time.Now()
++	old := 2
++	s := &Service{refreshTasks: map[string]*RefreshTaskRecord{"a": {RefreshedAt: at, Quota: &CheckResponse{RateLimitResetCreditsAvailableCount: &old}}}}
++	s.cacheResetCredits("a", 0, at.Add(time.Second))
++	s.cacheResetCredits("a", 7, at)
++	s.cacheResetCredits("a", -1, at.Add(time.Hour))
++	if s.resetCreditsCache["a"].Count != 0 || *s.refreshTasks["a"].Quota.RateLimitResetCreditsAvailableCount != 0 || old != 2 {
++		t.Fatal("lost zero, accepted late data or mutated old snapshot")
++	}
++	merged := mergeUsageHeaderQuotaResponse(*s.refreshTasks["a"].Quota, CheckResponse{})
++	if merged.RateLimitResetCreditsAvailableCount == nil || *merged.RateLimitResetCreditsAvailableCount != 0 {
++		t.Fatal("headers erased known credits")
++	}
++}
+diff --git a/internal/quota/traffic_sync.go b/internal/quota/traffic_sync.go
+index 8a359df3..560479c2 100644
+--- a/internal/quota/traffic_sync.go
++++ b/internal/quota/traffic_sync.go
+@@ -29,6 +29,69 @@ func (r *TrafficQuotaSyncRunner) Run(ctx context.Context) error {
+ 	if r == nil || r.service == nil || r.reader == nil {
+ 		return nil
+ 	}
++	if stream, ok := r.reader.(interface {
++		WatchLive(context.Context, func([]string)) error
++	}); ok {
++		streamCtx, cancel := context.WithCancel(ctx)
++		defer cancel()
++		changed := make(chan struct{}, 1)
++		done := make(chan struct{})
++		notify := func() {
++			select {
++			case changed <- struct{}{}:
++			default:
++			}
++		}
++		go func() {
++			defer close(done)
++			for streamCtx.Err() == nil {
++				_ = stream.WatchLive(streamCtx, func(topics []string) {
++					for _, topic := range topics {
++						if topic == "quota" || topic == "sync" {
++							notify()
++							break
++						}
++					}
++				})
++				// Compatibility/recovery reads only CPA's cache, never provider endpoints.
++				notify()
++				timer := time.NewTimer(5 * time.Second)
++				select {
++				case <-streamCtx.Done():
++					timer.Stop()
++					return
++				case <-timer.C:
++				}
++			}
++		}()
++		defer func() { cancel(); <-done }()
++		seen := map[string]time.Time{}
++		for {
++			select {
++			case <-ctx.Done():
++				return nil
++			case <-changed:
++				timer := time.NewTimer(200 * time.Millisecond)
++				select {
++				case <-ctx.Done():
++					timer.Stop()
++					return nil
++				case <-timer.C:
++				}
++				select {
++				case <-changed:
++				default:
++				}
++				readCtx, stop := context.WithTimeout(ctx, 4*time.Second)
++				next, err := r.service.syncTrafficQuota(readCtx, r.reader, seen)
++				stop()
++				if err == nil {
++					seen = next
++				}
++			}
++		}
++
++	}
+ 	timer := time.NewTicker(5 * time.Second)
+ 	defer timer.Stop()
+ 	seen := map[string]time.Time{}
+@@ -59,6 +122,11 @@ func (s *Service) syncTrafficQuota(ctx context.Context, reader trafficQuotaReade
+ 	candidates := make([]*UsageHeaderSnapshot, 0, len(items))
+ 	validItems := make([]cpa.QuotaObservation, 0, len(items))
+ 	now := time.Now()
++	for _, item := range items {
++		if item.Provider == "codex" && item.ResetCreditsAvailableCount != nil && !item.ObservedAt.IsZero() && !item.ObservedAt.After(now.Add(time.Minute)) {
++			s.applyTrafficResetCredits(ctx, item)
++		}
++	}
+ 	for _, item := range items {
+ 		if item.ObservedAt.IsZero() || item.ObservedAt.After(now.Add(time.Minute)) {
+ 			continue
+diff --git a/internal/service/error_events.go b/internal/service/error_events.go
+index d7b39976..55ebbbc7 100644
+--- a/internal/service/error_events.go
++++ b/internal/service/error_events.go
+@@ -2,6 +2,7 @@ package service
+ 
+ import (
+ 	"context"
++	"cpa-usage-keeper/internal/live"
+ 	"encoding/json"
+ 	"fmt"
+ 	"strings"
+@@ -43,12 +44,17 @@ type ErrorEventProvider interface {
+ 
+ type errorEventService struct {
+ 	// db 既用于订阅直接写入，也用于详情页按 Identity 查询；两条路径不经过 Usage Inbox。
+-	db *gorm.DB
++	db   *gorm.DB
++	Live *live.Hub
+ }
+ 
+ // NewErrorEventService 构造 Errors 专用服务；构造阶段不联网，也不执行写入。
+-func NewErrorEventService(db *gorm.DB) ErrorEventProvider {
+-	return &errorEventService{db: db}
++func NewErrorEventService(db *gorm.DB, hubs ...*live.Hub) ErrorEventProvider {
++	var hub *live.Hub
++	if len(hubs) > 0 {
++		hub = hubs[0]
++	}
++	return &errorEventService{db: db, Live: hub}
+ }
+ 
+ // StoreErrorEvent 将一条有效 CPA payload 完整映射到扁平列后直接写入最终表。
+@@ -60,7 +66,11 @@ func (s *errorEventService) StoreErrorEvent(ctx context.Context, raw string, rec
+ 	if err != nil {
+ 		return err
+ 	}
+-	return repository.InsertErrorEvent(ctx, s.db, &event)
++	err = repository.InsertErrorEvent(ctx, s.db, &event)
++	if err == nil {
++		s.Live.Publish("accounts")
++	}
++	return err
+ }
+ 
+ // ListErrorEvents 先用 Keeper Identity ID 解析稳定 auth_index，再查询对应错误历史。
+diff --git a/internal/service/metadata_sync.go b/internal/service/metadata_sync.go
+index 475e02b8..24365dc9 100644
+--- a/internal/service/metadata_sync.go
++++ b/internal/service/metadata_sync.go
+@@ -60,6 +60,7 @@ func (s *SyncService) SyncMetadata(ctx context.Context) error {
+ 	var aggregateErr error
+ 	// 任一数据库写入失败都阻止基于半成品 identity 发送通知或执行兼容补算。
+ 	if upsertErr == nil {
++		s.live.Publish("accounts")
+ 		// provider fetch warning 不属于持久化失败，因此仍允许已提交 identity 唤醒后台 runner。
+ 		if s.usageAggregation != nil {
+ 			// notifier 只写内存并发 wake，不在 metadata 热路径执行 SQLite 聚合事务。
+diff --git a/internal/service/sync.go b/internal/service/sync.go
+index 49975158..f6242f5f 100644
+--- a/internal/service/sync.go
++++ b/internal/service/sync.go
+@@ -2,6 +2,7 @@ package service
+ 
+ import (
+ 	"context"
++	"cpa-usage-keeper/internal/live"
+ 	"fmt"
+ 	"math"
+ 	"strings"
+@@ -65,6 +66,7 @@ const (
+ 
+ // SyncService 负责同步 CPA metadata，并处理已经落入本地 inbox 的 usage 原始消息。
+ type SyncService struct {
++	live                  *live.Hub
+ 	usageWork             usageWorkGate
+ 	db                    *gorm.DB
+ 	client                CPAClientFetcher
+@@ -94,6 +96,7 @@ func NewSyncService(db *gorm.DB, cfg config.Config) *SyncService {
+ 
+ // SyncServiceOptions 提供测试和局部调用需要替换的依赖。
+ type SyncServiceOptions struct {
++	Live            *live.Hub
+ 	BaseURL         string
+ 	Client          CPAClientFetcher
+ 	MetadataFetcher MetadataFetcher
+@@ -123,6 +126,7 @@ func NewSyncServiceWithOptions(db *gorm.DB, opts SyncServiceOptions) *SyncServic
+ 		metadataFetcher = opts.Client
+ 	}
+ 	return &SyncService{
++		live:                  opts.Live,
+ 		db:                    db,
+ 		client:                opts.Client,
+ 		metadataFetcher:       metadataFetcher,
+@@ -435,6 +439,13 @@ func (s *SyncService) processRedisInboxRows(ctx context.Context, writeDB *gorm.D
+ 	}
+ 	// 事务已经同时提交 usage_events 与对应 inbox processed，只有此时事件级 Token 日志才代表真实入库事件。
+ 	logCommittedTokenProcessingEvents(normalizedItems)
++	if result.InsertedEvents > 0 {
++		groups := make([]string, 0, len(events))
++		for _, event := range events {
++			groups = append(groups, event.APIGroupKey)
++		}
++		s.live.Publish("usage", groups...)
++	}
+ 	if result.InsertedEvents > 0 {
+ 		if s.pluginAPIKeys != nil && len(pluginIdentities) > 0 {
+ 			// 独立切片只包含真正提交的 ready 事件身份；登记失败不影响用量提交。
+diff --git a/web/dist/.gitkeep b/web/dist/.gitkeep
+deleted file mode 100644
+index e69de29b..00000000
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index 4f4b30c0..7b35da86 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -79,6 +79,8 @@ function App() {
+     setSessionAPIKey(undefined);
+   }, [clearUsageStats]);
+ 
++  useEffect(() => { window.addEventListener("keeper:live-auth-required", clearSession); return () => window.removeEventListener("keeper:live-auth-required", clearSession); }, [clearSession]);
++
+   const applySession = useCallback((session: Awaited<ReturnType<typeof getSession>>) => {
+     setOIDCLoginEnabled(Boolean(session.oidc_login_enabled));
+     setReadOnlyEnabled(session.read_only_enabled === true);
+diff --git a/web/src/components/dashboard/AutoRefreshControl.tsx b/web/src/components/dashboard/AutoRefreshControl.tsx
+index 1df42e21..629fca6f 100644
+--- a/web/src/components/dashboard/AutoRefreshControl.tsx
++++ b/web/src/components/dashboard/AutoRefreshControl.tsx
+@@ -1,100 +1,13 @@
+-import { useEffect, useRef, useState } from 'react';
++import { useSyncExternalStore } from 'react';
+ import { useTranslation } from 'react-i18next';
+-import { Select } from '@/components/ui/Select';
++import { useLiveRefresh } from '@/hooks/useLiveRefresh';
++import { getLiveStatus, subscribeLiveStatus } from '@/lib/live';
+ import styles from './AutoRefreshControl.module.scss';
+-
+ export const AUTO_REFRESH_STORAGE_KEY = 'keeper-auto-refresh-seconds';
+-const INTERVALS = [0, 10, 30, 60] as const;
+-
+-interface AutoRefreshControlProps {
+-  enabled?: boolean;
+-  busy?: boolean;
+-  onRefresh: () => Promise<unknown>;
+-  onError: (error: unknown) => void;
+-}
+-
+-/** Own the clock here so countdown ticks never rerender the charts. */
++interface AutoRefreshControlProps { enabled?: boolean; busy?: boolean; onRefresh: () => Promise<unknown>; onError: (error: unknown) => void; }
+ export function AutoRefreshControl({ enabled = true, busy = false, onRefresh, onError }: AutoRefreshControlProps) {
+-  const { t } = useTranslation();
+-  const [seconds, setSeconds] = useState(() => {
+-    try {
+-      const saved = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
+-      const value = saved === null ? 10 : Number(saved);
+-      return INTERVALS.some((interval) => interval === value) ? value : 10;
+-    } catch { return 10; }
+-  });
+-  const [remaining, setRemaining] = useState(seconds);
+-  const [hidden, setHidden] = useState(document.hidden);
+-  const [refreshing, setRefreshing] = useState(false);
+-  const current = useRef({ busy, onRefresh, onError });
+-  const inFlight = useRef(false);
+-
+-  useEffect(() => { current.current = { busy, onRefresh, onError }; }, [busy, onRefresh, onError]);
+-
+-  useEffect(() => {
+-    if (!enabled || seconds === 0) return;
+-    let disposed = false;
+-    let timer: ReturnType<typeof setInterval> | undefined;
+-    let deadline = Date.now() + seconds * 1000;
+-    const reset = () => {
+-      deadline = Date.now() + seconds * 1000;
+-      if (!disposed) setRemaining(seconds);
+-    };
+-    const refresh = async () => {
+-      if (inFlight.current || current.current.busy) return;
+-      inFlight.current = true;
+-      setRefreshing(true);
+-      try { await current.current.onRefresh(); }
+-      catch (error) { if (!disposed) current.current.onError(error); }
+-      finally {
+-        inFlight.current = false;
+-        if (!disposed) { setRefreshing(false); reset(); }
+-      }
+-    };
+-    const stop = () => { clearInterval(timer); timer = undefined; };
+-    const start = () => {
+-      stop();
+-      reset();
+-      timer = setInterval(() => {
+-        // A slow request or a manual reload starts a fresh countdown when it finishes.
+-        setRefreshing(inFlight.current);
+-        if (inFlight.current || current.current.busy) { reset(); return; }
+-        const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+-        setRemaining(left);
+-        if (left === 0) void refresh();
+-      }, 250);
+-    };
+-    const visibilityChanged = () => {
+-      setHidden(document.hidden);
+-      if (document.hidden) stop();
+-      else { start(); void refresh(); }
+-    };
+-    setHidden(document.hidden);
+-    setRefreshing(inFlight.current);
+-    if (!document.hidden) start();
+-    document.addEventListener('visibilitychange', visibilityChanged);
+-    return () => { disposed = true; stop(); document.removeEventListener('visibilitychange', visibilityChanged); };
+-  }, [enabled, seconds]);
+-
+-  const off = t('auto_refresh.off');
+-  const label = seconds === 0 ? off : !enabled || hidden ? t('auto_refresh.paused') : refreshing || busy ? '…' : `${remaining}s`;
+-  return (
+-    <span className={styles.control} data-auto-refresh title={t('auto_refresh.settings')}>
+-      <Select
+-        value={String(seconds)}
+-        options={INTERVALS.map((interval) => ({ value: String(interval), label: interval === 0 ? off : t('auto_refresh.every', { seconds: interval }) }))}
+-        onChange={(value) => {
+-          const next = Number(value);
+-          setRemaining(next);
+-          setSeconds(next);
+-          try { localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, value); } catch { /* Session preference still works. */ }
+-        }}
+-        ariaLabel={t('auto_refresh.settings')}
+-        fullWidth={false}
+-        dropdownMinWidth={160}
+-        showChevron={false}
+-        renderValue={() => <span aria-hidden="true">{label}</span>}
+-      />
+-    </span>
+-  );
++ const { t } = useTranslation();
++ const status = useSyncExternalStore(subscribeLiveStatus, getLiveStatus, getLiveStatus);
++ useLiveRefresh(async () => { if (busy) return; try { await onRefresh(); } catch (error) { onError(error); } }, ['usage', 'clock'], enabled);
++ return <span className={styles.control} data-auto-refresh data-live-status={status} role="status" aria-live="polite">{t('live.' + status)}</span>;
+ }
+diff --git a/web/src/components/dashboard/test/AutoRefreshControl.test.tsx b/web/src/components/dashboard/test/AutoRefreshControl.test.tsx
+index 1f322ee0..0e2b5018 100644
+--- a/web/src/components/dashboard/test/AutoRefreshControl.test.tsx
++++ b/web/src/components/dashboard/test/AutoRefreshControl.test.tsx
+@@ -1,124 +1,20 @@
+ // @vitest-environment happy-dom
+ import { act } from 'react';
+ import { createRoot, type Root } from 'react-dom/client';
+-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+-import { AUTO_REFRESH_STORAGE_KEY, AutoRefreshControl } from '../AutoRefreshControl';
+-
+-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, args?: { seconds: number }) => args ? `Every ${args.seconds}s` : key }) }));
+-
+-describe('AutoRefreshControl', () => {
+-  let root: Root;
+-  let container: HTMLDivElement;
+-  let hidden: boolean;
+-  const refresh = vi.fn<() => Promise<unknown>>();
+-  const onError = vi.fn();
+-  beforeEach(() => {
+-    vi.useFakeTimers();
+-    localStorage.clear();
+-    vi.clearAllMocks();
+-    refresh.mockResolvedValue(undefined);
+-    hidden = false;
+-    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+-    container = document.createElement('div');
+-    document.body.append(container);
+-    root = createRoot(container);
+-  });
+-  afterEach(async () => {
+-    await act(async () => root.unmount());
+-    document.body.replaceChildren();
+-    vi.restoreAllMocks();
+-    vi.useRealTimers();
+-  });
+-  const render = async (busy = false, enabled = true) => act(async () => root.render(<AutoRefreshControl busy={busy} enabled={enabled} onRefresh={refresh} onError={onError} />));
+-  const advance = async (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+-  const choose = async (seconds: number) => {
+-    await act(async () => container.querySelector<HTMLButtonElement>('button')!.click());
+-    const label = seconds === 0 ? 'auto_refresh.off' : `Every ${seconds}s`;
+-    const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(node => node.textContent?.includes(label));
+-    expect(option).toBeTruthy();
+-    await act(async () => option!.click());
+-  };
+-
+-  it('counts down from the existing 10s default and refreshes without remounting the control', async () => {
+-    await render();
+-    const button = container.querySelector('button');
+-    expect(button?.textContent).toContain('10s');
+-    await advance(3000);
+-    expect(button?.textContent).toContain('7s');
+-    await advance(7000);
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-    expect(container.querySelector('button')).toBe(button);
+-    expect(button?.textContent).toContain('10s');
+-  });
+-
+-  it('offers and saves 30s, 60s and Off, and restores the preference on remount', async () => {
+-    await render();
+-    await choose(30);
+-    expect(localStorage.getItem(AUTO_REFRESH_STORAGE_KEY)).toBe('30');
+-    await advance(29000);
+-    expect(refresh).not.toHaveBeenCalled();
+-    await advance(1000);
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-    await choose(60);
+-    await advance(59000);
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-    await advance(1000);
+-    expect(refresh).toHaveBeenCalledTimes(2);
+-    await choose(0);
+-    await advance(120000);
+-    expect(refresh).toHaveBeenCalledTimes(2);
+-    await act(async () => root.unmount());
+-    root = createRoot(container);
+-    await render();
+-    expect(container.textContent).toContain('auto_refresh.off');
+-    await advance(120000);
+-    expect(refresh).toHaveBeenCalledTimes(2);
+-  });
+-
+-  it('pauses while hidden and refreshes immediately on return, with no requests when disabled', async () => {
+-    await render();
+-    hidden = true;
+-    await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+-    await advance(60000);
+-    expect(refresh).not.toHaveBeenCalled();
+-    hidden = false;
+-    await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-    await advance(10000);
+-    expect(refresh).toHaveBeenCalledTimes(2);
+-    await render(false, false);
+-    await advance(60000);
+-    expect(refresh).toHaveBeenCalledTimes(2);
+-  });
+-
+-  it('does not overlap slow requests or manual reloads and retries after an error', async () => {
+-    let reject!: (error: unknown) => void;
+-    refresh.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
+-    await render();
+-    await advance(10000);
+-    await advance(30000);
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-    const error = new Error('Network failure');
+-    await act(async () => reject(error));
+-    expect(onError).toHaveBeenCalledWith(error);
+-    await render(true);
+-    await advance(20000);
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-    await render(false);
+-    await advance(10000);
+-    expect(refresh).toHaveBeenCalledTimes(2);
+-  });
+-
+-  it('does not get stuck refreshing when settings change during a request', async () => {
+-    let resolve!: () => void;
+-    refresh.mockImplementationOnce(() => new Promise<void>((done) => { resolve = done; }));
+-    await render();
+-    await advance(10000);
+-    await choose(30);
+-    await act(async () => resolve());
+-    await advance(1000);
+-    expect(container.textContent).toContain('29s');
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-  });
++import { afterEach,beforeEach,describe,expect,it,vi } from 'vitest';
++import { AutoRefreshControl } from '../AutoRefreshControl';
++import { mockLiveStream } from '@/../test-helpers/liveStream';
++vi.mock('@/lib/api',async original=>({...await original<typeof import('@/lib/api')>(),apiFetch:vi.fn()}));
++vi.mock('react-i18next',()=>({useTranslation:()=>({t:(key:string)=>key})}));
++globalThis.IS_REACT_ACT_ENVIRONMENT=true;
++describe('live refresh control',()=>{
++ let root:Root;let container:HTMLDivElement;let emit:ReturnType<typeof mockLiveStream>;
++ const refresh=vi.fn(),onError=vi.fn();
++ beforeEach(()=>{vi.useFakeTimers();vi.clearAllMocks();refresh.mockResolvedValue(undefined);vi.spyOn(document,'hidden','get').mockReturnValue(false);emit=mockLiveStream();container=document.createElement('div');document.body.append(container);root=createRoot(container);});
++ afterEach(async()=>{await act(async()=>root.unmount());container.remove();vi.useRealTimers();vi.restoreAllMocks();});
++ const render=(busy=false,enabled=true)=>act(async()=>root.render(<AutoRefreshControl busy={busy} enabled={enabled} onRefresh={refresh} onError={onError}/>));
++ const send=()=>act(async()=>{emit(['usage']);await vi.advanceTimersByTimeAsync(200);});
++ it('shows stream status and retains the DOM node during updates',async()=>{await render();const control=container.firstChild;await send();expect(container.textContent).toContain('live.live');expect(refresh).toHaveBeenCalledOnce();expect(container.firstChild).toBe(control);});
++ it('honors disabled/busy state and uses the current callback',async()=>{await render(true);await send();expect(refresh).not.toHaveBeenCalled();await render();await send();expect(refresh).toHaveBeenCalledOnce();await render(false,false);await act(async()=>vi.advanceTimersByTimeAsync(30000));expect(refresh).toHaveBeenCalledOnce();});
++ it('reports a background read error and recovers on the next event',async()=>{const error=new Error('offline');refresh.mockRejectedValueOnce(error);await render();await send();expect(onError).toHaveBeenCalledWith(error);await send();expect(refresh).toHaveBeenCalledTimes(2);});
+ });
+diff --git a/web/src/components/usage/credentials/CodexQuotaHistoryPanel.tsx b/web/src/components/usage/credentials/CodexQuotaHistoryPanel.tsx
+index 47a2c06d..1e84df19 100644
+--- a/web/src/components/usage/credentials/CodexQuotaHistoryPanel.tsx
++++ b/web/src/components/usage/credentials/CodexQuotaHistoryPanel.tsx
+@@ -1,3 +1,4 @@
++import { useLiveRefresh } from '@/hooks/useLiveRefresh'
+ import { ChartLifecycleProvider, useChartRefresh } from '../charts/chartLifecycle'
+ import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
+ import { useTranslation } from 'react-i18next'
+@@ -86,7 +87,7 @@ function QuotaHistoryPanel({ authIndex, onAuthRequired, weeklyOnly = false }: Co
+   const lastRequestOptionsRef = useRef<FetchCodexQuotaHistoryOptions>({})
+   const chartRef = useRef<HTMLElement | null>(null)
+ 
+-  const loadHistory = useCallback(async (options: FetchCodexQuotaHistoryOptions = {}) => {
++  const loadHistory = useCallback(async (options: FetchCodexQuotaHistoryOptions = {}, replay = true) => {
+     const normalizedAuthIndex = authIndex.trim()
+     if (!normalizedAuthIndex) return
+     // 失败重试必须复用用户刚选择的上游角色，不能退回后端默认窗口。
+@@ -117,7 +118,7 @@ function QuotaHistoryPanel({ authIndex, onAuthRequired, weeklyOnly = false }: Co
+           : (cycles.find((cycle) => cycle.status === 'current') ?? cycles[0])?.id ?? null,
+       }))
+       setHistory(response)
+-      markChartLoaded(response)
++      if (replay) markChartLoaded(response)
+     } catch (loadError) {
+       if (controller.signal.aborted) return
+       if (loadError instanceof ApiError && loadError.status === 401) {
+@@ -150,6 +151,8 @@ function QuotaHistoryPanel({ authIndex, onAuthRequired, weeklyOnly = false }: Co
+     }
+   }, [loadHistory])
+ 
++  useLiveRefresh(async () => loadHistory(lastRequestOptionsRef.current, false), ["quota", "usage"]);
++
+   const confirmDelete = async () => {
+     if (!deleteTarget || deleteControllerRef.current) return
+     const windowRole = history?.selected_window?.window_role
+diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+index 854443e9..4f7cbfba 100644
+--- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
++++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+@@ -1,3 +1,4 @@
++import { useLiveRefresh } from '@/hooks/useLiveRefresh'
+ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from 'react'
+ import { useTranslation } from 'react-i18next'
+ import { Modal } from '@/components/ui/Modal'
+@@ -220,14 +221,14 @@ export function CredentialDetailDrawer({
+     if ((activeTab === 'quota-history' && !hasQuotaHistory) || (activeTab === 'performance' && !hasPerformance)) setActiveTab('overview')
+   }, [activeTab, hasQuotaHistory, hasPerformance])
+ 
+-  const loadFirstPage = useCallback(async () => {
++  const loadFirstPage = useCallback(async (background = false) => {
+     if (!open || activeTab !== 'requests' || !sourceFilter) return
+     firstPageControllerRef.current?.abort()
+     loadMoreControllerRef.current?.abort()
+     loadMoreControllerRef.current = null
+     const controller = new AbortController()
+     firstPageControllerRef.current = controller
+-    setEventsLoading(true)
++    if (!background) setEventsLoading(true)
+     setEventsLoadingMore(false)
+     setEventsAutoLoadMore(true)
+     setEventsError('')
+@@ -241,12 +242,12 @@ export function CredentialDetailDrawer({
+         source: sourceFilter,
+       })
+       if (firstPageControllerRef.current !== controller) return
+-      setEvents(response.events)
+-      setEventsNextCursor(response.has_more === true ? response.next_cursor?.trim() || null : null)
++      setEvents(previous => background ? [...response.events, ...previous.filter(event => !response.events.some(fresh => fresh.id === event.id))] : response.events)
++      setEventsNextCursor(previous => background && previous ? previous : response.has_more === true ? response.next_cursor?.trim() || null : null)
+     } catch (error) {
+       if (controller.signal.aborted) return
+       // 同一凭证的费用请求暂缓时保留最后一页；切换凭证会由 selectionKey 清空旧数据。
+-      if (!isCostsBusy(error)) {
++      if (!background && !isCostsBusy(error)) {
+         setEvents([])
+         setEventsNextCursor(null)
+       }
+@@ -275,14 +276,14 @@ export function CredentialDetailDrawer({
+     }
+   }, [activeTab, loadFirstPage, open])
+ 
+-  const loadFirstErrorPage = useCallback(async () => {
++  const loadFirstErrorPage = useCallback(async (background = false) => {
+     if (!open || activeTab !== 'errors' || !identityId) return
+     errorFirstPageControllerRef.current?.abort()
+     errorLoadMoreControllerRef.current?.abort()
+     errorLoadMoreControllerRef.current = null
+     const controller = new AbortController()
+     errorFirstPageControllerRef.current = controller
+-    setErrorEventsLoading(true)
++    if (!background) setErrorEventsLoading(true)
+     setErrorEventsLoadingMore(false)
+     setErrorEventsAutoLoadMore(true)
+     setErrorEventsError('')
+@@ -290,12 +291,11 @@ export function CredentialDetailDrawer({
+       // Errors API 使用 Keeper Identity ID 定位凭证，前端不接触 CPA auth_index 等敏感关联字段。
+       const response = await fetchErrorEvents(identityId, controller.signal, undefined, ERROR_EVENTS_PAGE_SIZE)
+       if (errorFirstPageControllerRef.current !== controller) return
+-      setErrorEvents(response.events)
+-      setErrorEventsNextCursor(response.has_more === true ? response.next_cursor?.trim() || null : null)
++      setErrorEvents(previous => background ? [...response.events, ...previous.filter(event => !response.events.some(fresh => fresh.id === event.id))] : response.events)
++      setErrorEventsNextCursor(previous => background && previous ? previous : response.has_more === true ? response.next_cursor?.trim() || null : null)
+     } catch (error) {
+       if (controller.signal.aborted) return
+-      setErrorEvents([])
+-      setErrorEventsNextCursor(null)
++      if (!background) {setErrorEvents([]);setErrorEventsNextCursor(null)}
+       if (error instanceof ApiError && error.status === 401) {
+         onAuthRequired?.()
+         return
+@@ -327,6 +327,8 @@ export function CredentialDetailDrawer({
+     errorLoadMoreControllerRef.current?.abort()
+   }, [])
+ 
++  useLiveRefresh(async () => { if (activeTab === "requests") await loadFirstPage(true); if (activeTab === "errors") await loadFirstErrorPage(true); }, ["usage", "accounts"], open);
++
+   const activateTab = useCallback((tab: CredentialDetailTab, focus = false) => {
+     if (tab !== 'requests') onRequestLogClose?.()
+     setActiveTab(tab)
+diff --git a/web/src/components/usage/credentials/CredentialHealthPanel.tsx b/web/src/components/usage/credentials/CredentialHealthPanel.tsx
+index 178efe4e..0159924e 100644
+--- a/web/src/components/usage/credentials/CredentialHealthPanel.tsx
++++ b/web/src/components/usage/credentials/CredentialHealthPanel.tsx
+@@ -44,12 +44,6 @@ const HEALTH_EMPTY_HEIGHT_PX = 5
+ const HEALTH_REQUEST_HEIGHT_MIN_PX = 10
+ const HEALTH_REQUEST_HEIGHT_RANGE_PX = 12
+ 
+-const healthCellStateClassName: Record<CredentialHealthBucketState, string> = {
+-  success: styles.credentialHealthCellSuccess,
+-  warning: styles.credentialHealthCellWarning,
+-  failure: styles.credentialHealthCellFailure,
+-  empty: styles.credentialHealthCellEmpty,
+-}
+ 
+ const healthMetaToneClassName: Record<CredentialHealthSummaryTone, string> = {
+   healthy: styles.credentialHealthMetaHealthy,
+@@ -61,6 +55,7 @@ const healthMetaToneClassName: Record<CredentialHealthSummaryTone, string> = {
+ export function CredentialHealthPanel({ displayName, health, lastUsedAt, statsUpdatedAt, windowCacheReadRate, variant = 'full', showCompactMeta = false }: CredentialHealthPanelProps) {
+   const { t } = useTranslation()
+   const buckets = useMemo(() => buildHealthBuckets(health), [health])
++  const peakRequests = Math.max(1, ...buckets.map(bucket => bucket.successCount + bucket.failureCount))
+   const score = resolveCredentialHealthScore(health, buckets)
+   const summary = resolveCredentialHealthSummary(buckets, health, t)
+   const lastUsed = formatCredentialHealthDate(lastUsedAt, variant === 'compact' ? '-' : '/')
+@@ -87,7 +82,8 @@ export function CredentialHealthPanel({ displayName, health, lastUsedAt, statsUp
+               <span
+                 key={`health-${index}`}
+                 role="listitem"
+-                className={`${styles.credentialHealthCell} ${healthCellStateClassName[bucket.state]}`.trim()}
++                className={styles.credentialHealthCell}
++                data-usage-total={bucket.successCount + bucket.failureCount}
+                 aria-label={t('usage_stats.credentials_health_bucket_aria', {
+                   timeRange,
+                   status,
+@@ -95,8 +91,12 @@ export function CredentialHealthPanel({ displayName, health, lastUsedAt, statsUp
+                   failureCount: bucket.failureCount,
+                   rate: bucket.successRateLabel,
+                 })}
+-                style={{ height: `${compact ? 9 : bucket.heightPx}px` }}
++                style={{ height: compact ? 27 : 40 }}
+               >
++                <span className={styles.credentialUsageStack} aria-hidden="true" style={{height: String((bucket.successCount + bucket.failureCount) / peakRequests * 100)+'%'}}>
++                  {bucket.failureCount > 0 && <span className={styles.credentialUsageFailure} style={{height: String(bucket.failureCount / (bucket.successCount + bucket.failureCount) * 100)+'%'}} />}
++                  {bucket.successCount > 0 && <span className={styles.credentialUsageSuccess} style={{height: String(bucket.successCount / (bucket.successCount + bucket.failureCount) * 100)+'%'}} />}
++                </span>
+                 <span
+                   className={`${styles.credentialHealthTooltip} ${
+                     index < 4
+@@ -121,6 +121,11 @@ export function CredentialHealthPanel({ displayName, health, lastUsedAt, statsUp
+         </div>
+         {compact && <strong className={styles.credentialHealthCompactScore}>{score.toFixed(1)}%</strong>}
+       </div>
++      <div className={styles.credentialUsageLegend} aria-hidden="true">
++        <span className={styles.credentialHealthTooltipSuccess}>{t('usage_stats.credentials_health_ok')} {buckets.reduce((sum,bucket)=>sum+bucket.successCount,0).toLocaleString()}</span>
++        <span className={styles.credentialHealthTooltipFailure}>{t('usage_stats.credentials_health_fail')} {buckets.reduce((sum,bucket)=>sum+bucket.failureCount,0).toLocaleString()}</span>
++        <span className={styles.credentialUsagePeak}>{t('usage_graph.peak', {count: buckets.every(bucket=>bucket.successCount+bucket.failureCount===0)?0:peakRequests})}</span>
++      </div>
+       {compact ? showCompactMeta && (
+         <div className={`${styles.credentialHealthCompactMeta} ${healthMetaToneClassName[summary.tone]}`.trim()}>
+           <span className={styles.credentialHealthMetaStatus}>{summary.label}</span>
+diff --git a/web/src/components/usage/credentials/CredentialSections.module.scss b/web/src/components/usage/credentials/CredentialSections.module.scss
+index 2381aaaf..9f862e25 100644
+--- a/web/src/components/usage/credentials/CredentialSections.module.scss
++++ b/web/src/components/usage/credentials/CredentialSections.module.scss
+@@ -288,10 +288,10 @@ $credential-provider-icon-size: 30px;
+ 
+ .credentialHealthGrid {
+   display: grid;
+-  grid-template-columns: repeat(30, 4px);
++  grid-template-columns: repeat(30, minmax(0, 1fr));
+   gap: 4px;
+   align-items: end;
+-  width: max-content;
++  width: 100%;
+   min-width: 0;
+   padding: 3px 2px 1px;
+   overflow: visible;
+@@ -302,10 +302,10 @@ $credential-provider-icon-size: 30px;
+   display: block;
+   padding: 0;
+   border: 0;
+-  width: 4px;
++  width: 100%;
+   appearance: none;
+   border-radius: 3px;
+-  background: #e5e7eb;
++  background: transparent;
+   box-shadow: none;
+   cursor: default;
+   transform-origin: center bottom;
+@@ -3448,7 +3448,7 @@ $credential-provider-icon-size: 30px;
+ 
+   .credentialHealthGrid {
+     grid-template-columns: repeat(30, minmax(0, 1fr));
+-    align-items: center;
++    align-items: end;
+     gap: 2px;
+     width: 100%;
+     padding: 0;
+@@ -3780,3 +3780,13 @@ $credential-provider-icon-size: 30px;
+     transition: none;
+   }
+ }
++
++// Linear request counts share one scale within each account's visible window.
++.credentialHealthCell::after {content: '';position: absolute;bottom: 0;left: 0;right: 0;height: 1px;background: var(--border-color);}
++.credentialUsageStack {position: absolute;inset: auto 0 0;display: flex;flex-direction: column;justify-content: flex-end;transition: height 350ms ease;min-height: 0;z-index: 1;}
++.credentialUsageSuccess,.credentialUsageFailure {display: block;min-height: 1px;flex-shrink: 0;transition: height 350ms ease;}
++.credentialUsageSuccess {background: #22c55e;border-radius: 1px 1px 0 0;}
++.credentialUsageFailure {background: #ef4444;border-radius: 1px 1px 0 0;}
++.credentialUsageLegend {display: flex;gap: 10px;font-size: 10px;font-variant-numeric: tabular-nums;line-height: 1.25;}
++.credentialUsagePeak {margin-left: auto;color: var(--text-tertiary);}
++@media(prefers-reduced-motion: reduce) {.credentialUsageStack,.credentialUsageSuccess,.credentialUsageFailure {transition: none;}}
+diff --git a/web/src/components/usage/credentials/PerformancePanel.tsx b/web/src/components/usage/credentials/PerformancePanel.tsx
+index 510ccadc..ed76ce4b 100644
+--- a/web/src/components/usage/credentials/PerformancePanel.tsx
++++ b/web/src/components/usage/credentials/PerformancePanel.tsx
+@@ -1,6 +1,7 @@
++import { startLiveRefresh } from '@/lib/live'
+ import { useEffect, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+-import { Chart } from 'react-chartjs-2'
++import { Chart } from '@/components/usage/charts/UsageChart'
+ import type { ChartData, ChartOptions } from 'chart.js'
+ import '@/lib/chartjs'
+ import { ApiError, fetchAccountPerformance } from '@/lib/api'
+@@ -40,24 +41,23 @@ export function PerformancePanel({ authIndex, readOnlyAccountId, onAuthRequired
+   const report = loading || noSelection ? undefined : result?.report
+   useEffect(() => {
+     if (noSelection) return
+-    const controller = new AbortController()
+     // Discover request totals without workload filters before asking the server to
+     // match the selected models. Merely hiding lines would leave the wrong mix.
+     const query = discovering
+       ? { readOnlyAccountId, days, metric: 'latency', mode: '', context: '', output: '', effort: '', models: [] }
+       : { readOnlyAccountId, days, metric, mode: mode === 'captured' ? '' : mode, context, output, effort, models: requestModels }
+-    fetchAccountPerformance(authIndex, query, controller.signal)
++    return startLiveRefresh(async (signal) => { await fetchAccountPerformance(authIndex, query, signal)
+       .then(report => {
+-        if (controller.signal.aborted) return
++        if (signal.aborted) return
+         if (discovering) setCatalog({ key: catalogKey, models: rankAnalyticsModels(report.groups, report.models), efforts: report.efforts })
+         setResult({ key: requestKey, report })
+       })
+       .catch((error: unknown) => {
+-        if (controller.signal.aborted) return
++        if (signal.aborted) return
+         if (error instanceof ApiError && error.status === 401) onAuthRequired?.()
+-        setResult({ key: requestKey, error: true })
++        setResult(previous => previous?.key === requestKey && previous.report ? previous : { key: requestKey, error: true })
+       })
+-    return () => controller.abort()
++    }, ['usage', 'quota'])
+     // requestKey contains every query dimension, including the resolved model list.
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [requestKey, noSelection, onAuthRequired])
+diff --git a/web/src/components/usage/credentials/QuotaRemainingHistory.tsx b/web/src/components/usage/credentials/QuotaRemainingHistory.tsx
+index 7ad5b8fb..bf01de30 100644
+--- a/web/src/components/usage/credentials/QuotaRemainingHistory.tsx
++++ b/web/src/components/usage/credentials/QuotaRemainingHistory.tsx
+@@ -1,6 +1,7 @@
++import { startLiveRefresh } from '@/lib/live'
+ import { useEffect, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+-import { Chart } from 'react-chartjs-2'
++import { Chart } from '@/components/usage/charts/UsageChart'
+ import type { ChartData, ChartOptions } from 'chart.js'
+ import '@/lib/chartjs'
+ import { ApiError, fetchCodexQuotaHistory } from '@/lib/api'
+@@ -51,19 +52,16 @@ export function QuotaRemainingHistory({ authIndex, readOnlyAccountId, onAuthRequ
+   const error = result?.key === requestKey ? result.error ?? '' : ''
+   const loading = result?.key !== requestKey
+   useEffect(() => {
+-    const controller = new AbortController()
+-    const load = async () => {
++    return startLiveRefresh(async (signal) => {
+       try {
+-        const report = await fetchCodexQuotaHistory(authIndex, { weeklyOnly: true, remainingDays: days, readOnlyAccountId }, controller.signal)
+-        if (!controller.signal.aborted) setResult({ key: requestKey, report })
++        const report = await fetchCodexQuotaHistory(authIndex, { weeklyOnly: true, remainingDays: days, readOnlyAccountId }, signal)
++        if (!signal.aborted) setResult({ key: requestKey, report })
+       } catch (failure) {
+-        if (controller.signal.aborted) return
++        if (signal.aborted) return
+         if (failure instanceof ApiError && failure.status === 401) { onAuthRequired?.(); return }
+-        setResult({ key: requestKey, error: t('quota_timeline.load_failed', 'Could not load rate-limit history.') })
++        setResult(previous => previous?.key === requestKey && previous.report ? previous : { key: requestKey, error: t('quota_timeline.load_failed', 'Could not load rate-limit history.') })
+       }
+-    }
+-    void load()
+-    return () => controller.abort()
++    }, ['quota', 'usage'])
+   }, [authIndex, readOnlyAccountId, days, requestKey, onAuthRequired, t])
+ 
+   const points = report ? visibleRemainingPoints(report) : []
+diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
+index f0747916..30f0faa1 100644
+--- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
++++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.tsx
+@@ -1,3 +1,4 @@
++import { startLiveRefresh } from '@/lib/live'
+ import { useEffect, useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+ import { ApiError, fetchCodexQuotaHistory } from '@/lib/api'
+@@ -24,15 +25,14 @@ export function WeeklyQuotaValuePanel({ authIndex, readOnlyAccountId, onAuthRequ
+   const history = loading ? null : result?.history
+   const error = !loading && result?.error
+   useEffect(() => {
+-    const controller = new AbortController()
+-    fetchCodexQuotaHistory(authIndex, { weeklyOnly: true, readOnlyAccountId, windowRole: role }, controller.signal)
+-      .then(history => { if (!controller.signal.aborted) setResult({ key: requestKey, history, error: false }) })
++    return startLiveRefresh(async (signal) => { await fetchCodexQuotaHistory(authIndex, { weeklyOnly: true, readOnlyAccountId, windowRole: role }, signal)
++      .then(history => { if (!signal.aborted) setResult({ key: requestKey, history, error: false }) })
+       .catch((cause: unknown) => {
+-        if (controller.signal.aborted) return
++        if (signal.aborted) return
+         if (cause instanceof ApiError && cause.status === 401) onAuthRequired?.()
+-        setResult({ key: requestKey, history: null, error: true })
++        setResult(previous => previous?.key === requestKey && previous.history ? previous : { key: requestKey, history: null, error: true })
+       })
+-    return () => controller.abort()
++    }, ['quota', 'usage'])
+   }, [authIndex, readOnlyAccountId, role, requestKey, onAuthRequired])
+   const money = (value: number | null | undefined) => value == null ? '—' : new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value)
+   const percent = (value: number | null) => value == null || !Number.isFinite(value) ? '—' : `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value)} %`
+diff --git a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+index 42550b62..216d9408 100644
+--- a/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
++++ b/web/src/components/usage/credentials/WeeklyTrendCharts.tsx
+@@ -1,6 +1,6 @@
+ import { useState } from 'react'
+ import { useTranslation } from 'react-i18next'
+-import { Chart } from 'react-chartjs-2'
++import { Chart } from '@/components/usage/charts/UsageChart'
+ import type { ChartData, ChartOptions } from 'chart.js'
+ import '@/lib/chartjs'
+ import type { WeeklyTrendPoint } from '@/lib/types'
+diff --git a/web/src/components/usage/credentials/test/ApiProviderQuota.test.tsx b/web/src/components/usage/credentials/test/ApiProviderQuota.test.tsx
+index 462a0f2c..9f7d4933 100644
+--- a/web/src/components/usage/credentials/test/ApiProviderQuota.test.tsx
++++ b/web/src/components/usage/credentials/test/ApiProviderQuota.test.tsx
+@@ -3,10 +3,12 @@ import React, { act } from "react";
+ import { createRoot, type Root } from "react-dom/client";
+ import { afterEach, expect, it, vi } from "vitest";
+ import i18n from "@/i18n";
++import {mockLiveStream} from '@/../test-helpers/liveStream';
++let emit:ReturnType<typeof mockLiveStream>;
+ const api = vi.hoisted(() => ({ fetchAdminProviderQuota: vi.fn() }));
+ vi.mock("@/lib/api", async (original) => ({
+   ...(await original<typeof import("@/lib/api")>()),
+-  ...api,
++  ...api, apiFetch:vi.fn(),
+ }));
+ import { ApiProviderQuota } from "../ApiProviderQuota";
+ import { AiProviderCredentialsSection } from "../AiProviderCredentialsSection";
+@@ -15,6 +17,7 @@ let root: Root | undefined;
+ let container: HTMLDivElement;
+ async function mount(element: React.ReactNode) {
+   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++  emit=mockLiveStream();
+   await i18n.changeLanguage("en");
+   container = document.createElement("div");
+   document.body.append(container);
+@@ -68,7 +71,7 @@ it("shows only observed API providers and preserves their quota after read failu
+     new Error("Synthetic unavailable"),
+   );
+   await act(async () => {
+-    await vi.advanceTimersByTimeAsync(10_000);
++    emit(['quota']);await vi.advanceTimersByTimeAsync(200);
+   });
+   expect(container.querySelector('[role="alert"]')).not.toBeNull();
+   expect(container.textContent).toContain("75%");
+diff --git a/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx b/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx
+index 9188af8c..4bb79ada 100644
+--- a/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx
+@@ -95,7 +95,7 @@ describe('CredentialHealthPanel health semantics', () => {
+     expect(html).toContain('10:40 - 10:50|usage_stats.credentials_health_status_failure|1/2|33.3%')
+   })
+ 
+-  it('scales every populated bar continuously by success rate above the empty baseline', () => {
++  it('scales stacked volume by request totals, including failure-only traffic', () => {
+     const html = renderToStaticMarkup(
+       <CredentialHealthPanel
+         displayName="Provider Key"
+@@ -115,11 +115,10 @@ describe('CredentialHealthPanel health semantics', () => {
+     expect(bars.slice(0, 5).map(({ label }) => label.split('|').at(-1))).toEqual([
+       '99.0%', '90.0%', '50.0%', '33.3%', '0.0%',
+     ])
+-    const heights = bars.slice(0, 6).map(({ height }) => height)
+-    for (let index = 1; index < heights.length; index += 1) {
+-      expect(heights[index - 1]).toBeGreaterThan(heights[index])
+-    }
+-    expect(heights[5]).toBeGreaterThan(0)
++    const element = document.createElement('div')
++    element.innerHTML = html
++    const heights = Array.from(element.querySelectorAll<HTMLElement>('[role="listitem"]'), cell => Number.parseFloat((cell.firstElementChild as HTMLElement).style.height))
++    expect(heights.slice(0, 6)).toEqual([100, 10, 2, 3, 1, 0])
+ 
+   })
+ 
+diff --git a/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx b/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx
+index 6735c7c9..ae0643e4 100644
+--- a/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx
+@@ -84,3 +84,18 @@ describe('CredentialHealthPanel', () => {
+     expect(html).toContain('Failed requests in 5h: 1 · latest 10:10 - 10:20')
+   })
+ })
++
++it('scales request volume linearly with separate success/error segments and empty baselines', () => {
++ const html = renderToStaticMarkup(<CredentialHealthPanel displayName="Volume" variant="compact" health={{
++ window_seconds: 18000, bucket_seconds: 600, window_start: '2026-05-10T05:30:00Z', window_end: '2026-05-10T10:30:00Z', total_success: 12, total_failure: 4, success_rate: 75, input_tokens: 0, cache_read_tokens: 0,
++ buckets: [{start_time: '2026-05-10T10:00:00Z', end_time: '2026-05-10T10:10:00Z', success: 8, failure: 4, rate: 2/3}, {start_time: '2026-05-10T10:10:00Z', end_time: '2026-05-10T10:20:00Z', success: 4, failure: 0, rate: 1}]
++ }} />)
++ expect(html).toContain('data-usage-total="12"')
++ expect(html).toContain('data-usage-total="4"')
++ expect(html).toContain('height:100%')
++ expect(html).toContain('height:33.33333333333333%')
++ expect(html).toContain('height:66.66666666666666%')
++ expect(html).toContain('height:27px')
++ expect(html).toContain('height:0%')
++ expect(html).not.toContain('NaN')
++})
+diff --git a/web/src/components/usage/credentials/test/quotaRefreshRecovery.test.tsx b/web/src/components/usage/credentials/test/quotaRefreshRecovery.test.tsx
+index 87b06a4e..edaaa557 100644
+--- a/web/src/components/usage/credentials/test/quotaRefreshRecovery.test.tsx
++++ b/web/src/components/usage/credentials/test/quotaRefreshRecovery.test.tsx
+@@ -1,5 +1,7 @@
+ // @vitest-environment happy-dom
+ 
++import {mockLiveStream} from '@/../test-helpers/liveStream';
++let emit:ReturnType<typeof mockLiveStream>;
+ import { act, useEffect } from 'react'
+ import { createRoot, type Root } from 'react-dom/client'
+ import { beforeEach, afterEach, expect, it, vi } from 'vitest'
+@@ -13,7 +15,7 @@ import { buildCredentialRows } from '../credentialViewModels'
+ 
+ vi.mock('@/lib/api', async (original) => ({
+   ...await original<typeof import('@/lib/api')>(),
+-  fetchUsageQuotaCache: vi.fn(), fetchUsageQuotaRefreshTask: vi.fn(), refreshUsageQuotas: vi.fn(),
++  fetchUsageQuotaCache: vi.fn(), apiFetch:vi.fn(), fetchUsageQuotaRefreshTask: vi.fn(), refreshUsageQuotas: vi.fn(),
+ }))
+ vi.mock('react-i18next', () => ({
+   initReactI18next: { type: '3rdParty', init: () => undefined },
+@@ -51,6 +53,7 @@ let container: HTMLDivElement
+ beforeEach(() => {
+   globalThis.IS_REACT_ACT_ENVIRONMENT = true
+   vi.useFakeTimers()
++ emit=mockLiveStream();
+   vi.mocked(fetchUsageQuotaCache).mockReset().mockResolvedValue(successCache)
+   vi.mocked(refreshUsageQuotas).mockReset().mockResolvedValue({ tasks: [{ authIndex: id }], rejected: [], accepted: 1, skipped: 0, limit: 1 })
+   vi.mocked(fetchUsageQuotaRefreshTask).mockReset().mockResolvedValue(failure)
+@@ -92,7 +95,7 @@ it('shows a cached failure after a successful manual refresh', async () => {
+   await act(async () => root.render(<Harness />))
+   await act(async () => latest.tasks.refreshQuotaForAuthIndex(id))
+   vi.mocked(fetchUsageQuotaCache).mockResolvedValue(failedCache)
+-  await act(async () => vi.advanceTimersByTimeAsync(60_000))
++  await act(async () => {emit(['usage','quota','accounts']);await vi.advanceTimersByTimeAsync(200)})
+   expectFailure()
+ })
+ 
+@@ -207,7 +210,7 @@ it('clears a cache-only error when the server cache expires', async () => {
+   await act(async () => root.render(<Harness />))
+   expectFailure()
+   vi.mocked(fetchUsageQuotaCache).mockResolvedValue({ items: [] })
+-  await act(async () => vi.advanceTimersByTimeAsync(60_000))
++  await act(async () => {emit(['usage','quota','accounts']);await vi.advanceTimersByTimeAsync(200)})
+   expect(latest.cache.quotaStateByAuthIndex[id]?.error).toBeUndefined()
+   expect(container.textContent).not.toContain('Your session has ended')
+ })
+diff --git a/web/src/components/usage/credentials/test/useCredentialPages.activeOnly.test.tsx b/web/src/components/usage/credentials/test/useCredentialPages.activeOnly.test.tsx
+index 6f2c68fe..5d9e84c6 100644
+--- a/web/src/components/usage/credentials/test/useCredentialPages.activeOnly.test.tsx
++++ b/web/src/components/usage/credentials/test/useCredentialPages.activeOnly.test.tsx
+@@ -43,7 +43,7 @@ describe('AI Provider active-only state', () => {
+ 
+     expect(latest?.credentialActiveOnly).toBe(true)
+     expect(latest?.aiProviderActiveOnly).toBe(false)
+-    let parsed = new URL(String(fetchMock.mock.calls.at(-1)?.[0]), 'http://localhost')
++    let parsed = new URL(String(fetchMock.mock.calls.filter(call=>String(call[0]).includes('auth_type')).at(-1)?.[0]), 'http://localhost')
+     expect(parsed.searchParams.get('auth_type')).toBe('2')
+     expect(parsed.searchParams.has('active_only')).toBe(false)
+ 
+@@ -56,7 +56,7 @@ describe('AI Provider active-only state', () => {
+     expect(latest?.aiProviderPage).toBe(1)
+     expect(window.localStorage.getItem('cpa-usage-keeper-ai-providers-active-only')).toBe('true')
+ 
+-    parsed = new URL(String(fetchMock.mock.calls.at(-1)?.[0]), 'http://localhost')
++    parsed = new URL(String(fetchMock.mock.calls.filter(call=>String(call[0]).includes('auth_type')).at(-1)?.[0]), 'http://localhost')
+     expect(parsed.searchParams.get('auth_type')).toBe('2')
+     expect(parsed.searchParams.get('active_only')).toBe('true')
+   })
+diff --git a/web/src/components/usage/credentials/test/useQuotaCache.test.tsx b/web/src/components/usage/credentials/test/useQuotaCache.test.tsx
+index 967782f8..9cac466c 100644
+--- a/web/src/components/usage/credentials/test/useQuotaCache.test.tsx
++++ b/web/src/components/usage/credentials/test/useQuotaCache.test.tsx
+@@ -5,10 +5,11 @@ import { createRoot, type Root } from 'react-dom/client'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import { fetchUsageQuotaCache } from '@/lib/api'
+ import { useQuotaCache } from '../useQuotaCache'
++import {mockLiveStream} from '@/../test-helpers/liveStream'
+ 
+ vi.mock('@/lib/api', async (importOriginal) => ({
+   ...await importOriginal<typeof import('@/lib/api')>(),
+-  fetchUsageQuotaCache: vi.fn(),
++  fetchUsageQuotaCache: vi.fn(), apiFetch: vi.fn(),
+ }))
+ 
+ let latest: ReturnType<typeof useQuotaCache> | null = null
+@@ -19,6 +20,7 @@ function Harness({ enabled, authIndexes = ['auth-1'] }: { enabled: boolean; auth
+ }
+ 
+ describe('quota cache polling', () => {
++  let emit:ReturnType<typeof mockLiveStream>
+   let root: Root
+   let container: HTMLDivElement
+   let hiddenDescriptor: PropertyDescriptor | undefined
+@@ -33,6 +35,7 @@ describe('quota cache polling', () => {
+     hiddenDescriptor = Object.getOwnPropertyDescriptor(document, 'hidden')
+     Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+     vi.useFakeTimers()
++    emit=mockLiveStream()
+     vi.mocked(fetchUsageQuotaCache).mockReset().mockResolvedValue({ items: [] })
+     container = document.createElement('div')
+     document.body.appendChild(container)
+@@ -48,7 +51,7 @@ describe('quota cache polling', () => {
+     vi.useRealTimers()
+   })
+ 
+-  it('polls cached quota every ten seconds only while enabled and ignores fresh references to equal auth indexes', async () => {
++  it('refreshes cached quota on SSE only while enabled and ignores fresh references to equal auth indexes', async () => {
+     await act(async () => root.render(<Harness enabled={false} />))
+     expect(vi.getTimerCount()).toBe(0)
+     expect(fetchUsageQuotaCache).not.toHaveBeenCalled()
+@@ -59,7 +62,7 @@ describe('quota cache polling', () => {
+     expect(fetchUsageQuotaCache).toHaveBeenCalledWith(['auth-1'], expect.any(AbortSignal))
+     await act(async () => vi.advanceTimersByTimeAsync(9_999))
+     expect(fetchUsageQuotaCache).toHaveBeenCalledOnce()
+-    await act(async () => vi.advanceTimersByTimeAsync(1))
++    await act(async () => {emit(['quota']);await vi.advanceTimersByTimeAsync(200)})
+     expect(fetchUsageQuotaCache).toHaveBeenCalledTimes(2)
+ 
+     await act(async () => root.render(<Harness enabled={false} />))
+@@ -74,7 +77,7 @@ describe('quota cache polling', () => {
+     await act(async () => vi.advanceTimersByTimeAsync(30_000))
+     expect(fetchUsageQuotaCache).not.toHaveBeenCalled()
+ 
+-    await act(async () => setHidden(false))
++    await act(async () => {setHidden(false);emit(['sync']);await vi.advanceTimersByTimeAsync(200)})
+     expect(fetchUsageQuotaCache).toHaveBeenCalledOnce()
+     expect(fetchUsageQuotaCache).toHaveBeenCalledWith(['auth-1'], expect.any(AbortSignal))
+   })
+@@ -95,7 +98,7 @@ describe('quota cache polling', () => {
+     await act(async () => vi.advanceTimersByTimeAsync(30_000))
+     expect(fetchUsageQuotaCache).toHaveBeenCalledOnce()
+ 
+-    await act(async () => setHidden(false))
++    await act(async () => {setHidden(false);emit(['sync']);await vi.advanceTimersByTimeAsync(200)})
+     expect(fetchUsageQuotaCache).toHaveBeenCalledTimes(2)
+   })
+ 
+diff --git a/web/src/components/usage/credentials/useCredentialPages.ts b/web/src/components/usage/credentials/useCredentialPages.ts
+index 5f81adde..8d202502 100644
+--- a/web/src/components/usage/credentials/useCredentialPages.ts
++++ b/web/src/components/usage/credentials/useCredentialPages.ts
+@@ -1,3 +1,4 @@
++import { startLiveRefresh } from '@/lib/live'
+ import { useCallback, useEffect, useRef, useState } from 'react'
+ import { ApiError, fetchUsageIdentitiesPage, resetUsageIdentityStats, type UsageIdentityPageSort } from '@/lib/api'
+ import type { UsageIdentity, UsageIdentityTypeCount } from '@/lib/types'
+@@ -168,12 +169,12 @@ export function useCredentialPages({ enabledCredentials, enabledAiProviders, onA
+     }
+   }, [])
+ 
+-  const refreshCredentials = useCallback(async () => {
++  const refreshCredentials = useCallback(async (background = false, signal?:AbortSignal) => {
+     credentialsRequestControllerRef.current?.abort()
+     const controller = new AbortController()
+     credentialsRequestControllerRef.current = controller
+-
+-    setCredentialsLoading(true)
++    signal?.addEventListener('abort',()=>controller.abort(),{once:true})
++    if (!background) setCredentialsLoading(true)
+     setCredentialsError('')
+     try {
+       const response = await fetchUsageIdentitiesPage(controller.signal, { authType: 1, activeOnly: credentialActiveOnly ? true : undefined, types: credentialProviderFilterTypes('credentials', credentialProviderFilter), sort: credentialSort, page: credentialPage, pageSize: credentialPageSize })
+@@ -192,7 +193,7 @@ export function useCredentialPages({ enabledCredentials, enabledAiProviders, onA
+         onAuthRequired?.()
+         return
+       }
+-      if (credentialsRequestControllerRef.current === controller) {
++      if (!background && credentialsRequestControllerRef.current === controller) {
+         setCredentialIdentities([])
+         setCredentialTypeCounts([])
+         setCredentialTotal(0)
+@@ -207,12 +208,12 @@ export function useCredentialPages({ enabledCredentials, enabledAiProviders, onA
+     }
+   }, [credentialActiveOnly, credentialPage, credentialPageSize, credentialProviderFilter, credentialSort, onAuthRequired])
+ 
+-  const refreshAiProviders = useCallback(async () => {
++  const refreshAiProviders = useCallback(async (background = false, signal?:AbortSignal) => {
+     aiProvidersRequestControllerRef.current?.abort()
+     const controller = new AbortController()
+     aiProvidersRequestControllerRef.current = controller
+-
+-    setAiProvidersLoading(true)
++    signal?.addEventListener('abort',()=>controller.abort(),{once:true})
++    if (!background) setAiProvidersLoading(true)
+     setAiProvidersError('')
+     try {
+       const response = await fetchUsageIdentitiesPage(controller.signal, { authType: 2, activeOnly: aiProviderActiveOnly ? true : undefined, types: credentialProviderFilterTypes('ai-provider', aiProviderProviderFilter), sort: aiProviderSort, page: aiProviderPage, pageSize: aiProviderPageSize })
+@@ -231,7 +232,7 @@ export function useCredentialPages({ enabledCredentials, enabledAiProviders, onA
+         onAuthRequired?.()
+         return
+       }
+-      if (aiProvidersRequestControllerRef.current === controller) {
++      if (!background && aiProvidersRequestControllerRef.current === controller) {
+         setAiProviderIdentities([])
+         setAiProviderTypeCounts([])
+         setAiProviderTotal(0)
+@@ -288,12 +289,10 @@ export function useCredentialPages({ enabledCredentials, enabledAiProviders, onA
+       setCredentialsLoading(false)
+       return
+     }
+-    void refreshCredentials()
+-    const intervalID = window.setInterval(() => {
+-      void refreshCredentials()
+-    }, CREDENTIAL_PAGES_REFRESH_INTERVAL_MS)
++    let initial=true
++    const stop = startLiveRefresh(async (signal) => {await refreshCredentials(!initial,signal);initial=false}, ["accounts", "usage", "clock"])
+     return () => {
+-      window.clearInterval(intervalID)
++      stop()
+       credentialsRequestControllerRef.current?.abort()
+       credentialsRequestControllerRef.current = null
+     }
+@@ -306,12 +305,10 @@ export function useCredentialPages({ enabledCredentials, enabledAiProviders, onA
+       setAiProvidersLoading(false)
+       return
+     }
+-    void refreshAiProviders()
+-    const intervalID = window.setInterval(() => {
+-      void refreshAiProviders()
+-    }, CREDENTIAL_PAGES_REFRESH_INTERVAL_MS)
++    let initial=true
++    const stop = startLiveRefresh(async (signal) => {await refreshAiProviders(!initial,signal);initial=false}, ["accounts", "usage", "clock"])
+     return () => {
+-      window.clearInterval(intervalID)
++      stop()
+       aiProvidersRequestControllerRef.current?.abort()
+       aiProvidersRequestControllerRef.current = null
+     }
+diff --git a/web/src/components/usage/test/OverviewQuotaPanel.test.tsx b/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
+index 1641b9e9..bcd46456 100644
+--- a/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
++++ b/web/src/components/usage/test/OverviewQuotaPanel.test.tsx
+@@ -1,11 +1,13 @@
+ // @vitest-environment happy-dom
++import {mockLiveStream} from '@/../test-helpers/liveStream';
++let emit:ReturnType<typeof mockLiveStream>;
+ import React, { act } from 'react';
+ import { createRoot } from 'react-dom/client';
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import i18n from '@/i18n';
+ import type { ViewerQuotaAccount } from '@/lib/api';
+ const api = vi.hoisted(() => ({ fetchAdminProviderQuota: vi.fn(), fetchKeyQuota: vi.fn(), fetchReadOnlyQuota: vi.fn() }));
+-vi.mock('@/lib/api', async original => ({ ...await original<typeof import('@/lib/api')>(), ...api }));
++vi.mock('@/lib/api', async original => ({ ...await original<typeof import('@/lib/api')>(), ...api, apiFetch:vi.fn() }));
+ import { OverviewQuotaPanel, OverviewQuotaTable, remainingPercent, resetCountdown, observationAge, localizedResetDate } from '../OverviewQuotaPanel';
+ 
+ const now = Date.parse('2026-10-03T15:00:00Z');
+@@ -23,6 +25,7 @@ beforeEach(async () => {
+   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+   await i18n.changeLanguage('en');
+   vi.clearAllMocks();
++ emit=mockLiveStream();
+   for (const fetchQuota of Object.values(api)) fetchQuota.mockResolvedValue({ accounts });
+ });
+ afterEach(() => vi.useRealTimers());
+@@ -98,7 +101,7 @@ describe('overview quota data', () => {
+       expect(selected).toHaveBeenCalledTimes(1);
+       for (const fetchQuota of Object.values(api)) if (fetchQuota !== selected) expect(fetchQuota).not.toHaveBeenCalled();
+       selected.mockRejectedValueOnce(new Error('offline'));
+-      await act(async () => vi.advanceTimersByTimeAsync(10_000));
++      await act(async () => {emit(['usage','quota']);await vi.advanceTimersByTimeAsync(200)});
+       expect(container.textContent).toContain('Codex account 1');
+       expect(container.querySelector('[role="status"]')?.textContent).toBe(i18n.t('key_quota.error'));
+     } finally { await act(async () => root.unmount()); }
+diff --git a/web/src/hooks/useLiveRefresh.ts b/web/src/hooks/useLiveRefresh.ts
+new file mode 100644
+index 00000000..99dce321
+--- /dev/null
++++ b/web/src/hooks/useLiveRefresh.ts
+@@ -0,0 +1,8 @@
++import { useEffect, useRef } from 'react';
++import { startLiveRefresh, type LiveTopic } from '@/lib/live';
++export function useLiveRefresh(refresh: () => Promise<unknown>, topics: readonly LiveTopic[], enabled = true) {
++ const current = useRef(refresh);
++ useEffect(() => { current.current = refresh; }, [refresh]);
++ const key = topics.join(',');
++ useEffect(() => { if (!enabled) return; return startLiveRefresh(async () => current.current(), key.split(',') as LiveTopic[], false); }, [enabled, key]);
++}
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index ab2b42e3..95efa315 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -20,6 +20,8 @@ const getInitialLanguage = (): SupportedLanguage => {
+ const resources = {
+   en: {
+     translation: {
++      usage_graph: {peak: 'Peak {{count}} / 10m'},
++      live: { live: 'Live', connecting: 'Connecting…', reconnecting: 'Reconnecting…', paused: 'Paused while hidden' },
+       overview_limits: { window: 'Window', observed_ago: '{{minutes}}m {{seconds}}s ago', title: 'Usage Limits', account: 'Provider / account', remaining: 'Remaining', resets: 'Resets in', unavailable: 'Quota unavailable', capture_unknown: 'Capture time unavailable', stale: 'Stale observation', awaiting: 'Awaiting update', info: 'Quota details', rpm_avg: 'RPM avg' },
+       read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
+       auto_refresh: { settings: 'Auto-refresh settings', off: 'Off', paused: 'Paused', every: 'Every {{seconds}}s' },
+@@ -1115,6 +1117,8 @@ const resources = {
+   },
+   zh: {
+     translation: {
++      usage_graph: {peak: '峰值 {{count}} / 10分钟'},
++      live: { live: '实时', connecting: '正在连接…', reconnecting: '正在重新连接…', paused: '页面隐藏时暂停' },
+       overview_limits: { window: '窗口', observed_ago: '{{minutes}}分 {{seconds}}秒前', title: '用量限额', account: '提供商 / 账号', remaining: '剩余', resets: '重置倒计时', unavailable: '限额不可用', capture_unknown: '采集时间不可用', stale: '数据已过期', awaiting: '等待更新', info: '限额详情', rpm_avg: 'RPM 平均' },
+       read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
+       auto_refresh: { settings: '自动刷新设置', off: '关闭', paused: '已暂停', every: '每 {{seconds}} 秒' },
+@@ -2210,6 +2214,8 @@ const resources = {
+   },
+   'zh-TW': {
+     translation: {
++      usage_graph: {peak: '峰值 {{count}} / 10分鐘'},
++      live: { live: '即時', connecting: '正在連線…', reconnecting: '正在重新連線…', paused: '頁面隱藏時暫停' },
+       overview_limits: { window: '時段', observed_ago: '{{minutes}}分 {{seconds}}秒前', title: '用量限額', account: '供應商 / 帳號', remaining: '剩餘', resets: '重置倒數', unavailable: '限額不可用', capture_unknown: '擷取時間不可用', stale: '資料已過期', awaiting: '等待更新', info: '限額詳情', rpm_avg: 'RPM 平均' },
+       read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
+       auto_refresh: { settings: '自動重新整理設定', off: '關閉', paused: '已暫停', every: '每 {{seconds}} 秒' },
+diff --git a/web/src/lib/live.ts b/web/src/lib/live.ts
+new file mode 100644
+index 00000000..70483f7f
+--- /dev/null
++++ b/web/src/lib/live.ts
+@@ -0,0 +1,86 @@
++import { apiFetch, apiPath } from './api';
++
++export type LiveTopic = 'sync' | 'usage' | 'quota' | 'accounts' | 'clock';
++export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'paused';
++type Listener = (topics: LiveTopic[]) => void;
++const listeners = new Set<Listener>();
++const statusListeners = new Set<() => void>();
++let status: LiveStatus = 'connecting';
++let controller: AbortController | undefined;
++let retry: ReturnType<typeof setTimeout> | undefined;
++let generation = 0;
++let attempts = 0;
++const setStatus = (value: LiveStatus) => { if (status !== value) { status = value; statusListeners.forEach(listener => listener()); } };
++export const getLiveStatus = () => status;
++export const subscribeLiveStatus = (listener: () => void) => { statusListeners.add(listener); return () => { statusListeners.delete(listener); }; };
++
++// Fetch retains the existing cookie and CPAMC embed-header authentication. Tokens never enter URLs.
++async function connect() {
++  if (!listeners.size || document.hidden || controller) return;
++  const current = new AbortController(); controller = current;
++  const revision = generation;
++  setStatus(attempts ? 'reconnecting' : 'connecting');
++  let watchdog: ReturnType<typeof setTimeout> | undefined;
++  const touch = () => { clearTimeout(watchdog); watchdog = setTimeout(() => current.abort(), 45_000); };
++  try {
++    touch();
++    const response = await apiFetch(apiPath('/live'), { signal: current.signal, headers: { Accept: 'text/event-stream' } });
++    if (response.status === 401 || response.status === 403) { window.dispatchEvent(new Event('keeper:live-auth-required')); return; }
++    if (!response.ok || !response.body || !response.headers.get('content-type')?.includes('text/event-stream')) throw new Error('Live connection unavailable');
++    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
++    while (true) {
++      const { value, done } = await reader.read(); if (done) break;
++      if (current.signal.aborted || revision !== generation) return;
++      touch(); buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
++      if (buffer.length > 65536) throw new Error('Invalid live frame');
++      let boundary: number;
++      while ((boundary = buffer.indexOf('\n\n')) >= 0) {
++        const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
++        const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
++        if (!data) continue;
++        const payload = JSON.parse(data) as { topics?: unknown };
++        if (!Array.isArray(payload.topics)) continue;
++        const topics = payload.topics.filter((topic): topic is LiveTopic => ['sync', 'usage', 'quota', 'accounts', 'clock'].includes(String(topic)));
++        attempts = 0; setStatus('live'); listeners.forEach(listener => listener(topics));
++      }
++    }
++  } catch { /* Retain the last good data while the stream reconnects. */ }
++  finally {
++    current.abort();
++    clearTimeout(watchdog);
++    if (controller === current) controller = undefined;
++    if (revision === generation && listeners.size && !document.hidden) {
++      setStatus('reconnecting');
++      const delay = Math.min(30_000, 1000 * 2 ** Math.min(attempts++, 5));
++      retry = setTimeout(() => { retry = undefined; void connect(); }, delay);
++    }
++  }
++}
++function stop() { generation++; clearTimeout(retry); retry = undefined; controller?.abort(); controller = undefined; }
++function visibility() { stop(); if (document.hidden) setStatus('paused'); else { attempts = 0; void connect(); } }
++export function subscribeLive(listener: Listener) {
++  listeners.add(listener);
++  if (listeners.size === 1) { document.addEventListener('visibilitychange', visibility); window.addEventListener('online', visibility); if (document.hidden) setStatus('paused'); else void connect(); }
++  return () => { listeners.delete(listener); if (!listeners.size) { stop(); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('online', visibility); } };
++}
++
++// Each consumer has one in-flight read and one trailing refresh. Bursts never cancel a useful read.
++export function startLiveRefresh(refresh: (signal: AbortSignal) => Promise<unknown>, topics: readonly LiveTopic[], initial = true) {
++  let stopped = false, dirty = false;
++  let request: AbortController | undefined;
++  let lastRequest: AbortController | undefined;
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  const run = async () => {
++    timer = undefined;
++    if (stopped || document.hidden || request || !dirty) return;
++    dirty = false; const current = new AbortController(); request = current; lastRequest = current;
++    try { await refresh(current.signal); } catch { /* The caller owns error presentation. */ }
++    finally { if (request === current) request = undefined; if (dirty && !stopped) schedule(); }
++  };
++  const schedule = () => { if (!timer && !request && !stopped) timer = setTimeout(() => { void run(); }, 200); };
++  const unsubscribe = subscribeLive(changed => { if (changed.includes('sync') || topics.some(topic => changed.includes(topic))) { dirty = true; schedule(); } });
++  const hide = () => { if (document.hidden) { lastRequest?.abort(); dirty = true; } };
++  document.addEventListener('visibilitychange', hide);
++  if (initial) { dirty = true; void run(); }
++  return () => { stopped = true; clearTimeout(timer); lastRequest?.abort(); unsubscribe(); document.removeEventListener('visibilitychange', hide); };
++}
+diff --git a/web/src/lib/quotaPolling.ts b/web/src/lib/quotaPolling.ts
+index 0429dec9..e904f7ac 100644
+--- a/web/src/lib/quotaPolling.ts
++++ b/web/src/lib/quotaPolling.ts
+@@ -1,40 +1,5 @@
+-export function startQuotaPolling(
+-  refresh: (signal: AbortSignal) => Promise<unknown>,
+-  interval = 10_000,
+-) {
+-  let stopped = false;
+-  let visibleRefreshPending = false;
+-  let controller: AbortController | null = null;
+-  const run = async () => {
+-    if (stopped || document.hidden || controller) return;
+-    const current = new AbortController();
+-    controller = current;
+-    try {
+-      await refresh(current.signal);
+-    } catch {
+-      /* callers present errors; retain last good data */
+-    } finally {
+-      if (controller === current) controller = null;
+-      if (visibleRefreshPending && !stopped && !document.hidden) {
+-        visibleRefreshPending = false;
+-        void run();
+-      }
+-    }
+-  };
+-  const visibility = () => {
+-    if (document.hidden) controller?.abort();
+-    else {
+-      if (controller) visibleRefreshPending = true;
+-      else void run();
+-    }
+-  };
+-  const timer = window.setInterval(() => void run(), interval);
+-  document.addEventListener('visibilitychange', visibility);
+-  void run();
+-  return () => {
+-    stopped = true;
+-    window.clearInterval(timer);
+-    document.removeEventListener('visibilitychange', visibility);
+-    controller?.abort();
+-  };
++import { startLiveRefresh } from './live';
++// Retain the old helper signature for existing callers; updates now follow backend notifications.
++export function startQuotaPolling(refresh: (signal: AbortSignal) => Promise<unknown>, _interval = 10_000) {
++  return startLiveRefresh(refresh, ['quota', 'usage']);
+ }
+diff --git a/web/src/lib/test/quotaPolling.test.ts b/web/src/lib/test/quotaPolling.test.ts
+index d0041ded..3eac58eb 100644
+--- a/web/src/lib/test/quotaPolling.test.ts
++++ b/web/src/lib/test/quotaPolling.test.ts
+@@ -1,67 +1,41 @@
+ // @vitest-environment happy-dom
+-import { afterEach, describe, expect, it, vi } from 'vitest';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+ import { startQuotaPolling } from '../quotaPolling';
+-describe('cached quota polling', () => {
+-  it('queues visibility refresh until an aborted request settles', async () => {
+-    vi.useFakeTimers();
+-    let hidden = false;
+-    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+-    let finish: () => void = () => {};
+-    const refresh = vi.fn(
+-      () =>
+-        new Promise<void>((resolve) => {
+-          finish = resolve;
+-        }),
+-    );
+-    const stop = startQuotaPolling(refresh);
+-    hidden = true;
+-    document.dispatchEvent(new Event('visibilitychange'));
+-    hidden = false;
+-    document.dispatchEvent(new Event('visibilitychange'));
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-    finish();
+-    await Promise.resolve();
+-    expect(refresh).toHaveBeenCalledTimes(2);
+-    stop();
+-    finish();
+-  });
+-  afterEach(() => {
+-    vi.useRealTimers();
+-    vi.restoreAllMocks();
+-  });
+-  it('polls every ten seconds, pauses hidden tabs, refreshes on visibility, and never overlaps', async () => {
+-    vi.useFakeTimers();
+-    let hidden = false;
+-    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+-    let finish: () => void = () => {};
+-    const refresh = vi.fn(
+-      (_signal: AbortSignal) =>
+-        new Promise<void>((resolve) => {
+-          finish = resolve;
+-        }),
+-    );
+-    const stop = startQuotaPolling(refresh);
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-    await vi.advanceTimersByTimeAsync(30000);
+-    expect(refresh).toHaveBeenCalledTimes(1);
+-    finish();
+-    await Promise.resolve();
+-    await vi.advanceTimersByTimeAsync(10000);
+-    expect(refresh).toHaveBeenCalledTimes(2);
+-    hidden = true;
+-    document.dispatchEvent(new Event('visibilitychange'));
+-    expect(refresh.mock.calls[1][0].aborted).toBe(true);
+-    finish();
+-    await Promise.resolve();
+-    await vi.advanceTimersByTimeAsync(30000);
+-    expect(refresh).toHaveBeenCalledTimes(2);
+-    hidden = false;
+-    document.dispatchEvent(new Event('visibilitychange'));
+-    expect(refresh).toHaveBeenCalledTimes(3);
+-    stop();
+-    finish();
+-    await Promise.resolve();
+-    await vi.advanceTimersByTimeAsync(10000);
+-    expect(refresh).toHaveBeenCalledTimes(3);
++import { startLiveRefresh } from '../live';
++import { apiFetch } from '../api';
++import { mockLiveStream } from '@/../test-helpers/liveStream';
++vi.mock('../api',async original=>({...await original<typeof import('../api')>(),apiFetch:vi.fn()}));
++describe('SSE cached refresh',()=>{
++ let hidden=false;let stop:(()=>void)|undefined;let emit:ReturnType<typeof mockLiveStream>;
++ beforeEach(()=>{vi.useFakeTimers();hidden=false;vi.spyOn(document,'hidden','get').mockImplementation(()=>hidden);emit=mockLiveStream();});
++ afterEach(()=>{stop?.();vi.useRealTimers();vi.restoreAllMocks();vi.clearAllMocks();});
++ it('parses fragmented frames, coalesces bursts and performs no interval polling',async()=>{
++  const refresh=vi.fn().mockResolvedValue(undefined);stop=startQuotaPolling(refresh);
++  await vi.advanceTimersByTimeAsync(10000);expect(refresh).toHaveBeenCalledTimes(1);
++  emit(['quota'],true);emit(['quota']);emit(['usage']);await vi.advanceTimersByTimeAsync(200);
++  expect(refresh).toHaveBeenCalledTimes(2);expect(apiFetch).toHaveBeenCalledTimes(1);
++  emit(['accounts']);await vi.advanceTimersByTimeAsync(200);expect(refresh).toHaveBeenCalledTimes(2);
++ });
++ it('serializes reads with one trailing update, aborts hidden reads and resyncs on reconnect',async()=>{
++  let finish=()=>{};const signals:AbortSignal[]=[];
++  const refresh=vi.fn((signal:AbortSignal)=>{signals.push(signal);return new Promise<void>(resolve=>{finish=resolve;});});
++  stop=startQuotaPolling(refresh);emit(['quota']);emit(['quota']);await vi.advanceTimersByTimeAsync(500);expect(refresh).toHaveBeenCalledTimes(1);
++  finish();await vi.advanceTimersByTimeAsync(200);expect(refresh).toHaveBeenCalledTimes(2);
++  hidden=true;document.dispatchEvent(new Event('visibilitychange'));expect(signals[1].aborted).toBe(true);
++  finish();await vi.advanceTimersByTimeAsync(1000);expect(refresh).toHaveBeenCalledTimes(2);
++  hidden=false;document.dispatchEvent(new Event('visibilitychange'));emit(['sync']);await vi.advanceTimersByTimeAsync(200);expect(refresh).toHaveBeenCalledTimes(3);
++  stop();stop=undefined;expect(signals[2].aborted).toBe(true);finish();
++ });
++ it('reconnects after EOF and requests a fresh snapshot',async()=>{
++   vi.mocked(apiFetch).mockResolvedValueOnce(new Response(new ReadableStream({start(controller){controller.close()}}),{headers:{'Content-Type':'text/event-stream'}}));
++   const refresh=vi.fn().mockResolvedValue(undefined);stop=startLiveRefresh(refresh,['usage'],false);
++   await vi.advanceTimersByTimeAsync(1000);expect(apiFetch).toHaveBeenCalledTimes(2);
++   emit(['sync']);await vi.advanceTimersByTimeAsync(200);expect(refresh).toHaveBeenCalledOnce();
+   });
++  it('emits auth expiry without exposing credentials in URLs',async()=>{
++  const auth=vi.fn();window.addEventListener('keeper:live-auth-required',auth);
++  vi.mocked(apiFetch).mockResolvedValueOnce(new Response(null,{status:401}));stop=startLiveRefresh(vi.fn(),['usage'],false);
++  await vi.advanceTimersByTimeAsync(0);expect(auth).toHaveBeenCalledOnce();expect(vi.mocked(apiFetch).mock.calls[0][0]).toMatch(/\/live$/);
++  window.removeEventListener('keeper:live-auth-required',auth);
++ });
+ });
+diff --git a/web/src/pages/KeyAnalysisPage.tsx b/web/src/pages/KeyAnalysisPage.tsx
+index 5d2318b7..cd13a546 100644
+--- a/web/src/pages/KeyAnalysisPage.tsx
++++ b/web/src/pages/KeyAnalysisPage.tsx
+@@ -1,3 +1,4 @@
++import { useLiveRefresh } from '@/hooks/useLiveRefresh';
+ import { useChartRefresh } from '@/components/usage/charts/chartLifecycle';
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+@@ -166,6 +167,8 @@ export function KeyAnalysisPage({ apiKey, readOnly = false, selectedApiKeyId, ke
+     }
+   }, [loadAnalysis, manualRefreshLoading]);
+ 
++  useLiveRefresh(async () => loadAnalysis(false), ["usage", "clock"]);
++
+   const displayAnalysisError = analysisError === 'COSTS_BUSY'
+     ? t('key_analysis.costs_busy')
+     : analysisError ? t('key_analysis.load_failed') : '';
+diff --git a/web/src/pages/ReadOnlyReportingPage.tsx b/web/src/pages/ReadOnlyReportingPage.tsx
+index 640dae1f..8e8e0480 100644
+--- a/web/src/pages/ReadOnlyReportingPage.tsx
++++ b/web/src/pages/ReadOnlyReportingPage.tsx
+@@ -1,7 +1,8 @@
++import {startLiveRefresh} from '@/lib/live';
+ import {useCallback,useEffect,useMemo,useRef,useState,type ReactNode} from 'react';
+ import {useTranslation} from 'react-i18next';
+ import {ApiError,exportUsageEvents,fetchReadOnlyReport,fetchUsageEvents,type UsageEventsExportFormat,type UsageIdentityPageSort} from '@/lib/api';
+-import type {UsageCustomRange,UsageTimeRange,UsageEventsResponse,UsageIdentitiesPageResponse,UsageQuotaCacheResponse,UsageSourceFilterOption} from '@/lib/types';
++import type {UsageCustomRange,UsageTimeRange,UsageEventsResponse,UsageIdentitiesPageResponse,UsageQuotaCacheResponse,UsageSourceFilterOption,UsageIdentity} from '@/lib/types';
+ import {KeyViewerShell} from '@/features/key-viewer/KeyViewerShell';
+ import type {KeyViewerPath} from '@/features/key-viewer/navigation';
+ import {RequestEventsDetailsCard} from '@/components/usage/RequestEventsDetailsCard';
+@@ -39,22 +40,23 @@ export function ReadOnlyReportingPage({page,selectedApiKeyId,keyFilter,onNavigat
+ 
+  useEffect(()=>{
+   moreController.current?.abort();moreController.current=null;setLoadingMore(false);
+-  const controller=new AbortController();setLoading(true);setError('');setEvents(null);setAccounts(null);setNextCursor(undefined);setAutoLoadMore(true);
+-  const load=async()=>{
++  setEvents(null);setAccounts(null);setNextCursor(undefined);setLoading(true);setError('');setAutoLoadMore(true);
++  let first=true;
++  const stop=startLiveRefresh(async(signal)=>{
+    try {
+     if(page==='events') {
+      const params=new URLSearchParams();for(const [key,value] of Object.entries(query))if(value!==undefined)params.set(key,String(value));if(selectedApiKeyId)params.set('api_key_id',selectedApiKeyId);
+-     const [data,filters]=await Promise.all([fetchUsageEvents(query,controller.signal,eventOptions),fetchReadOnlyReport<typeof options>('events/filters',params,controller.signal)]);
+-     if(controller.signal.aborted)return;setEvents(data);setOptions(filters);setNextCursor(data.has_more?data.next_cursor:undefined);
++     const [data,filters]=await Promise.all([fetchUsageEvents(query,signal,eventOptions),fetchReadOnlyReport<typeof options>('events/filters',params,signal)]);
++     if(signal.aborted)return;setEvents(previous=>first||!previous?data:{...data,events:[...data.events,...previous.events.filter(event=>!data.events.some(fresh=>fresh.id===event.id))]});setOptions(filters);if(first)setNextCursor(data.has_more?data.next_cursor:undefined);
+     } else {
+      const params=new URLSearchParams({auth_type:page==='auth-files'?'1':'2',page:String(number),page_size:String(size),active_only:String(active),sort});
+      if(provider)params.append('type',provider);
+-     const data=await fetchReadOnlyReport<UsageIdentitiesPageResponse>('accounts',params,controller.signal);
+-     if(controller.signal.aborted)return;setAccounts(data);
++     const data=await fetchReadOnlyReport<UsageIdentitiesPageResponse>('accounts',params,signal);
++     if(signal.aborted)return;setAccounts(data);
+ 
+     }
+-   } catch(err){if(!controller.signal.aborted)fail(err);}finally{if(!controller.signal.aborted)setLoading(false);}
+-  };void load();return()=>{controller.abort();moreController.current?.abort();};
++   } catch(err){if(!signal.aborted)fail(err);}finally{if(!signal.aborted)setLoading(false);first=false;}
++  },page==='events'?['usage','clock']:['accounts','usage']);return()=>{stop();moreController.current?.abort();};
+  },[page,query,eventOptions,selectedApiKeyId,number,size,active,sort,provider,revision,fail]);
+ 
+  useEffect(()=>{
+@@ -65,7 +67,9 @@ export function ReadOnlyReportingPage({page,selectedApiKeyId,keyFilter,onNavigat
+   }catch(err){if(!signal.aborted){if(err instanceof ApiError&&err.status===401)onAuthRequired();else setError('Cached quota is unavailable.')}}});
+  },[page,onAuthRequired]);
+ 
+- const loadMore=async()=>{
++
++
++  const loadMore=async()=>{
+   if(!nextCursor||loadingMore)return;setLoadingMore(true);const controller=new AbortController();moreController.current=controller;
+   try {const data=await fetchUsageEvents(query,controller.signal,{...eventOptions,cursor:nextCursor});if(controller.signal.aborted)return;setEvents(previous=>previous?{...data,events:[...previous.events,...data.events]}:data);setNextCursor(data.has_more?data.next_cursor:undefined);setAutoLoadMore(true);}catch(err){if(!controller.signal.aborted){fail(err);setAutoLoadMore(false);}}finally{if(moreController.current===controller){setLoadingMore(false);moreController.current=null;}}
+  };
+@@ -75,17 +79,29 @@ export function ReadOnlyReportingPage({page,selectedApiKeyId,keyFilter,onNavigat
+  const quotaMap=useMemo(()=>new Map(cache.items.filter(item=>item.quota).map(item=>[item.auth_index,item.quota!])),[cache]);
+  const authRows=useMemo(()=>buildCredentialRows(accounts?.identities??[],quotaMap),[accounts,quotaMap]);
+  const providerRows=useMemo(()=>buildAiProviderCredentialRows(accounts?.identities??[]),[accounts]);
++ const detailId=detail?.row.identity.id;const detailKind=detail?.kind;
++  useEffect(()=>{
++   if(!detailId||!detailKind)return;
++   const kind=detailKind;
++   return startLiveRefresh(async(signal)=>{try{
++    const identity=await fetchReadOnlyReport<UsageIdentity>('accounts/'+encodeURIComponent(detailId),undefined,signal);
++    if(signal.aborted)return;
++    const updated=kind==='credential'?buildCredentialRows([identity],quotaMap)[0]:buildAiProviderCredentialRows([identity])[0];
++    if(updated)setDetail(previous=>previous?.row.identity.id===identity.id?{kind,row:updated} as CredentialDetailSelection:previous);
++   }catch(err){if(!signal.aborted)fail(err);}},['accounts','usage']);
++  },[detailKind,detailId,quotaMap,fail]);
++  const liveDetail:CredentialDetailSelection|null=detail?.kind==='credential'?{kind:'credential',row:authRows.find(row=>row.identity.id===detail.row.identity.id)??buildCredentialRows([detail.row.identity],quotaMap)[0]}:detail?.kind==='ai-provider'?{kind:'ai-provider',row:providerRows.find(row=>row.identity.id===detail.row.identity.id)??detail.row}:null;
+  const pagination={reportingOnly:true,total:accounts?.total_count??0,page:number,totalPages:accounts?.total_pages??1,pageSize:size,activeOnly:active,sort,loading,
+   onPageChange:setNumber,onPageSizeChange:(value:number)=>{setSize(value);setNumber(1);},onActiveOnlyChange:(value:boolean)=>{setActive(value);setNumber(1);},onSortChange:(value:UsageIdentityPageSort)=>{setSort(value);setNumber(1);}};
+  return <KeyViewerShell activePage={page} readOnly onNavigate={onNavigate} onAuthRequired={onAuthRequired} onRefresh={()=>setRevision(value=>value+1)} refreshing={loading}
+   filters={page==='events'?[keyFilter,<TimeRangeControl key="range" value={range} customRange={custom} ariaLabel={t('usage_stats.range_filter')} labelInsideTrigger onChange={(value,next)=>{setRange(value);setCustom(next);}}/>]:[<Select key="provider" value={provider} options={[{value:'',label:t('usage_stats.api_key_filter_all')},...(accounts?.type_counts??[]).map(item=>({value:item.type,label:item.type}))]} ariaLabel="Provider" onChange={value=>{setProvider(value);setNumber(1);}}/>]}>
+   {error&&<p role="alert">{error}</p>}
+-  {page==='events'&&<RequestEventsDetailsCard events={events?.events??[]} loading={loading} totalCount={events?.total_count??0} modelOptions={options.models} sourceOptions={options.sources}
++  {page==='events'&&<RequestEventsDetailsCard events={events?.events??[]} loading={loading&&!events} totalCount={events?.total_count??0} modelOptions={options.models} sourceOptions={options.sources}
+    modelFilter={model} sourceFilter={source} resultFilter={result} onModelFilterChange={setModel} onSourceFilterChange={setSource} onResultFilterChange={setResult}
+    onExport={format=>void doExport(format)} exportingFormat={exporting} hasMore={Boolean(nextCursor)} loadingMore={loadingMore} autoLoadMore={autoLoadMore} onLoadMore={()=>void loadMore()} requestLogAccessEnabled={false}/>}
+   {page==='auth-files'&&<CredentialsSection {...pagination} rows={authRows} quotaRefreshing={false} quotaRefreshError="" quotaInspectionStatus={null} quotaInspectionLoading={false} quotaInspectionStarting={false} quotaInspectionError=""
+    onRefreshQuota={noop} onRefreshQuotaForAuthIndex={noop} onResetQuotaForAuthIndex={noop} onRefreshInspectionStatus={noop} onStartInspection={noop} onOpenDetails={row=>setDetail({kind:'credential',row})}/>}
+   {page==='ai-provider'&&<AiProviderCredentialsSection {...pagination} rows={providerRows} onOpenDetails={row=>setDetail({kind:'ai-provider',row})}/>}
+-  <CredentialDetailDrawer readOnly open={Boolean(detail)} selection={detail} onAuthRequired={onAuthRequired} onClose={()=>setDetail(null)}/>
++  <CredentialDetailDrawer readOnly open={Boolean(detail)} selection={liveDetail} onAuthRequired={onAuthRequired} onClose={()=>setDetail(null)}/>
+  </KeyViewerShell>;
+ }
+diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
+index 4d1b9d50..eebd1790 100644
+--- a/web/src/pages/UsagePage.tsx
++++ b/web/src/pages/UsagePage.tsx
+@@ -17,7 +17,7 @@ import { MainActionButton } from '@/components/ui/MainActionButton';
+ import { Modal } from '@/components/ui/Modal';
+ import { IconRefreshCw } from '@/components/ui/icons';
+ import { updateCredentialDetailStats } from '@/components/usage/credentials/credentialViewModels';
+-import { CREDENTIAL_PAGES_REFRESH_INTERVAL_MS } from '@/components/usage/credentials/useCredentialPages';
++import { startLiveRefresh } from '@/lib/live';
+ import { PricingSettings, type PricingSettingsHandle } from '@/components/usage/pricing/PricingSettings';
+ import { buildCredentialProviderSearch } from '@/components/usage/credentials/credentialProviderFilters';
+ import { useMediaQuery } from '@/hooks/useMediaQuery';
+@@ -238,8 +238,8 @@ export const shouldAutoRefreshUsageTab = ({
+   activeTab: UsageTab;
+   eventsPage: number;
+ }) => {
+-  if (activeTab === 'overview' || activeTab === 'realtime') return true;
+-  if (activeTab === 'events') return eventsPage === 1;
++  if (activeTab === 'overview' || activeTab === 'realtime' || activeTab === 'analysis') return true;
++  if (activeTab === 'events') return eventsPage >= 1;
+   return false;
+ };
+ 
+@@ -1453,7 +1453,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+     }
+   }, [onAuthRequired]);
+ 
+-  const loadEvents = useCallback(async () => {
++  const loadEvents = useCallback(async (background = false) => {
+     if (!usageRangeQuery.valid || !apiKeyFilterReady) return;
+     const scope = JSON.stringify([usageRangeQuery, requestApiKeyId, eventsModelFilter, eventsSourceFilter, eventsResultFilter]);
+     const sameScope = eventsLoadedScopeRef.current === scope;
+@@ -1463,7 +1463,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+     const controller = new AbortController();
+     eventsRequestControllerRef.current = controller;
+ 
+-    setEventsLoading(true);
++    if (!background) setEventsLoading(true);
+     setEventsLoadingMore(false);
+     setEventsError('');
+     setEventsAutoLoadMore(true);
+@@ -1485,17 +1485,16 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+         return;
+       }
+       eventsLoadedScopeRef.current = scope;
+-      setEventsData(response.events);
++      setEventsData(previous => background && sameScope ? [...response.events, ...previous.filter(event => !response.events.some(fresh => fresh.id === event.id))] : response.events);
+       setEventsTotalCount(Math.max(response.total_count, 0));
+-      setEventsNextCursor(response.has_more === true ? response.next_cursor?.trim() || null : null);
+-      setEventsPage(1);
++      if (!background || !sameScope) {setEventsNextCursor(response.has_more === true ? response.next_cursor?.trim() || null : null);setEventsPage(1);}
+     } catch (error) {
+       if (controller.signal.aborted) {
+         return;
+       }
+       if (isCostsBusy(error)) setEventsAutoLoadMore(false);
+       if (eventsRequestControllerRef.current === controller) {
+-        if (!isCostsBusy(error) || !sameScope) {
++        if ((!background && !isCostsBusy(error)) || !sameScope) {
+           setEventsData([]);
+           setEventsTotalCount(0);
+           setEventsNextCursor(null);
+@@ -1702,9 +1701,9 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+     if (!credentialDetailOpen) return;
+     // 详情按稳定 ID 独立刷新，凭证因重置移出当前分页后仍能观察新增用量。
+     void refreshCredentialDetail();
+-    const interval = window.setInterval(() => { void refreshCredentialDetail(); }, CREDENTIAL_PAGES_REFRESH_INTERVAL_MS);
++    const stop = startLiveRefresh(async () => refreshCredentialDetail(), ["accounts", "usage", "quota"], false);
+     return () => {
+-      window.clearInterval(interval);
++      stop();
+       credentialDetailRequestRef.current?.controller.abort();
+       credentialDetailRequestRef.current = null;
+     };
+@@ -1783,13 +1782,14 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+ 
+   const refreshAutoRefreshTab = useCallback(async () => {
+     invalidateScopedApiKeys();
++    if (activeTab === 'analysis') { await loadAnalysis(false); return; }
+     if (!apiKeyFilterReady && shouldShowApiKeyFilter(activeTab)) return;
+     if (activeTab === 'realtime') {
+       await loadRealtime();
+       return;
+     }
+     if (activeTab === 'events') {
+-      await loadEvents();
++      await loadEvents(true);
+       return;
+     }
+     if (credentialSectionVisibility.enabled) {
+@@ -1797,7 +1797,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+       return;
+     }
+     await Promise.all([loadUsage(), loadActivity({ skipIfInFlight: true }), loadComparisons({ skipIfInFlight: true })]);
+-  }, [activeTab, apiKeyFilterReady, credentialSectionVisibility.enabled, loadActivity, loadComparisons, loadEvents, loadRealtime, loadUsage, refreshCredentials, invalidateScopedApiKeys]);
++  }, [activeTab, apiKeyFilterReady, credentialSectionVisibility.enabled, loadActivity, loadAnalysis, loadComparisons, loadEvents, loadRealtime, loadUsage, refreshCredentials, invalidateScopedApiKeys]);
+ 
+   const handleAutoRefreshError = useCallback((error: unknown) => {
+     if (recoverRangeBoundsConflict(error)) return;
+diff --git a/web/src/pages/test/UsagePage.logic.test.ts b/web/src/pages/test/UsagePage.logic.test.ts
+index fa70bb2e..22453e44 100644
+--- a/web/src/pages/test/UsagePage.logic.test.ts
++++ b/web/src/pages/test/UsagePage.logic.test.ts
+@@ -541,7 +541,7 @@ describe('UsagePage visibility guard', () => {
+ describe('UsagePage active tab auto-refresh guard', () => {
+   it('allows Request Events auto-refresh only on the first page', () => {
+     expect(shouldAutoRefreshUsageTab({ activeTab: 'events', eventsPage: 1 })).toBe(true);
+-    expect(shouldAutoRefreshUsageTab({ activeTab: 'events', eventsPage: 2 })).toBe(false);
++    expect(shouldAutoRefreshUsageTab({ activeTab: 'events', eventsPage: 2 })).toBe(true);
+   });
+ 
+   it('does not auto-refresh credential detail tabs', () => {
+@@ -552,7 +552,7 @@ describe('UsagePage active tab auto-refresh guard', () => {
+   it('keeps Overview auto-refresh enabled and does not auto-refresh other tabs', () => {
+     expect(shouldAutoRefreshUsageTab({ activeTab: 'overview', eventsPage: 2 })).toBe(true);
+     expect(shouldAutoRefreshUsageTab({ activeTab: 'realtime', eventsPage: 2 })).toBe(true);
+-    expect(shouldAutoRefreshUsageTab({ activeTab: 'analysis', eventsPage: 1 })).toBe(false);
++    expect(shouldAutoRefreshUsageTab({ activeTab: 'analysis', eventsPage: 1 })).toBe(true);
+     expect(shouldAutoRefreshUsageTab({ activeTab: 'settings', eventsPage: 1 })).toBe(false);
+   });
+ });
+diff --git a/web/src/pages/test/UsagePageCredentialStats.test.tsx b/web/src/pages/test/UsagePageCredentialStats.test.tsx
+index 62159e1e..c3e77e24 100644
+--- a/web/src/pages/test/UsagePageCredentialStats.test.tsx
++++ b/web/src/pages/test/UsagePageCredentialStats.test.tsx
+@@ -1,5 +1,7 @@
+ // @vitest-environment happy-dom
+ 
++import {mockLiveStream} from '@/../test-helpers/liveStream';
++let emit:ReturnType<typeof mockLiveStream>;
+ import { act } from 'react';
+ import { createRoot, type Root } from 'react-dom/client';
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+@@ -18,7 +20,7 @@ const api = vi.hoisted(() => ({
+ 
+ vi.mock('@/lib/api', async (importOriginal) => ({
+   ...await importOriginal<typeof import('@/lib/api')>(),
+-  ...api,
++  ...api, apiFetch:vi.fn(),
+   fetchStatus: async () => ({ timezone: 'UTC' }),
+   fetchVersion: async () => ({ version: 'test' }),
+   fetchCpaApiKeyOptions: async () => ({ options: [] }),
+@@ -59,6 +61,7 @@ describe('UsagePage credential detail statistics', () => {
+     await i18n.changeLanguage('en');
+     localStorage.clear();
+     Object.values(api).forEach((mock) => mock.mockReset());
++ emit=mockLiveStream();
+     container = document.createElement('div');
+     document.body.appendChild(container);
+     root = createRoot(container);
+@@ -83,7 +86,7 @@ describe('UsagePage credential detail statistics', () => {
+     const cacheLabel = Array.from(healthPanel().querySelectorAll('span')).find((node) => node.textContent === 'Cache rate 5h')!;
+     expect(cacheLabel.nextElementSibling?.textContent).toBe(cacheRate);
+   };
+-  const tick = async () => { await act(async () => vi.advanceTimersByTimeAsync(60_000)); };
++  const tick = async () => { await act(async () => {emit(['usage','quota','accounts']);await vi.advanceTimersByTimeAsync(200)}); };
+   const open = async (label = 'Fixture 1') => {
+     const trigger = Array.from(container.querySelectorAll<HTMLButtonElement>('[data-credential-detail-trigger]')).find((node) => node.querySelector('span')?.textContent === label);
+     expect(trigger).toBeDefined();
+diff --git a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
+index 185d855d..b789488f 100644
+--- a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
++++ b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
+@@ -1,5 +1,7 @@
+ // @vitest-environment happy-dom
+ 
++import {mockLiveStream} from '@/../test-helpers/liveStream';
++let emit:ReturnType<typeof mockLiveStream>;
+ import React, { act } from 'react';
+ import { createRoot, type Root } from 'react-dom/client';
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+@@ -30,7 +32,7 @@ vi.mock('react-chartjs-2', () => ({
+ 
+ vi.mock('@/lib/api', async (importOriginal) => ({
+   ...await importOriginal<typeof import('@/lib/api')>(),
+-  ...api,
++  ...api, apiFetch:vi.fn(),
+   fetchStatus: async () => ({ timezone: 'UTC' }),
+   fetchVersion: async () => ({ version: 'test' }),
+   fetchUsageEventModelFilterOptions: async () => ({ models: ['gpt-5'] }),
+@@ -56,6 +58,7 @@ describe('UsagePage top API Key request event filter', () => {
+ 
+   beforeEach(async () => {
+     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++ emit=mockLiveStream();
+     await i18n.changeLanguage('en');
+     localStorage.clear();
+     window.history.replaceState(null, '', '/request-events');
+@@ -226,7 +229,7 @@ describe('UsagePage top API Key request event filter', () => {
+     expect(button('Load more')).toBeUndefined();
+     await act(async () => resolveNew({ ...firstPage, next_cursor: 'cursor-new-key' }));
+     const calls = api.fetchUsageEvents.mock.calls.length;
+-    await act(async () => vi.advanceTimersByTimeAsync(15_000));
++    await act(async () => {emit(['usage']);await vi.advanceTimersByTimeAsync(200)});
+     expect(api.fetchUsageEvents.mock.calls.length).toBeGreaterThan(calls);
+     expect(api.fetchUsageEvents.mock.lastCall![2]).toMatchObject({ apiKeyId: '33' });
+     expect(api.fetchUsageEvents.mock.lastCall![2].cursor).toBeUndefined();
+@@ -257,7 +260,7 @@ describe('UsagePage top API Key request event filter', () => {
+     await toggleKey();
+     expect(scopedCalls()).toHaveLength(1);
+ 
+-    await act(async () => vi.advanceTimersByTimeAsync(10_000));
++    await act(async () => {emit(['usage','quota']);await vi.advanceTimersByTimeAsync(200)});
+     expect(scopedCalls()).toHaveLength(1);
+     let finish!: (value: typeof keyOptions) => void;
+     api.fetchCpaApiKeyOptions.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+diff --git a/web/src/pages/test/UsagePageRuntime.test.tsx b/web/src/pages/test/UsagePageRuntime.test.tsx
+index fd2f1dbd..497a2620 100644
+--- a/web/src/pages/test/UsagePageRuntime.test.tsx
++++ b/web/src/pages/test/UsagePageRuntime.test.tsx
+@@ -113,7 +113,7 @@ describe('UsagePage runtime behavior', () => {
+     await act(async () => next.click());
+     expect(window.location.pathname).toBe('/settings');
+     expect(trigger.getAttribute('aria-expanded')).toBe('false');
+-    expect(networkFetch).not.toHaveBeenCalled();
++    expect(networkFetch.mock.calls.filter(call=>!String(call[0]).endsWith('/live'))).toHaveLength(0);
+   });
+ 
+   const openPendingRequestLog = async () => {
+diff --git a/web/test-helpers/liveStream.ts b/web/test-helpers/liveStream.ts
+new file mode 100644
+index 00000000..3c549aec
+--- /dev/null
++++ b/web/test-helpers/liveStream.ts
+@@ -0,0 +1,16 @@
++import { vi } from 'vitest';
++import { apiFetch } from '../src/lib/api';
++export function mockLiveStream() {
++ const streams:ReadableStreamDefaultController<Uint8Array>[]=[];
++ vi.mocked(apiFetch).mockImplementation(async (_url,init)=>{
++  let controller!:ReadableStreamDefaultController<Uint8Array>;
++  const body=new ReadableStream<Uint8Array>({start(value){controller=value;streams.push(value);}});
++  init?.signal?.addEventListener('abort',()=>{try{controller.close();}catch{/* already closed */}});
++  return new Response(body,{headers:{'Content-Type':'text/event-stream'}});
++ });
++ return (topics:string[],fragment=false)=>{
++  const data=new TextEncoder().encode('event: change\r\ndata: '+JSON.stringify({topics})+'\r\n\r\n');
++  const stream=streams.at(-1)!;
++  if(fragment){stream.enqueue(data.slice(0,12));stream.enqueue(data.slice(12));}else stream.enqueue(data);
++ };
++}

@@ -1,0 +1,6 @@
+FROM node:24-alpine
+RUN apk add --no-cache chromium
+WORKDIR /test
+RUN npm install --no-audit --no-fund playwright@1.58.2
+ENV CHROMIUM_EXECUTABLE=/usr/bin/chromium-browser
+ENTRYPOINT ["node"]

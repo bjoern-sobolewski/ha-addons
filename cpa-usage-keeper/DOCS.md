@@ -268,3 +268,22 @@ value, remaining history, navigation and performance reporting are carried
 forward. Upstream v2 persisted costs and pricing controls replace the old
 read-time pricing machinery and editor; frozen historical migrations remain
 compatible with both stock upstream and this distribution's older databases.
+
+
+## Combined provider statistics
+
+In the LAN admin dashboard, select **Credentials → Provider stats**. Choose a
+provider to combine recorded requests from all of its auth-file accounts,
+including disabled and historical accounts. Account-list pagination, provider
+filters and Enabled only do not limit this view. Select 7, 14, 30 or 90 days.
+
+**Overview & API value** shows request counts, success/cache rates, tokens,
+stored API-equivalent value, daily activity and model/mode totals. Missing
+prices appear as lower bounds, or unavailable when every request is unpriced;
+incomplete daily dollar values appear as chart gaps. Values are estimates, not
+subscription charges. **Response speed** pools individual recorded requests
+across accounts before calculating percentiles and workload comparisons.
+
+Account quotas and resets stay separate because plans can have different
+allowances. Retained archived requests are included. This admin-only view does
+not change the restricted client-key or read-only reporting scope.

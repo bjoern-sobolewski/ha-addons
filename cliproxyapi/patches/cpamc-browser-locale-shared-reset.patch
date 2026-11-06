@@ -1,0 +1,1745 @@
+diff --git a/src/components/providers/ProviderStatusBar.tsx b/src/components/providers/ProviderStatusBar.tsx
+index 03a1093..8c58729 100644
+--- a/src/components/providers/ProviderStatusBar.tsx
++++ b/src/components/providers/ProviderStatusBar.tsx
+@@ -1,3 +1,4 @@
++import { formatBrowserDateTime } from '@/utils/browserDateTime';
+ import { useState, useCallback, useRef, useEffect } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import type { StatusBarData, StatusBlockDetail } from '@/utils/recentRequests';
+@@ -7,10 +8,7 @@ import graph from './ProviderStatusBar.module.scss';
+ const defaultStyles: Record<string, string> = {};
+ 
+ function formatTime(timestamp: number): string {
+-  const date = new Date(timestamp);
+-  const h = date.getHours().toString().padStart(2, '0');
+-  const m = date.getMinutes().toString().padStart(2, '0');
+-  return `${h}:${m}`;
++  return formatBrowserDateTime(timestamp, { hour: '2-digit', minute: '2-digit' });
+ }
+ 
+ function formatSuccessRate(rate: number): string {
+diff --git a/src/features/authFiles/constants.ts b/src/features/authFiles/constants.ts
+index e25c427..258bf81 100644
+--- a/src/features/authFiles/constants.ts
++++ b/src/features/authFiles/constants.ts
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import type { TFunction } from 'i18next';
+ import iconAntigravity from '@/assets/icons/antigravity.svg';
+ import iconClaude from '@/assets/icons/claude.svg';
+@@ -28,14 +29,7 @@ export type AuthFileModelItem = {
+ export type AuthFileIconAsset = string | { light: string; dark: string };
+ 
+ export type QuotaProviderType =
+-  | 'antigravity'
+-  | 'claude'
+-  | 'codex'
+-  | 'devin'
+-  | 'kimi'
+-  | 'meta'
+-  | 'plugin'
+-  | 'xai';
++  'antigravity' | 'claude' | 'codex' | 'devin' | 'kimi' | 'meta' | 'plugin' | 'xai';
+ export type AuthFileQuotaFilter = string | null;
+ export type OAuthConfigLoadError = 'loading' | 'unsupported' | 'load' | null;
+ 
+@@ -268,7 +262,7 @@ export const formatModified = (item: AuthFileItem): string => {
+     Number.isFinite(asNumber) && !Number.isNaN(asNumber)
+       ? new Date(asNumber < 1e12 ? asNumber * 1000 : asNumber)
+       : (parseTimestamp(raw) ?? new Date(String(raw)));
+-  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
++  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString(browserDateLocale());
+ };
+ 
+ // 检查模型是否被 OAuth 排除
+diff --git a/src/features/logs/LogsPage.tsx b/src/features/logs/LogsPage.tsx
+index 4d8869d..61f442d 100644
+--- a/src/features/logs/LogsPage.tsx
++++ b/src/features/logs/LogsPage.tsx
+@@ -1,3 +1,5 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
++import { formatBrowserDateTime } from '@/utils/browserDateTime';
+ import { useDeferredValue, useEffect, useMemo, useReducer, useState } from 'react';
+ import type { Dispatch, SetStateAction } from 'react';
+ import { useTranslation } from 'react-i18next';
+@@ -462,7 +464,10 @@ export function LogsPage() {
+                 {lastUpdated && (
+                   <>
+                     {' '}
+-                    · {t('logs.last_updated', { time: new Date(lastUpdated).toLocaleTimeString() })}
++                    ·{' '}
++                    {t('logs.last_updated', {
++                      time: new Date(lastUpdated).toLocaleTimeString(browserDateLocale()),
++                    })}
+                   </>
+                 )}
+               </div>
+@@ -821,7 +826,9 @@ export function LogsPage() {
+                               defaultValue: 'Double-click to copy',
+                             })}
+                           >
+-                            <div className={styles.timestamp}>{line.timestamp || ''}</div>
++                            <div className={styles.timestamp}>
++                              {line.timestamp ? formatBrowserDateTime(line.timestamp) : ''}
++                            </div>
+                             <div className={styles.rowMain}>
+                               {line.level && (
+                                 <span
+diff --git a/src/features/plugins/PluginStorePage.tsx b/src/features/plugins/PluginStorePage.tsx
+index da84081..ac25004 100644
+--- a/src/features/plugins/PluginStorePage.tsx
++++ b/src/features/plugins/PluginStorePage.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { useNavigate } from 'react-router-dom';
+@@ -79,11 +80,11 @@ const formatInstallType = (installType: string) =>
+     .join(' ');
+ const releaseVersionsCache = new Map<string, PluginReleaseVersion[]>();
+ 
+-const formatReleaseDate = (value: string, locale: string) => {
++const formatReleaseDate = (value: string, _locale: string) => {
+   if (!value) return '';
+   const date = new Date(value);
+   if (Number.isNaN(date.getTime())) return '';
+-  return new Intl.DateTimeFormat(locale, {
++  return new Intl.DateTimeFormat(browserDateLocale(), {
+     year: 'numeric',
+     month: '2-digit',
+     day: '2-digit',
+diff --git a/src/features/providers/ProvidersWorkbenchPage.tsx b/src/features/providers/ProvidersWorkbenchPage.tsx
+index 460e4e0..d5b8240 100644
+--- a/src/features/providers/ProvidersWorkbenchPage.tsx
++++ b/src/features/providers/ProvidersWorkbenchPage.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { useCallback, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
+@@ -46,11 +47,11 @@ interface ProvidersWorkbenchPageProps {
+   fixedBrand?: ProviderBrand;
+ }
+ 
+-const formatDateTime = (iso: string, locale?: string) => {
++const formatDateTime = (iso: string, _locale?: string) => {
+   try {
+     const date = new Date(iso);
+     if (Number.isNaN(date.getTime())) return iso;
+-    return new Intl.DateTimeFormat(locale, {
++    return new Intl.DateTimeFormat(browserDateLocale(), {
+       dateStyle: 'medium',
+       timeStyle: 'short',
+     }).format(date);
+diff --git a/src/features/quota/authFileObservation.ts b/src/features/quota/authFileObservation.ts
+index 2b0da26..2fddabf 100644
+--- a/src/features/quota/authFileObservation.ts
++++ b/src/features/quota/authFileObservation.ts
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { createContext, useContext } from 'react';
+ import { buildResetDisplay } from '@/utils/quota';
+ import { browserResetDisplay, type QuotaObservation } from './observationFormat';
+@@ -12,7 +13,7 @@ export function useAuthFileTimeZone(at?: string) {
+   const observation = useContext(AuthFileObservation);
+   if (!observation) return undefined;
+   const instant = at && Number.isFinite(Date.parse(at)) ? new Date(at) : new Date();
+-  return new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' })
++  return new Intl.DateTimeFormat(browserDateLocale(), { timeZoneName: 'short' })
+     .formatToParts(instant)
+     .find((part) => part.type === 'timeZoneName')?.value;
+ }
+diff --git a/src/features/quota/components/QuotaTimeline.tsx b/src/features/quota/components/QuotaTimeline.tsx
+index 083c903..2fd350f 100644
+--- a/src/features/quota/components/QuotaTimeline.tsx
++++ b/src/features/quota/components/QuotaTimeline.tsx
+@@ -1,3 +1,4 @@
++import { formatBrowserDateTime } from '@/utils/browserDateTime';
+ /**
+  * Quota windows timeline.
+  *
+@@ -35,15 +36,9 @@ import styles from './QuotaTimeline.module.scss';
+ 
+ const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
+ 
+-const pad = (value: number) => String(value).padStart(2, '0');
+-const formatDay = (ms: number) => {
+-  const d = new Date(ms);
+-  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
+-};
+-const formatTime = (ms: number) => {
+-  const d = new Date(ms);
+-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+-};
++const formatDay = (ms: number) => formatBrowserDateTime(ms, { month: '2-digit', day: '2-digit' });
++const formatTime = (ms: number) =>
++  formatBrowserDateTime(ms, { hour: '2-digit', minute: '2-digit' });
+ 
+ export interface QuotaTimelineProps {
+   entries: QuotaFileEntry[];
+@@ -145,7 +140,7 @@ export function QuotaTimeline({
+         weekday: t(`quota_management.weekday_${WEEKDAY_KEYS[date.getDay()]}`, {
+           defaultValue: WEEKDAY_KEYS[date.getDay()],
+         }),
+-        label: isDayStart ? formatDay(at) : `${pad(date.getHours())}:00`,
++        label: isDayStart ? formatDay(at) : formatTime(at),
+       };
+     });
+   }, [mode, span, now, t]);
+diff --git a/src/features/quota/observationFormat.ts b/src/features/quota/observationFormat.ts
+index 886cdae..79b879a 100644
+--- a/src/features/quota/observationFormat.ts
++++ b/src/features/quota/observationFormat.ts
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { buildResetDisplay, formatRelativeInstant, type ResetDisplay } from '@/utils/quota';
+ 
+ export interface QuotaObservation {
+@@ -27,7 +28,7 @@ export function observationAge(capturedAt: string | undefined, now: number) {
+       maximumFractionDigits: 0,
+     }).format(value),
+     relative: new Intl.RelativeTimeFormat(undefined, { numeric: 'always' }).format(-value, unit),
+-    timestamp: new Intl.DateTimeFormat(undefined, {
++    timestamp: new Intl.DateTimeFormat(browserDateLocale(), {
+       dateStyle: 'medium',
+       timeStyle: 'long',
+     }).format(captured),
+@@ -43,7 +44,7 @@ export function browserResetDisplay(
+     return buildResetDisplay(absolute, atMs, now);
+   }
+   return {
+-    absolute: new Intl.DateTimeFormat(undefined, {
++    absolute: new Intl.DateTimeFormat(browserDateLocale(), {
+       month: '2-digit',
+       day: '2-digit',
+       hour: '2-digit',
+diff --git a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
+index 9124354..b2b1fd5 100644
+--- a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
++++ b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { QuotaObservedPercent } from '../../QuotaObservedPercent';
+ import { useAuthFileResetDisplay } from '../../authFileObservation';
+ /**
+@@ -59,7 +60,9 @@ export function ClaudeQuotaBody({
+       {quota.stale && (
+         <div role="status" className={classes.codexResetCreditsError}>
+           {t('claude_quota.stale_snapshot', {
+-            time: quota.observedAt ? new Date(quota.observedAt).toLocaleString(language) : '--',
++            time: quota.observedAt
++              ? new Date(quota.observedAt).toLocaleString(browserDateLocale())
++              : '--',
+           })}
+         </div>
+       )}
+diff --git a/src/features/quota/providers/claude/resetGrantOperations.ts b/src/features/quota/providers/claude/resetGrantOperations.ts
+index 60e6dc9..2f0de3d 100644
+--- a/src/features/quota/providers/claude/resetGrantOperations.ts
++++ b/src/features/quota/providers/claude/resetGrantOperations.ts
+@@ -1,11 +1,8 @@
+ import { apiClient } from '@/services/api/client';
+-import { authFilesApi } from '@/services/api/authFiles';
+ import {
+   AnthropicResetGrantError,
+-  anthropicResetGrantBlocker,
+   claimClaudeResetGrant,
+   readClaudeOrganization,
+-  readClaudeResetGrants,
+   type AnthropicResetSettledCode,
+ } from '@/services/api/claudeResetGrants';
+ import { generateResetGrantRequestId } from './resetGrantRequestId';
+@@ -53,10 +50,8 @@ type ResetGrantResult =
+   | { code: 'cooldown_clear_failed'; unresolved: false };
+ const defaultDependencies = {
+   revision: () => apiClient.getConnectionRevision(),
+-  readStatus: readClaudeResetGrants,
+   readOrganization: readClaudeOrganization,
+   claim: claimClaudeResetGrant,
+-  resetCooldown: authFilesApi.resetCooldown,
+   now: () => Date.now(),
+   requestId: generateResetGrantRequestId,
+ };
+@@ -105,23 +100,7 @@ export function createResetGrantOperations(deps = defaultDependencies) {
+         if (operation && operation.organization !== organization)
+           throw new ResetGrantPreflightError('operation', 'identity');
+         if (!operation) {
+-          const status = await readPreflight('status', () => deps.readStatus(authIndex));
+-          assertSession();
+-          const grant = status.grants.find((item) => item.id === grantId);
+           const now = deps.now();
+-          const blocker = anthropicResetGrantBlocker(status, grantId);
+-          const reason =
+-            blocker ??
+-            (!grant
+-              ? 'unknown_grant'
+-              : grant.startsAt && Date.parse(grant.startsAt) > now
+-                ? 'not_started'
+-                : grant.endsAt && Date.parse(grant.endsAt) <= now
+-                  ? 'grant_expired'
+-                  : status.cooldownUntil && Date.parse(status.cooldownUntil) > now
+-                    ? 'cooldown'
+-                    : null);
+-          if (reason) throw new ResetGrantPreflightError('eligibility', `blocked_${reason}`);
+           let requestId: string;
+           try {
+             requestId = deps.requestId();
+@@ -140,18 +119,6 @@ export function createResetGrantOperations(deps = defaultDependencies) {
+         assertSession();
+         // A refusal on a retry cannot prove that the earlier ambiguous POST did not spend.
+         if (!wasRetry || code === 'reset' || code === 'already_used') operation.code = code;
+-        if (code === 'reset' || code === 'already_used') {
+-          try {
+-            const result = await deps.resetCooldown(authIndex);
+-            assertSession();
+-            if (result.status !== 'ok' || result.auth_index !== authIndex) {
+-              throw new Error('Invalid cooldown reset response');
+-            }
+-          } catch {
+-            assertSession();
+-            return { code: 'cooldown_clear_failed', unresolved: false };
+-          }
+-        }
+         return { code, unresolved: !operation.code };
+       } finally {
+         if (deps.revision() === session) busy.delete(key);
+diff --git a/src/features/quota/providers/claude/selectResetGrant.ts b/src/features/quota/providers/claude/selectResetGrant.ts
+index 01a9129..11378aa 100644
+--- a/src/features/quota/providers/claude/selectResetGrant.ts
++++ b/src/features/quota/providers/claude/selectResetGrant.ts
+@@ -1,19 +1,6 @@
+-import {
+-  anthropicResetGrantBlocker,
+-  type AnthropicResetGrantStatus,
+-} from '@/services/api/claudeResetGrants';
++import type { AnthropicResetGrantStatus } from '@/services/api/claudeResetGrants';
+ 
+-/** Prefer the upstream recommendation; otherwise use stable ID ordering. */
+-export function selectResetGrant(status: AnthropicResetGrantStatus, now: number) {
+-  if (status.cooldownUntil && Date.parse(status.cooldownUntil) > now) return undefined;
+-  const usable = status.grants.filter(
+-    (grant) =>
+-      !anthropicResetGrantBlocker(status, grant.id) &&
+-      (!grant.startsAt || Date.parse(grant.startsAt) <= now) &&
+-      (!grant.endsAt || Date.parse(grant.endsAt) > now)
+-  );
+-  return (
+-    usable.find((grant) => grant.id === status.nextGrantId) ??
+-    usable.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
+-  );
++/** Display the currently usable grant selected by the shared CPA policy. */
++export function selectResetGrant(status: AnthropicResetGrantStatus, _now?: number) {
++  return status.grants.find((grant) => grant.id === status.nextGrantId);
+ }
+diff --git a/src/features/quota/providers/codex/data.ts b/src/features/quota/providers/codex/data.ts
+index f96a846..4a13034 100644
+--- a/src/features/quota/providers/codex/data.ts
++++ b/src/features/quota/providers/codex/data.ts
+@@ -1,3 +1,6 @@
++import { createResetRequestId } from '@/utils/resetRequestId';
++import { quotaResetApi } from '@/services/api/quotaReset';
++import { apiClient } from '@/services/api/client';
+ /**
+  * Codex 额度数据层：用量窗口 + 套餐 + 重置积分（含消费流程）。
+  * React-free / SCSS-free —— 由 tests/codexQuota.test.ts 直接消费。
+@@ -14,12 +17,10 @@ import type {
+   CodexQuotaWindow,
+   CodexUsagePayload,
+ } from '@/types';
+-import { apiCallApi, authFilesApi, getApiCallErrorMessage } from '@/services/api';
++import { apiCallApi, getApiCallErrorMessage } from '@/services/api';
+ import { guardConfigConnection } from '@/services/api/configValue';
+-import { isRecord } from '@/utils/helpers';
+ import {
+   CODEX_RATE_LIMIT_RESET_CREDITS_URL,
+-  CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL,
+   CODEX_SUBSCRIPTION_URL,
+   CODEX_USAGE_URL,
+   CODEX_REQUEST_HEADERS,
+@@ -486,65 +487,26 @@ const fetchCodexQuota = async (file: AuthFileItem, t: TFunction): Promise<CodexQ
+   };
+ };
+ 
+-const createCodexRedeemRequestId = (): string => {
+-  if (typeof globalThis.crypto?.randomUUID === 'function') {
+-    return globalThis.crypto.randomUUID();
+-  }
+-
+-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+-    const value = Math.floor(Math.random() * 16);
+-    const segment = char === 'x' ? value : (value & 0x3) | 0x8;
+-    return segment.toString(16);
+-  });
+-};
+-
+-const consumeCodexRateLimitResetCredit = async (
+-  file: AuthFileItem,
+-  t: TFunction
+-): Promise<string> => {
+-  const rawAuthIndex = file['auth_index'] ?? file.authIndex;
+-  const authIndex = normalizeAuthIndex(rawAuthIndex);
+-  if (!authIndex) {
+-    throw new Error(t('codex_quota.missing_auth_index'));
+-  }
+-
+-  const requestHeader = buildCodexRequestHeader(file);
+-
+-  const result = await apiCallApi.request({
+-    authIndex,
+-    method: 'POST',
+-    url: CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL,
+-    header: requestHeader,
+-    data: JSON.stringify({
+-      redeem_request_id: createCodexRedeemRequestId(),
+-    }),
+-  });
+-
+-  if (result.statusCode < 200 || result.statusCode >= 300) {
+-    throw createStatusError(getApiCallErrorMessage(result), result.statusCode);
+-  }
+-  const code = isRecord(result.body) ? result.body.code : undefined;
+-  if (code !== 'reset' && code !== 'already_redeemed') {
+-    throw new Error(t('codex_quota.reset_not_confirmed'));
+-  }
+-  return authIndex;
+-};
+-
++// Keep ambiguous request IDs for the connection, including across card unmounts.
++const codexResetOperations = new Map<string, string>();
+ const resetCodexQuota = async (file: AuthFileItem, t: TFunction): Promise<CodexQuotaData> => {
+   const assertConnection = guardConfigConnection();
+-  const authIndex = await consumeCodexRateLimitResetCredit(file, t);
+-  try {
+-    // Never clear a different connection's cooldown after awaiting redemption.
+-    assertConnection();
+-    const result = await authFilesApi.resetCooldown(authIndex);
+-    assertConnection();
+-    if (result.status !== 'ok' || result.auth_index !== authIndex) {
+-      throw new Error('Invalid cooldown reset response');
+-    }
+-  } catch {
+-    // Redemption already succeeded: direct the operator to the existing clear action.
+-    throw new Error(t('codex_quota.reset_cooldown_failed'));
+-  }
++  const authIndex = normalizeAuthIndex(file['auth_index'] ?? file.authIndex);
++  if (!authIndex) throw new Error(t('codex_quota.missing_auth_index'));
++  const key = apiClient.getConnectionRevision() + ':' + authIndex;
++  const requestId = codexResetOperations.get(key) ?? createResetRequestId();
++  codexResetOperations.set(key, requestId);
++  const result = await quotaResetApi.redeem({
++    auth_index: authIndex,
++    provider: 'codex',
++    request_id: requestId,
++  });
++  assertConnection();
++  if (result.code === 'unknown') throw new Error(t('codex_quota.reset_not_confirmed'));
++  codexResetOperations.delete(key);
++  if (result.code !== 'reset' && result.code !== 'already_redeemed')
++    throw new Error(t('codex_quota.reset_not_confirmed'));
++  if (result.recoveryFailed) throw new Error(t('codex_quota.reset_cooldown_failed'));
+   return fetchCodexQuota(file, t);
+ };
+ 
+diff --git a/src/features/quota/providers/plugin/PluginQuotaBody.tsx b/src/features/quota/providers/plugin/PluginQuotaBody.tsx
+index 29fa2d3..cb0da35 100644
+--- a/src/features/quota/providers/plugin/PluginQuotaBody.tsx
++++ b/src/features/quota/providers/plugin/PluginQuotaBody.tsx
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { useTranslation } from 'react-i18next';
+ import type { PluginQuotaMetric, PluginQuotaState } from '@/types';
+ import { QuotaMeter } from '../../components/QuotaMeter';
+@@ -6,20 +7,23 @@ import type { QuotaBodyProps } from '../../types';
+ const formatReset = (value: string | undefined): string => {
+   if (!value) return '-';
+   const date = new Date(value);
+-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
++  return Number.isNaN(date.getTime()) ? value : date.toLocaleString(browserDateLocale());
+ };
+ 
+ const formatMetric = (metric: PluginQuotaMetric): string => {
+   const value =
+     metric.format === 'currency' && metric.currency
+-      ? new Intl.NumberFormat(undefined, { style: 'currency', currency: metric.currency }).format(metric.value)
++      ? new Intl.NumberFormat(undefined, { style: 'currency', currency: metric.currency }).format(
++          metric.value
++        )
+       : new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(metric.value);
+   return metric.unit ? `${value} ${metric.unit}` : value;
+ };
+ 
+ export function PluginQuotaBody({ quota, classes }: QuotaBodyProps<PluginQuotaState>) {
+   const { t } = useTranslation();
+-  const plan = quota.subscription?.tierName || quota.subscription?.plan || quota.subscription?.tierId;
++  const plan =
++    quota.subscription?.tierName || quota.subscription?.plan || quota.subscription?.tierId;
+ 
+   return (
+     <>
+@@ -47,7 +51,9 @@ export function PluginQuotaBody({ quota, classes }: QuotaBodyProps<PluginQuotaSt
+             <div className={classes.antigravityQuotaGroupHeader}>
+               <span className={classes.antigravityQuotaGroupTitle}>{group.label}</span>
+               {group.description && (
+-                <span className={classes.antigravityQuotaGroupDescription}>{group.description}</span>
++                <span className={classes.antigravityQuotaGroupDescription}>
++                  {group.description}
++                </span>
+               )}
+             </div>
+             {group.buckets.map((bucket, index) => {
+diff --git a/src/services/api/claudeResetGrants.ts b/src/services/api/claudeResetGrants.ts
+index cfd8b8f..4555af0 100644
+--- a/src/services/api/claudeResetGrants.ts
++++ b/src/services/api/claudeResetGrants.ts
+@@ -1,6 +1,5 @@
+ // Upstream cedar_ember contract, following opencodex anthropic-reset-grants.
+-import { apiCallApi } from './apiCall';
+-import { CLAUDE_REQUEST_HEADERS } from '@/utils/quota/constants';
++import { quotaResetApi } from './quotaReset';
+ 
+ export const ANTHROPIC_API_ORIGIN = 'https://api.anthropic.com';
+ export const ANTHROPIC_RESET_GRANT_PROGRAM = 'cedar_ember';
+@@ -34,7 +33,7 @@ export const ANTHROPIC_RESET_RESULTS = [
+ export type AnthropicResetUpstreamResult = (typeof ANTHROPIC_RESET_RESULTS)[number];
+ /** Upstream results plus the two HTTP refusals that prove nothing was spent. */
+ export type AnthropicResetSettledCode =
+-  AnthropicResetUpstreamResult | 'rate_limited' | 'auth_error';
++  AnthropicResetUpstreamResult | 'rate_limited' | 'auth_error' | 'cooldown_clear_failed';
+ 
+ export interface AnthropicResetGrant {
+   id: string;
+@@ -220,54 +219,22 @@ export function parseAnthropicResetGrantStatus(block: unknown): AnthropicResetGr
+   };
+ }
+ 
+-/** Why a grant cannot be spent right now, or null when it can. */
+-export function anthropicResetGrantBlocker(
+-  status: AnthropicResetGrantStatus,
+-  grantId: string
+-): 'ineligible' | 'unknown_grant' | 'paused' | 'not_usable' | 'exhausted' | 'not_limited' | null {
+-  if (!status.eligible) return 'ineligible';
+-  const grant = status.grants.find((candidate) => candidate.id === grantId);
+-  if (!grant) return 'unknown_grant';
+-  if (grant.paused) return 'paused';
+-  if (!grant.usableNow) return 'not_usable';
+-  if (grant.resetsLeft <= 0) return 'exhausted';
+-  if (grant.useRequiresLimit && !status.atLimit) return 'not_limited';
+-  return null;
+-}
+-
+-async function readAccount(authIndex: string, path: string): Promise<Record<string, unknown>> {
+-  const response = await apiCallApi.request(
+-    {
+-      authIndex,
+-      method: 'GET',
+-      url: ANTHROPIC_API_ORIGIN + path,
+-      header: { ...CLAUDE_REQUEST_HEADERS },
+-    },
+-    { timeout: 12000 }
+-  );
+-  if (response.statusCode === 401 || response.statusCode === 403)
+-    throw new AnthropicResetGrantError('auth');
+-  if (response.statusCode === 429) throw new AnthropicResetGrantError('rate_limited');
+-  if (response.statusCode < 200 || response.statusCode >= 300 || !isRecord(response.body)) {
+-    throw new AnthropicResetGrantError('upstream');
+-  }
+-  return response.body;
+-}
+-
+ export async function readClaudeResetGrants(authIndex: string) {
+-  const body = await readAccount(authIndex, ANTHROPIC_RESET_GRANT_STATUS_PATH);
+-  const status = parseAnthropicResetGrantStatus(body.cedar_ember);
++  const options = await quotaResetApi.options(authIndex);
++  const status = parseAnthropicResetGrantStatus(options.usage?.cedar_ember);
+   if (!status) throw new AnthropicResetGrantError('malformed');
+-  return status;
++  const offered = new Set(options.status?.grants.map((grant) => grant.id) ?? []);
++  return {
++    ...status,
++    grants: status.grants.filter((grant) => offered.has(grant.id)),
++    nextGrantId: options.selectedGrantId ?? null,
++  };
+ }
+-
+ export async function readClaudeOrganization(authIndex: string) {
+-  const body = await readAccount(authIndex, ANTHROPIC_PROFILE_PATH);
+-  const uuid = isRecord(body.organization) ? body.organization.uuid : undefined;
+-  if (typeof uuid !== 'string' || !ORGANIZATION_UUID_RE.test(uuid)) {
++  const options = await quotaResetApi.options(authIndex);
++  if (!options.organizationId || !ORGANIZATION_UUID_RE.test(options.organizationId))
+     throw new AnthropicResetGrantError('malformed');
+-  }
+-  return uuid.toLowerCase();
++  return options.organizationId;
+ }
+ 
+ export async function claimClaudeResetGrant(
+@@ -283,33 +250,23 @@ export async function claimClaudeResetGrant(
+   )
+     throw new AnthropicResetGrantError('malformed');
+   try {
+-    const response = await apiCallApi.request(
+-      {
+-        authIndex,
+-        method: 'POST',
+-        url: `${ANTHROPIC_API_ORIGIN}/api/organizations/${organization}/reset_rate_limits`,
+-        header: { ...CLAUDE_REQUEST_HEADERS },
+-        data: JSON.stringify({
+-          program: ANTHROPIC_RESET_GRANT_PROGRAM,
+-          grant_id: grantId,
+-          request_id: requestId,
+-        }),
+-      },
+-      { timeout: ANTHROPIC_RESET_GRANT_REDEEM_TIMEOUT_MS }
+-    );
+-    if (response.statusCode === 429) return 'rate_limited';
+-    if (response.statusCode === 401 || response.statusCode === 403) return 'auth_error';
+-    const result = isRecord(response.body) ? response.body.result : undefined;
++    const response = await quotaResetApi.redeem({
++      auth_index: authIndex,
++      provider: 'claude',
++      request_id: requestId,
++      organization_id: organization,
++      grant_id: grantId,
++    });
++    if (response.recoveryFailed) return 'cooldown_clear_failed';
+     if (
+-      response.statusCode >= 200 &&
+-      response.statusCode < 300 &&
+-      typeof result === 'string' &&
+-      (ANTHROPIC_RESET_RESULTS as readonly string[]).includes(result)
++      (ANTHROPIC_RESET_RESULTS as readonly string[]).includes(response.code) ||
++      response.code === 'rate_limited' ||
++      response.code === 'auth_error'
+     ) {
+-      return result as AnthropicResetUpstreamResult;
++      return response.code as AnthropicResetSettledCode;
+     }
+   } catch {
+-    /* The proxy may have sent the claim even if the management request failed. */
++    /* Keep the same request ID after an ambiguous response. */
+   }
+   throw new AnthropicResetGrantUnknownOutcome();
+ }
+diff --git a/src/services/api/quotaReset.ts b/src/services/api/quotaReset.ts
+new file mode 100644
+index 0000000..1f9ad31
+--- /dev/null
++++ b/src/services/api/quotaReset.ts
+@@ -0,0 +1,27 @@
++import { apiClient } from './client';
++
++export interface QuotaResetOptions {
++  provider: 'codex' | 'claude';
++  credits?: unknown;
++  status?: { grants: Array<{ id: string }> };
++  usage?: { cedar_ember?: unknown };
++  selectedGrantId?: string;
++  organizationId?: string;
++}
++export interface QuotaResetResult {
++  code: string;
++  windowsReset?: number;
++  recoveryFailed?: boolean;
++}
++export const quotaResetApi = {
++  options: (authIndex: string) =>
++    apiClient.get<QuotaResetOptions>('/quota/reset-options', { params: { auth_index: authIndex } }),
++  redeem: (request: {
++    auth_index: string;
++    provider: 'codex' | 'claude';
++    request_id: string;
++    credit_id?: string;
++    grant_id?: string;
++    organization_id?: string;
++  }) => apiClient.post<QuotaResetResult>('/quota/reset', request),
++};
+diff --git a/src/utils/browserDateTime.ts b/src/utils/browserDateTime.ts
+new file mode 100644
+index 0000000..00490fa
+--- /dev/null
++++ b/src/utils/browserDateTime.ts
+@@ -0,0 +1,41 @@
++// Display preferences follow the browser, independently of UI language.
++export function browserDateLocale(): string[] | undefined {
++  if (typeof navigator === 'undefined') return undefined;
++  return navigator.languages?.length
++    ? [...navigator.languages]
++    : navigator.language
++      ? [navigator.language]
++      : undefined;
++}
++export function browserTimeZone(): string {
++  return new Intl.DateTimeFormat().resolvedOptions().timeZone;
++}
++const formatters = new Map<string, Intl.DateTimeFormat>();
++export function browserDateTimeFormat(
++  options: Intl.DateTimeFormatOptions = {}
++): Intl.DateTimeFormat {
++  const locales = browserDateLocale();
++  const resolved = { ...options, timeZone: options.timeZone ?? browserTimeZone() };
++  const key = JSON.stringify([locales, resolved]);
++  let formatter = formatters.get(key);
++  if (!formatter) {
++    formatter = new Intl.DateTimeFormat(locales, resolved);
++    if (formatters.size >= 64) formatters.delete(formatters.keys().next().value!);
++    formatters.set(key, formatter);
++  }
++  return formatter;
++}
++export function formatBrowserDateTime(
++  value: string | number | Date,
++  options: Intl.DateTimeFormatOptions = {
++    year: 'numeric',
++    month: '2-digit',
++    day: '2-digit',
++    hour: '2-digit',
++    minute: '2-digit',
++    second: '2-digit',
++  }
++): string {
++  const date = value instanceof Date ? value : new Date(value);
++  return Number.isFinite(date.getTime()) ? browserDateTimeFormat(options).format(date) : '—';
++}
+diff --git a/src/utils/format.ts b/src/utils/format.ts
+index 20810e6..b9339a6 100644
+--- a/src/utils/format.ts
++++ b/src/utils/format.ts
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ import { parseTimestamp } from './timestamp';
+ 
+ /**
+@@ -79,7 +80,7 @@ export function formatPercent(value: number, fractionDigits = 1): string {
+ /**
+  * 将 Unix 时间戳（秒/毫秒/微秒/纳秒）格式化为本地时间字符串
+  */
+-export function formatUnixTimestamp(value: unknown, locale?: string): string {
++export function formatUnixTimestamp(value: unknown, _locale?: string): string {
+   if (value === null || value === undefined || value === '') return '';
+ 
+   const asNumber = typeof value === 'number' ? value : Number(value);
+@@ -104,7 +105,7 @@ export function formatUnixTimestamp(value: unknown, locale?: string): string {
+   })();
+ 
+   if (Number.isNaN(date.getTime())) return '';
+-  return locale ? date.toLocaleString(locale) : date.toLocaleString();
++  return date.toLocaleString(browserDateLocale());
+ }
+ 
+ export function parseDateValue(value: unknown): Date | null {
+@@ -118,14 +119,14 @@ export function parseDateValue(value: unknown): Date | null {
+   return Number.isNaN(date.getTime()) ? null : date;
+ }
+ 
+-export function formatDateValue(value: unknown, locale?: string): string {
++export function formatDateValue(value: unknown, _locale?: string): string {
+   const date = parseDateValue(value);
+   if (!date) return '';
+-  return locale ? date.toLocaleDateString(locale) : date.toLocaleDateString();
++  return date.toLocaleDateString(browserDateLocale());
+ }
+ 
+-export function formatDateTimeValue(value: unknown, locale?: string): string {
++export function formatDateTimeValue(value: unknown, _locale?: string): string {
+   const date = parseDateValue(value);
+   if (!date) return '';
+-  return locale ? date.toLocaleString(locale) : date.toLocaleString();
++  return date.toLocaleString(browserDateLocale());
+ }
+diff --git a/src/utils/quota/relativeTime.ts b/src/utils/quota/relativeTime.ts
+index b148a81..711f82d 100644
+--- a/src/utils/quota/relativeTime.ts
++++ b/src/utils/quota/relativeTime.ts
+@@ -1,3 +1,4 @@
++import { browserDateLocale } from '@/utils/browserDateTime';
+ /**
+  * Relative time beside absolute time.
+  *
+@@ -80,12 +81,11 @@ export function formatRelativeInstant(targetMs: number, nowMs: number, locale?:
+  */
+ export function formatInstantShort(ms: number): string {
+   if (!Number.isFinite(ms)) return '-';
+-  return new Date(ms).toLocaleString(undefined, {
++  return new Date(ms).toLocaleString(browserDateLocale(), {
+     month: '2-digit',
+     day: '2-digit',
+     hour: '2-digit',
+     minute: '2-digit',
+-    hour12: false,
+   });
+ }
+ 
+diff --git a/src/utils/resetRequestId.ts b/src/utils/resetRequestId.ts
+new file mode 100644
+index 0000000..e698d12
+--- /dev/null
++++ b/src/utils/resetRequestId.ts
+@@ -0,0 +1,15 @@
++// getRandomValues also works when this LAN page is served over HTTP.
++export function createResetRequestId(): string {
++  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
++  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
++  bytes[6] = (bytes[6] & 15) | 64;
++  bytes[8] = (bytes[8] & 63) | 128;
++  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
++  return [
++    hex.slice(0, 8),
++    hex.slice(8, 12),
++    hex.slice(12, 16),
++    hex.slice(16, 20),
++    hex.slice(20),
++  ].join('-');
++}
+diff --git a/tests/browserDateTime.test.ts b/tests/browserDateTime.test.ts
+new file mode 100644
+index 0000000..936f493
+--- /dev/null
++++ b/tests/browserDateTime.test.ts
+@@ -0,0 +1,39 @@
++import { expect, spyOn, test } from 'bun:test';
++import { formatBrowserDateTime, browserDateTimeFormat } from '../src/utils/browserDateTime';
++const Native = Intl.DateTimeFormat;
++test('uses browser locale, hour cycle and time zone', () => {
++  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
++  using _format = spyOn(Intl, 'DateTimeFormat').mockImplementation(function (locale, options) {
++    return new Native(locale, { ...options, timeZone: options?.timeZone ?? 'Europe/Berlin' });
++  });
++  expect(_format).toBeDefined();
++  try {
++    for (const locale of ['de-DE', 'en-US', 'ar-EG']) {
++      Object.defineProperty(globalThis, 'navigator', {
++        configurable: true,
++        value: { languages: [locale] },
++      });
++      const value = '2026-12-31T23:30:00-08:00';
++      expect(formatBrowserDateTime(value)).toBe(
++        new Native(locale, {
++          year: 'numeric',
++          month: '2-digit',
++          day: '2-digit',
++          hour: '2-digit',
++          minute: '2-digit',
++          second: '2-digit',
++          timeZone: 'Europe/Berlin',
++        }).format(new Date(value))
++      );
++      expect(
++        browserDateTimeFormat({ hour: '2-digit', minute: '2-digit' }).resolvedOptions().hourCycle
++      ).toBe(
++        new Native(locale, { hour: '2-digit', minute: '2-digit' }).resolvedOptions().hourCycle
++      );
++    }
++  } finally {
++    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
++    else Reflect.deleteProperty(globalThis, 'navigator');
++  }
++  expect(formatBrowserDateTime('bad')).toBe('—');
++});
+diff --git a/tests/claudeResetGrants.test.ts b/tests/claudeResetGrants.test.ts
+index e7687ad..a86c7e4 100644
+--- a/tests/claudeResetGrants.test.ts
++++ b/tests/claudeResetGrants.test.ts
+@@ -1,52 +1,34 @@
+-import { selectResetGrant } from '../src/features/quota/providers/claude/selectResetGrant';
+-
+ import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+-import { apiClient } from '../src/services/api/client';
++import { quotaResetApi } from '../src/services/api/quotaReset';
++import { apiCallApi } from '../src/services/api/apiCall';
++import { selectResetGrant } from '../src/features/quota/providers/claude/selectResetGrant';
+ import {
+-  anthropicResetGrantBlocker,
+   claimClaudeResetGrant,
+   parseAnthropicResetGrantStatus,
+   readClaudeOrganization,
+   readClaudeResetGrants,
+   AnthropicResetGrantUnknownOutcome,
+-  AnthropicResetGrantError,
+-  ANTHROPIC_RESET_RESULTS,
+-  ANTHROPIC_RESET_REQUEST_ID_RE,
+-  type AnthropicResetSettledCode,
+ } from '../src/services/api/claudeResetGrants';
+-import { apiCallApi, type ApiCallRequest } from '../src/services/api/apiCall';
+-import type { AuthFileCooldownResetResponse } from '../src/services/api/authFiles';
+ import {
+   createResetGrantOperations,
+-  ResetGrantPreflightError,
+-  resetGrantFailureMessageKey,
+   RETRY_WINDOW_MS,
+ } from '../src/features/quota/providers/claude/resetGrantOperations';
+-
+-const organization = '11111111-2222-3333-4444-555555555555';
++const organization = '11111111-2222-4333-8444-555555555555';
+ const grant = { id: 'test-grant', resets_total: 2, resets_left: 2, usable_now: true };
+ const block = { eligible: true, at_limit: true, grants: [grant] };
+ const status = () => parseAnthropicResetGrantStatus(block)!;
+-const originalRequest = apiCallApi.request;
++const mocks: Array<{ mockRestore(): void }> = [];
+ afterEach(() => {
+-  apiCallApi.request = originalRequest;
++  for (const mock of mocks.splice(0)) mock.mockRestore();
+ });
+-
+ describe('Claude reset grant fail-closed parsing', () => {
+   test('valid block and refusing defaults', () => {
+     expect(status().grants[0].useRequiresLimit).toBe(true);
+-    expect(anthropicResetGrantBlocker(status(), grant.id)).toBeNull();
+-    expect(anthropicResetGrantBlocker({ ...status(), atLimit: false }, grant.id)).toBe(
+-      'not_limited'
+-    );
+-    expect(anthropicResetGrantBlocker({ ...status(), eligible: false }, grant.id)).toBe(
+-      'ineligible'
+-    );
+     const missing = parseAnthropicResetGrantStatus({
+       ...block,
+       grants: [{ ...grant, usable_now: undefined }],
+     })!;
+-    expect(anthropicResetGrantBlocker(missing, grant.id)).toBe('not_usable');
++    expect(missing.grants[0].usableNow).toBe(false);
+   });
+   test('rejects malformed blocks and grants', () => {
+     for (const value of [
+@@ -75,248 +57,54 @@ describe('Claude reset grant fail-closed parsing', () => {
+   });
+ });
+ 
+-test('exact proxied GET/profile/claim contract, no provider token in frontend', async () => {
+-  const calls: ApiCallRequest[] = [];
+-  apiCallApi.request = async (request) => {
+-    calls.push(request);
+-    const body =
+-      request.method === 'POST'
+-        ? { result: 'reset' }
+-        : request.url.endsWith('profile')
+-          ? { organization: { uuid: organization } }
+-          : { cedar_ember: block };
+-    return { statusCode: 200, body, bodyText: '', header: {} };
+-  };
+-  await readClaudeResetGrants('index');
++test('reads shared options and sends choices only to CPA', async () => {
++  const options = spyOn(quotaResetApi, 'options').mockResolvedValue({
++    provider: 'claude',
++    usage: { cedar_ember: block },
++    organizationId: organization,
++    selectedGrantId: grant.id,
++    status: { grants: [{ id: grant.id }] },
++  });
++  const redeem = spyOn(quotaResetApi, 'redeem').mockResolvedValue({ code: 'reset' });
++  const passthrough = spyOn(apiCallApi, 'request');
++  mocks.push(options, redeem, passthrough);
++  expect((await readClaudeResetGrants('index')).nextGrantId).toBe(grant.id);
+   expect(await readClaudeOrganization('index')).toBe(organization);
+   expect(await claimClaudeResetGrant('index', organization, grant.id, 'request-1')).toBe('reset');
+-  expect(calls[0].url).toBe('https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1');
+-  expect(calls[1].url).toBe('https://api.anthropic.com/api/oauth/profile');
+-  expect(calls[2].url).toBe(
+-    `https://api.anthropic.com/api/organizations/${organization}/reset_rate_limits`
+-  );
+-  expect(JSON.parse(calls[2].data!)).toEqual({
+-    program: 'cedar_ember',
+-    grant_id: grant.id,
++  expect(redeem).toHaveBeenCalledWith({
++    auth_index: 'index',
++    provider: 'claude',
+     request_id: 'request-1',
++    organization_id: organization,
++    grant_id: grant.id,
+   });
+-  for (const call of calls) {
+-    expect(call.authIndex).toBe('index');
+-    expect(call.header?.Authorization).toBe('Bearer $TOKEN$');
+-    expect(call.header?.['anthropic-beta']).toBe('oauth-2025-04-20');
+-    expect(call.header?.['User-Agent']).toBe('claude-cli/2.1.280 (external, cli)');
+-  }
++  expect(passthrough).not.toHaveBeenCalled();
+ });
+-
+-test('claim terminal mappings and ambiguous outcomes', async () => {
+-  for (const result of ANTHROPIC_RESET_RESULTS) {
+-    apiCallApi.request = async () => ({
+-      statusCode: 200,
+-      body: { result },
+-      bodyText: '',
+-      header: {},
+-    });
+-    expect(await claimClaudeResetGrant('a', organization, grant.id, 'r')).toBe(result);
+-  }
+-  for (const [statusCode, code] of [
+-    [401, 'auth_error'],
+-    [403, 'auth_error'],
+-    [429, 'rate_limited'],
+-  ] as const) {
+-    apiCallApi.request = async () => ({ statusCode, body: null, bodyText: '', header: {} });
+-    expect(await claimClaudeResetGrant('a', organization, grant.id, 'r')).toBe(code);
+-  }
+-  for (const statusCode of [200, 400, 500]) {
+-    apiCallApi.request = async () => ({
+-      statusCode,
+-      body: { result: 'unexpected' },
+-      bodyText: '',
+-      header: {},
+-    });
+-    await expect(claimClaudeResetGrant('a', organization, grant.id, 'r')).rejects.toBeInstanceOf(
+-      AnthropicResetGrantUnknownOutcome
+-    );
+-  }
+-  apiCallApi.request = async () => {
+-    throw new Error('private upstream detail');
+-  };
+-  await expect(claimClaudeResetGrant('a', organization, grant.id, 'r')).rejects.toThrow(
+-    'outcome is unknown'
+-  );
+-});
+-
+-async function withGlobalCrypto(source: unknown, run: () => Promise<void>) {
+-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+-  try {
+-    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: source });
+-    await run();
+-  } finally {
+-    if (descriptor) Object.defineProperty(globalThis, 'crypto', descriptor);
+-    else Reflect.deleteProperty(globalThis, 'crypto');
+-  }
+-}
+-
+-function mockDefaultResetRequests(result: 'reset' | 'unknown' = 'reset') {
+-  const calls: ApiCallRequest[] = [];
+-  const fullBlock = {
+-    ...block,
+-    ineligible_reason: null,
+-    next_grant_id: grant.id,
+-    weekly_resets_at: null,
+-    cooldown_until: null,
+-    grants: [
+-      {
+-        ...grant,
+-        label: 'Test grant',
+-        resets_total: 1,
+-        resets_left: 1,
+-        starts_at: '2000-01-01T00:00:00Z',
+-        ends_at: '2099-01-01T00:00:00Z',
+-        clears: ['five_hour', 'seven_day', 'seven_day_overage_included'],
+-        paused: false,
+-        use_requires_limit: false,
+-        percent_used: { five_hour: 0, seven_day: 100, seven_day_overage_included: 0 },
+-        blocking: [],
+-        arm: null,
+-      },
+-    ],
+-  };
+-  apiCallApi.request = async (request) => {
+-    calls.push(request);
+-    const body =
+-      request.method === 'POST'
+-        ? { result }
+-        : request.url.endsWith('/profile')
+-          ? {
+-              account: { uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' },
+-              organization: { uuid: organization },
+-            }
+-          : { cedar_ember: fullBlock };
+-    return { statusCode: 200, body, bodyText: '', header: {} };
+-  };
+-  return calls;
+-}
+-
+-describe('Claude reset grant default request ID integration', () => {
+-  test('HTTP crypto without randomUUID still dispatches a valid reset claim', async () => {
+-    using cooldown = spyOn(apiClient, 'post').mockResolvedValue({
+-      status: 'ok',
+-      auth_index: 'index',
+-    });
+-    const calls = mockDefaultResetRequests();
+-    let randomCalls = 0;
+-    await withGlobalCrypto(
+-      {
+-        getRandomValues(bytes: Uint8Array) {
+-          randomCalls++;
+-          bytes.fill(10);
+-          return bytes;
+-        },
+-      },
+-      async () => {
+-        const operations = createResetGrantOperations();
+-        expect(await operations.run('account', 'index', grant.id)).toEqual({
+-          code: 'reset',
+-          unresolved: false,
+-        });
+-        expect(calls.map((call) => call.method)).toEqual(['GET', 'GET', 'POST']);
+-        expect(calls[0].url).toEndWith('/api/oauth/profile');
+-        expect(calls[1].url).toEndWith('/api/oauth/usage?cedar_ember=1&skip_spend=1');
+-        expect(calls[2].url).toBe(
+-          `https://api.anthropic.com/api/organizations/${organization}/reset_rate_limits`
+-        );
+-        const payload = JSON.parse(calls[2].data!);
+-        expect(payload).toEqual({
+-          program: 'cedar_ember',
+-          grant_id: grant.id,
+-          request_id: '0a'.repeat(16),
+-        });
+-        expect(payload.request_id).toMatch(/^[0-9a-f]{32}$/);
+-        expect(payload.request_id).toMatch(ANTHROPIC_RESET_REQUEST_ID_RE);
+-        expect(operations.inspect('account')).toMatchObject({
+-          requestId: payload.request_id,
+-          code: 'reset',
+-        });
+-        expect(randomCalls).toBe(1);
+-        expect(cooldown).toHaveBeenCalledWith('/routing/cooldown/reset', { auth_index: 'index' });
+-      }
+-    );
+-  });
+-
+-  test('HTTP fallback reuses one secure request ID after an unknown claim outcome', async () => {
+-    const calls = mockDefaultResetRequests('unknown');
+-    let randomCalls = 0;
+-    await withGlobalCrypto(
+-      {
+-        getRandomValues(bytes: Uint8Array) {
+-          randomCalls++;
+-          bytes.fill(randomCalls);
+-          return bytes;
+-        },
+-      },
+-      async () => {
+-        const operations = createResetGrantOperations();
+-        await expect(operations.run('account', 'index', grant.id)).rejects.toBeInstanceOf(
+-          AnthropicResetGrantUnknownOutcome
+-        );
+-        const originalId = operations.inspect('account')?.requestId;
+-        expect(originalId).toMatch(/^[0-9a-f]{32}$/);
+-        await expect(operations.run('account', 'index', grant.id)).rejects.toBeInstanceOf(
+-          AnthropicResetGrantUnknownOutcome
+-        );
+-        const posts = calls.filter((call) => call.method === 'POST');
+-        expect(posts).toHaveLength(2);
+-        expect(posts.map((call) => JSON.parse(call.data!).request_id)).toEqual([
+-          originalId,
+-          originalId,
+-        ]);
+-        expect(calls.map((call) => call.method)).toEqual(['GET', 'GET', 'POST', 'GET', 'POST']);
+-        expect(operations.inspect('account')?.code).toBeUndefined();
+-        expect(randomCalls).toBe(1);
+-      }
+-    );
+-  });
+-
+-  test('missing secure randomness prevents spending and journaling without leaving busy state', async () => {
+-    const calls = mockDefaultResetRequests();
+-    await withGlobalCrypto({}, async () => {
+-      const operations = createResetGrantOperations();
+-      for (let attempt = 0; attempt < 2; attempt++) {
+-        const result = operations.run('account', 'index', grant.id);
+-        await expect(result).rejects.toBeInstanceOf(ResetGrantPreflightError);
+-        await expect(result).rejects.toMatchObject({
+-          stage: 'request_id',
+-          reason: 'generation_failed',
+-        });
+-        expect(operations.inspect('account')).toBeUndefined();
+-      }
+-      expect(calls.map((call) => call.method)).toEqual(['GET', 'GET', 'GET', 'GET']);
+-    });
++test('reports backend recovery failure and keeps unknown outcomes ambiguous', async () => {
++  const redeem = spyOn(quotaResetApi, 'redeem').mockResolvedValue({
++    code: 'reset',
++    recoveryFailed: true,
+   });
++  mocks.push(redeem);
++  expect(await claimClaudeResetGrant('index', organization, grant.id, 'request-1')).toBe(
++    'cooldown_clear_failed'
++  );
++  redeem.mockResolvedValue({ code: 'unknown' });
++  await expect(
++    claimClaudeResetGrant('index', organization, grant.id, 'request-1')
++  ).rejects.toBeInstanceOf(AnthropicResetGrantUnknownOutcome);
+ });
+-
+ function setup() {
+-  let revision = 1;
+-  let now = 100;
+-  let count = 0;
++  let revision = 1,
++    now = 100,
++    number = 0;
+   const ids: string[] = [];
+-  const cleared: string[] = [];
+   const deps = {
+     revision: () => revision,
+     now: () => now,
+-    requestId: () => `request-${++count}`,
+-    readStatus: async () => status(),
++    requestId: () => 'request-' + ++number,
+     readOrganization: async () => organization,
+-    resetCooldown: async (authIndex: string): Promise<AuthFileCooldownResetResponse> => {
+-      cleared.push(authIndex);
+-      return { status: 'ok', auth_index: authIndex, models: [] };
+-    },
+-    claim: async (
+-      _auth: string,
+-      _org: string,
+-      _grant: string,
+-      id: string
+-    ): Promise<AnthropicResetSettledCode> => {
++    claim: async (_auth: string, _org: string, _grant: string, id: string): Promise<'reset'> => {
+       ids.push(id);
+       throw new AnthropicResetGrantUnknownOutcome();
+     },
+@@ -324,7 +112,6 @@ function setup() {
+   return {
+     deps,
+     ids,
+-    cleared,
+     nextSession: () => {
+       revision++;
+     },
+@@ -333,381 +120,35 @@ function setup() {
+     },
+   };
+ }
+-
+-test('confirmed Claude resets clear only the redeemed credential cooldown before returning', async () => {
+-  for (const code of ['reset', 'already_used'] as const) {
+-    const h = setup();
+-    h.deps.claim = async (_auth, _org, _grant, id) => {
+-      expect(h.cleared).toEqual([]);
+-      h.ids.push(id);
+-      return code;
+-    };
+-    const operations = createResetGrantOperations(h.deps);
+-    expect(await operations.run('account', 'credential-a', grant.id)).toEqual({
+-      code,
+-      unresolved: false,
+-    });
+-    expect(h.cleared).toEqual(['credential-a']);
+-    expect(h.ids).toEqual(['request-1']);
+-    expect(operations.inspect('account')?.code).toBe(code);
+-  }
+-});
+-
+-test('refused or unknown reset outcomes never clear routing cooldowns', async () => {
+-  const h = setup();
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow();
+-  expect(h.cleared).toEqual([]);
+-  for (const code of [...ANTHROPIC_RESET_RESULTS, 'auth_error', 'rate_limited'] as const) {
+-    if (code === 'reset' || code === 'already_used') continue;
+-    h.deps.claim = async () => code;
+-    await operations.run('account', 'a', grant.id);
+-    expect(h.cleared).toEqual([]);
+-  }
+-});
+-
+-test('cooldown clear failures keep the reset settled and report manual recovery', async () => {
+-  for (const failure of ['network', 'status', 'credential']) {
+-    const h = setup();
+-    h.deps.claim = async (_auth, _org, _grant, id) => {
+-      h.ids.push(id);
+-      return 'reset';
+-    };
+-    h.deps.resetCooldown = async (authIndex) => {
+-      h.cleared.push(authIndex);
+-      if (failure === 'network') throw new Error('unavailable');
+-      return JSON.parse(
+-        JSON.stringify({
+-          status: failure === 'status' ? 'error' : 'ok',
+-          auth_index: failure === 'credential' ? 'other' : authIndex,
+-          models: [],
+-        })
+-      );
+-    };
+-    const operations = createResetGrantOperations(h.deps);
+-    expect(await operations.run('account', 'a', grant.id)).toEqual({
+-      code: 'cooldown_clear_failed',
+-      unresolved: false,
+-    });
+-    expect(operations.inspect('account')?.code).toBe('reset');
+-    expect(h.ids).toEqual(['request-1']);
+-    expect(h.cleared).toEqual(['a']);
+-  }
+-});
+-
+-test('connection changes after a claim prevent cooldown clearing on the replacement connection', async () => {
+-  const h = setup();
+-  h.deps.claim = async () => {
+-    h.nextSession();
+-    return 'reset';
+-  };
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('session');
+-  expect(h.cleared).toEqual([]);
+-  expect(operations.inspect('account')).toBeUndefined();
+-});
+-
+-test('a connection change during cooldown clearing cannot report success for the new session', async () => {
+-  const h = setup();
+-  h.deps.claim = async () => 'reset';
+-  h.deps.resetCooldown = async (authIndex) => {
+-    h.nextSession();
+-    return { status: 'ok', auth_index: authIndex, models: [] };
+-  };
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('session');
+-  expect(operations.inspect('account')).toBeUndefined();
+-});
+-
+-test('unknown outcome retains request ID across retries; expiry blocks', async () => {
+-  const h = setup();
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow();
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow();
++test('ambiguous claims preserve request and choice; expiration blocks a new claim', async () => {
++  const h = setup(),
++    operations = createResetGrantOperations(h.deps);
++  for (let i = 0; i < 2; i++)
++    await expect(operations.run('account', 'index', grant.id)).rejects.toThrow();
+   expect(h.ids).toEqual(['request-1', 'request-1']);
+-  await expect(operations.run('account', 'a', 'other-grant')).rejects.toThrow('expired');
++  await expect(operations.run('account', 'index', 'other')).rejects.toThrow('expired');
+   h.advance();
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('expired');
++  await expect(operations.run('account', 'index', grant.id)).rejects.toThrow('expired');
+   expect(h.ids).toHaveLength(2);
+ });
+-
+-test('fresh spend rechecks eligibility and blocks concurrent clicks', async () => {
+-  const h = setup();
+-  h.deps.readStatus = async () => ({ ...status(), eligible: false });
+-  const operations = createResetGrantOperations(h.deps);
+-  const first = operations.run('account', 'a', grant.id);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('busy');
+-  await expect(first).rejects.toThrow('blocked');
+-  expect(h.ids).toHaveLength(0);
+-});
+-
+-test('session change during profile read prevents POST and isolates journal', async () => {
+-  const h = setup();
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow();
++test('concurrent clicks and replacement sessions cannot spend', async () => {
++  const h = setup(),
++    operations = createResetGrantOperations(h.deps);
++  const first = operations.run('account', 'index', grant.id);
++  await expect(operations.run('account', 'index', grant.id)).rejects.toThrow('busy');
++  await expect(first).rejects.toThrow();
+   h.nextSession();
+   expect(operations.inspect('account')).toBeUndefined();
+   h.deps.readOrganization = async () => {
+     h.nextSession();
+     return organization;
+   };
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('session');
++  await expect(operations.run('account', 'index', grant.id)).rejects.toThrow('session');
+   expect(h.ids).toHaveLength(1);
+ });
+-
+-test('retry binds original organization', async () => {
+-  const h = setup();
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow();
+-  h.deps.readOrganization = async () => 'aaaaaaaa-2222-3333-4444-555555555555';
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('identity');
+-  expect(h.ids).toHaveLength(1);
+-});
+-
+-test('a retry refusal keeps the ambiguous original operation open', async () => {
+-  const h = setup();
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow();
+-  h.deps.claim = async (_auth, _org, _grant, id) => {
+-    h.ids.push(id);
+-    return 'rate_limited';
+-  };
+-  expect(await operations.run('account', 'a', grant.id)).toEqual({
+-    code: 'rate_limited',
+-    unresolved: true,
+-  });
+-  expect(operations.inspect('account')?.code).toBeUndefined();
+-  h.deps.claim = async (_auth, _org, _grant, id) => {
+-    h.ids.push(id);
+-    return 'already_used';
+-  };
+-  expect(await operations.run('account', 'a', grant.id)).toEqual({
+-    code: 'already_used',
+-    unresolved: false,
+-  });
+-  expect(h.ids).toEqual(['request-1', 'request-1', 'request-1']);
+-  expect(h.cleared).toEqual(['a']);
+-});
+-
+-test('no retry after the deadline expires during profile lookup', async () => {
+-  const h = setup();
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow();
+-  h.deps.readOrganization = async () => {
+-    h.advance();
+-    return organization;
+-  };
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('expired');
+-  expect(h.ids).toHaveLength(1);
+-});
+-
+-test('date, pause, limit, balance, usability and cooldown gates refuse new spending', async () => {
+-  for (const fields of [
+-    { paused: true },
+-    { resetsLeft: 0 },
+-    { usableNow: false },
+-    { startsAt: '2099-01-01T00:00:00Z' },
+-    { endsAt: '1970-01-01T00:00:00Z' },
+-  ]) {
+-    const h = setup();
+-    h.deps.readStatus = async () => ({
+-      ...status(),
+-      grants: [{ ...status().grants[0], ...fields }],
+-    });
+-    await expect(createResetGrantOperations(h.deps).run('account', 'a', grant.id)).rejects.toThrow(
+-      'blocked'
+-    );
+-    expect(h.ids).toHaveLength(0);
+-  }
+-  for (const fields of [{ atLimit: false }, { cooldownUntil: '2099-01-01T00:00:00Z' }]) {
+-    const h = setup();
+-    h.deps.readStatus = async () => ({ ...status(), ...fields });
+-    await expect(createResetGrantOperations(h.deps).run('account', 'a', grant.id)).rejects.toThrow(
+-      'blocked'
+-    );
+-    expect(h.ids).toHaveLength(0);
+-  }
+-});
+-
+-test('a stale claim answer cannot settle the replacement session operation', async () => {
+-  const h = setup();
+-  const operations = createResetGrantOperations(h.deps);
+-  h.deps.claim = async () => {
+-    h.nextSession();
+-    expect(operations.inspect('account')).toBeUndefined();
+-    return 'reset';
+-  };
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('session');
+-  expect(operations.inspect('account')).toBeUndefined();
+-});
+-
+-test('preflight read failures identify the stage without exposing upstream details', async () => {
+-  for (const stage of ['organization', 'status'] as const) {
+-    for (const failure of [new Error('SECRET'), new AnthropicResetGrantError('auth')]) {
+-      const h = setup();
+-      const fail = async (): Promise<never> => {
+-        throw failure;
+-      };
+-      if (stage === 'organization') h.deps.readOrganization = fail;
+-      else h.deps.readStatus = fail;
+-      const operations = createResetGrantOperations(h.deps);
+-      try {
+-        await operations.run('account', 'a', grant.id);
+-        throw new Error('Expected preflight failure');
+-      } catch (error) {
+-        expect(error).toBeInstanceOf(ResetGrantPreflightError);
+-        expect((error as ResetGrantPreflightError).stage).toBe(stage);
+-        expect((error as Error).message).not.toContain('SECRET');
+-        expect(resetGrantFailureMessageKey(error)).toBe(`claude_reset.failure_${stage}`);
+-      }
+-      expect(h.ids).toHaveLength(0);
+-      expect(operations.inspect('account')).toBeUndefined();
+-    }
+-  }
+-  expect(resetGrantFailureMessageKey(new Error('SECRET'))).toBe('claude_reset.blocked');
+-});
+-
+-test('request ID generation failure is diagnosed before journaling or dispatch', async () => {
+-  const h = setup();
+-  h.deps.requestId = () => {
+-    throw new Error('crypto unavailable');
+-  };
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toMatchObject({
+-    stage: 'request_id',
+-    reason: 'generation_failed',
+-  });
+-  expect(operations.inspect('account')).toBeUndefined();
+-  expect(h.ids).toHaveLength(0);
+-});
+-
+-test('expiry and cooldown failures have distinct safe diagnostic codes', async () => {
+-  for (const [fields, reason] of [
+-    [{ startsAt: '2099-01-01T00:00:00Z' }, 'blocked_not_started'],
+-    [{ endsAt: '1970-01-01T00:00:00Z' }, 'blocked_grant_expired'],
+-    [{ paused: true }, 'blocked_paused'],
+-  ] as const) {
+-    const h = setup();
+-    h.deps.readStatus = async () => ({
+-      ...status(),
+-      grants: [{ ...status().grants[0], ...fields }],
+-    });
+-    await expect(
+-      createResetGrantOperations(h.deps).run('account', 'a', grant.id)
+-    ).rejects.toMatchObject({
+-      stage: 'eligibility',
+-      reason,
+-    });
+-    expect(h.ids).toHaveLength(0);
+-  }
+-  const h = setup();
+-  h.deps.readStatus = async () => ({ ...status(), cooldownUntil: '2099-01-01T00:00:00Z' });
+-  await expect(
+-    createResetGrantOperations(h.deps).run('account', 'a', grant.id)
+-  ).rejects.toMatchObject({
+-    stage: 'eligibility',
+-    reason: 'blocked_cooldown',
+-  });
+-  expect(h.ids).toHaveLength(0);
+-});
+-
+-test('read authentication refusals retain a safe diagnostic code', async () => {
+-  for (const statusCode of [401, 403]) {
+-    apiCallApi.request = async () => ({ statusCode, header: {}, body: {}, bodyText: '' });
+-    await expect(readClaudeOrganization('a')).rejects.toMatchObject({ code: 'auth' });
+-    await expect(readClaudeResetGrants('a')).rejects.toMatchObject({ code: 'auth' });
+-  }
+-});
+-
+-test('all grant messages and confirmation are translated in six locales', async () => {
+-  const locales = await Promise.all(
+-    ['en', 'zh-CN', 'zh-TW', 'ru', 'vi', 'ko'].map(
+-      async (locale) => (await Bun.file(`src/i18n/locales/${locale}.json`).json()).claude_reset
+-    )
+-  );
+-  for (const locale of locales) {
+-    expect(Object.keys(locale).sort()).toEqual(Object.keys(locales[0]).sort());
+-    for (const stage of ['organization', 'status', 'eligibility', 'request_id', 'operation']) {
+-      expect(locale[`failure_${stage}`]).toContain('{{code}}');
+-    }
+-    expect(locale.confirm_text).toContain('{{name}}');
+-    expect(locale.retry_confirm).toContain('{{name}}');
+-    expect(typeof locale.remaining).toBe('string');
+-    expect(locale.count).toContain('{{left}}');
+-    for (const key of [
+-      ...ANTHROPIC_RESET_RESULTS,
+-      'auth_error',
+-      'rate_limited',
+-      'unknown',
+-      'expired',
+-    ]) {
+-      expect(typeof locale[key]).toBe('string');
+-    }
+-  }
+-});
+-
+-test('card selection prefers usable recommendation and has deterministic fallback', () => {
++test('card displays only the backend-selected eligible grant', () => {
+   const base = status();
+-  const a = { ...base.grants[0], id: 'a' };
+-  const b = { ...a, id: 'b' };
+-  const multiple = { ...base, grants: [b, a], nextGrantId: 'b' };
+-  expect(selectResetGrant(multiple, 0)?.id).toBe('b');
+-  expect(selectResetGrant({ ...multiple, nextGrantId: null }, 0)?.id).toBe('a');
+-  expect(selectResetGrant({ ...multiple, grants: [a, { ...b, paused: true }] }, 0)?.id).toBe('a');
+-  expect(selectResetGrant({ ...multiple, eligible: false }, 0)).toBeUndefined();
+-  expect(selectResetGrant({ ...multiple, atLimit: false }, 0)).toBeUndefined();
+-  expect(
+-    selectResetGrant({ ...multiple, cooldownUntil: new Date(1000).toISOString() }, 0)
+-  ).toBeUndefined();
+-  for (const changed of [
+-    { resetsLeft: 0 },
+-    { usableNow: false },
+-    { paused: true },
+-    { startsAt: new Date(1000).toISOString() },
+-    { endsAt: new Date(0).toISOString() },
+-  ]) {
+-    expect(selectResetGrant({ ...base, grants: [{ ...a, ...changed }] }, 0)).toBeUndefined();
+-  }
+-});
+-
+-test('Claude card uses Codex count and action styles and shared confirmation, not a grant dialog', async () => {
+-  const card = await Bun.file('src/features/quota/components/QuotaCard.tsx').text();
+-  const hook = await Bun.file('src/features/quota/providers/claude/ClaudeResetGrants.tsx').text();
+-  expect(card).toContain('quotaClasses.codexPlanValue}>{claudeReset.count');
+-  expect(card).toContain('disabled={claudeReset.blocked}');
+-  expect(card).toContain('onClick={claudeReset.confirm}');
+-  expect(hook).toContain('showConfirmation({');
+-  expect(hook).toContain("pending ? 'claude_reset.retry_confirm'");
+-  expect(hook).not.toContain('<Modal');
+-  expect(hook).not.toContain('status.grants.map');
+-});
+-
+-test('cooldown clear failures reuse existing messages without new locale keys', async () => {
+-  const hook = await Bun.file('src/features/quota/providers/claude/ClaudeResetGrants.tsx').text();
+-  expect(hook).toContain("answer.code === 'cooldown_clear_failed'");
+-  expect(hook).toContain("t('auth_files.cooldown_reset_failed', {");
+-  expect(hook).toContain("message: t('common.unknown_error')");
+-  for (const language of ['en', 'zh-CN', 'zh-TW', 'ru', 'vi', 'ko', 'tr']) {
+-    const locale = await Bun.file(`src/i18n/locales/${language}.json`).json();
+-    expect(locale.claude_reset.cooldown_clear_failed).toBeUndefined();
+-    expect(locale.auth_files.cooldown_reset_failed).toContain('{{name}}');
+-    expect(locale.auth_files.cooldown_reset_failed).toContain('{{message}}');
+-    expect(typeof locale.common.unknown_error).toBe('string');
+-  }
+-});
+-
+-test('account reads map upstream 429 to a sanitized typed rate-limit failure', async () => {
+-  let calls = 0;
+-  apiCallApi.request = async () => {
+-    calls += 1;
+-    return { statusCode: 429, body: 'private upstream detail', bodyText: '', header: {} };
+-  };
+-  for (const read of [readClaudeResetGrants, readClaudeOrganization]) {
+-    await expect(read('index')).rejects.toMatchObject({
+-      name: 'AnthropicResetGrantError',
+-      code: 'rate_limited',
+-      message: 'Anthropic reset-grant read failed (rate_limited)',
+-    });
+-  }
+-  expect(calls).toBe(2); // Neither read retries.
++  expect(selectResetGrant({ ...base, nextGrantId: grant.id }, 0)?.id).toBe(grant.id);
++  expect(selectResetGrant({ ...base, nextGrantId: null }, 0)).toBeUndefined();
++  expect(selectResetGrant({ ...base, nextGrantId: grant.id, grants: [] }, 0)).toBeUndefined();
+ });
+diff --git a/tests/codexQuotaReset.test.ts b/tests/codexQuotaReset.test.ts
+index 1896a73..bc27721 100644
+--- a/tests/codexQuotaReset.test.ts
++++ b/tests/codexQuotaReset.test.ts
+@@ -2,91 +2,75 @@ import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+ import type { TFunction } from 'i18next';
+ import { CODEX_CONFIG } from '@/features/quota/providers/codex/data';
+ import { apiCallApi, authFilesApi, apiClient } from '@/services/api';
+-import { CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL } from '@/utils/quota';
+-
++import { quotaResetApi } from '@/services/api/quotaReset';
+ const t = ((key: string) => key) as TFunction;
+-const file = { name: 'codex-test.json', auth_index: 'test-index', type: 'codex' };
+-const response = (body: unknown, statusCode = 200) => ({
+-  statusCode,
+-  body,
+-  bodyText: JSON.stringify(body),
+-  header: {},
+-});
+-const reset = () => CODEX_CONFIG.resetQuota!(file, t);
++const file = { name: 'synthetic.json', auth_index: 'synthetic-index', type: 'codex' };
+ const mocks: Array<{ mockRestore(): void }> = [];
++let revision = 100;
+ afterEach(() => {
+   for (const mock of mocks.splice(0)) mock.mockRestore();
+ });
+-
+-function setup(body: unknown, statusCode = 200) {
+-  const calls: string[] = [];
+-  const request = spyOn(apiCallApi, 'request').mockImplementation(async (payload) => {
+-    if (payload.url === CODEX_RATE_LIMIT_RESET_CREDITS_CONSUME_URL) {
+-      calls.push('consume');
+-      return response(body, statusCode);
+-    }
+-    calls.push('read');
+-    return response({});
++function setup(code = 'reset', recoveryFailed = false) {
++  revision++;
++  const session = spyOn(apiClient, 'getConnectionRevision').mockImplementation(() => revision);
++  const redeem = spyOn(quotaResetApi, 'redeem').mockResolvedValue({ code, recoveryFailed });
++  const clear = spyOn(authFilesApi, 'resetCooldown');
++  const request = spyOn(apiCallApi, 'request').mockResolvedValue({
++    statusCode: 200,
++    body: {},
++    bodyText: '{}',
++    header: {},
+   });
+-  const clear = spyOn(authFilesApi, 'resetCooldown').mockImplementation(async () => {
+-    calls.push('clear');
+-    return { status: 'ok', auth_index: 'test-index', models: [] };
+-  });
+-  mocks.push(request, clear);
+-  return { calls, request, clear };
++  mocks.push(session, redeem, clear, request);
++  return { redeem, clear, request };
+ }
+-
+-describe('Codex reset gateway cooldown', () => {
++const reset = () => CODEX_CONFIG.resetQuota!(file, t);
++describe('Codex shared reset endpoint', () => {
+   test.each(['reset', 'already_redeemed'])(
+-    'clears only after confirmed %s, before reads',
++    'uses automatic selection and backend recovery for %s',
+     async (code) => {
+-      const { calls, clear } = setup({ code, windows_reset: 0 });
++      const { redeem, clear } = setup(code);
+       await reset();
+-      expect(calls.slice(0, 3)).toEqual(['consume', 'clear', 'read']);
+-      expect(clear).toHaveBeenCalledTimes(1);
+-      expect(clear).toHaveBeenCalledWith('test-index');
++      expect(redeem).toHaveBeenCalledTimes(1);
++      expect(redeem.mock.calls[0][0]).toMatchObject({
++        auth_index: 'synthetic-index',
++        provider: 'codex',
++      });
++      expect(redeem.mock.calls[0][0].request_id).toMatch(/^[a-f0-9-]{36}$/);
++      expect(redeem.mock.calls[0][0].credit_id).toBeUndefined();
++      expect(clear).not.toHaveBeenCalled();
+     }
+   );
+-
+-  test.each(['no_credit', 'nothing_to_reset', 'unknown'])('does not clear for %s', async (code) => {
+-    const { calls } = setup({ code });
+-    await expect(reset()).rejects.toThrow('codex_quota.reset_not_confirmed');
+-    expect(calls).toEqual(['consume']);
+-  });
+-
+-  test('does not clear on HTTP failure', async () => {
+-    const { calls } = setup({ code: 'reset' }, 503);
+-    await expect(reset()).rejects.toThrow();
+-    expect(calls).toEqual(['consume']);
+-  });
+-
+-  test('does not clear on transport failure', async () => {
+-    const { request, clear } = setup({});
+-    request.mockRejectedValue(new Error('timeout'));
+-    await expect(reset()).rejects.toThrow('timeout');
++  test('retains the request ID after a lost response and does not refresh or clear', async () => {
++    const { redeem, request, clear } = setup();
++    redeem.mockRejectedValue(new Error('lost response'));
++    await expect(reset()).rejects.toThrow('lost response');
++    await expect(reset()).rejects.toThrow('lost response');
++    expect(redeem.mock.calls[0][0].request_id).toBe(redeem.mock.calls[1][0].request_id);
++    expect(request).not.toHaveBeenCalled();
+     expect(clear).not.toHaveBeenCalled();
+   });
+-
+-  test('directs cooldown failures to manual clearing, without another consume', async () => {
+-    const { request, clear } = setup({ code: 'reset' });
+-    clear.mockRejectedValue(new Error('offline'));
+-    await expect(reset()).rejects.toThrow('codex_quota.reset_cooldown_failed');
+-    expect(request).toHaveBeenCalledTimes(1);
+-  });
+-
+-  test('rejects mismatched cooldown acknowledgements', async () => {
+-    const { clear } = setup({ code: 'reset' });
+-    clear.mockResolvedValue({ status: 'ok', auth_index: 'other-index', models: [] });
+-    await expect(reset()).rejects.toThrow('codex_quota.reset_cooldown_failed');
+-  });
+-
+-  test('does not clear after connection changes during redemption', async () => {
+-    const { clear } = setup({ code: 'reset' });
+-    const revision = spyOn(apiClient, 'getConnectionRevision')
+-      .mockReturnValueOnce(1)
+-      .mockReturnValue(2);
+-    mocks.push(revision);
++  test('reports partial recovery without a second redemption', async () => {
++    const { redeem, clear } = setup('reset', true);
+     await expect(reset()).rejects.toThrow('codex_quota.reset_cooldown_failed');
++    expect(redeem).toHaveBeenCalledTimes(1);
+     expect(clear).not.toHaveBeenCalled();
+   });
++  test.each(['unknown', 'unavailable', 'rate_limited'])(
++    'rejects %s without refresh',
++    async (code) => {
++      const { request } = setup(code);
++      await expect(reset()).rejects.toThrow('codex_quota.reset_not_confirmed');
++      expect(request).not.toHaveBeenCalled();
++    }
++  );
++  test('does not refresh a replacement connection', async () => {
++    const { redeem, request } = setup();
++    redeem.mockImplementation(async () => {
++      revision++;
++      return { code: 'reset' };
++    });
++    await expect(reset()).rejects.toThrow();
++    expect(request).not.toHaveBeenCalled();
++  });
+ });

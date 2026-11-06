@@ -33,6 +33,8 @@ COPY patches/live-stats.patch /tmp/live-stats.patch
 RUN git apply --check /tmp/live-stats.patch && git apply /tmp/live-stats.patch
 COPY patches/shared-quota-reset.patch /tmp/shared-quota-reset.patch
 RUN git apply --check /tmp/shared-quota-reset.patch && git apply /tmp/shared-quota-reset.patch
+COPY patches/websocket-test-sync.patch /tmp/websocket-test-sync.patch
+RUN git apply --check /tmp/websocket-test-sync.patch && git apply /tmp/websocket-test-sync.patch
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./

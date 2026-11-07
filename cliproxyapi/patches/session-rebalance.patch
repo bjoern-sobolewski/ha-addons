@@ -194,7 +194,7 @@ index c5139fa2..ef459b1b 100644
  	v8.PUT("/quota/policies", s.mgmt.PutQuotaPolicy)
  	v8.GET("/live", s.mgmt.GetLiveStats)
 diff --git a/internal/quotatraffic/policy.go b/internal/quotatraffic/policy.go
-index de07ad9a..70b4de67 100644
+index de07ad9a..f3e8ff68 100644
 --- a/internal/quotatraffic/policy.go
 +++ b/internal/quotatraffic/policy.go
 @@ -31,27 +31,44 @@ type WindowPolicy struct {
@@ -347,7 +347,14 @@ index de07ad9a..70b4de67 100644
  	next := make(map[string]map[string]float64, len(s.settings)+1)
  	for k, v := range s.settings {
  		next[k] = v
-@@ -146,7 +212,7 @@ func (s *PolicyStore) set(index, provider string, values map[string]float64, exp
+@@ -140,13 +206,13 @@ func (s *PolicyStore) set(index, provider string, values map[string]float64, exp
+ 		}
+ 		next[key] = copied
+ 	}
+-	if len(next) > 4096 {
++	if len(next) > 4096 || len(nextBehavior) > 4096 {
+ 		return errors.New("too many quota policies")
+ 	}
  	if s.path == "" {
  		return errors.New("quota policy persistence is unavailable")
  	}

@@ -55,7 +55,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/routingli
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/api/handlers/openai
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api ./sdk/api/handlers -run 'TestManagementV8|TestRoutingActivity'
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.7" -o /out/CLIProxyAPI ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.8" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -73,6 +73,8 @@ COPY patches/cpamc-route-recovery.patch /tmp/cpamc-route-recovery.patch
 RUN git apply --check /tmp/cpamc-route-recovery.patch && git apply /tmp/cpamc-route-recovery.patch
 COPY patches/cpamc-keeper-email-privacy.patch /tmp/cpamc-keeper-email-privacy.patch
 RUN git apply --check /tmp/cpamc-keeper-email-privacy.patch && git apply /tmp/cpamc-keeper-email-privacy.patch
+COPY patches/cpamc-quota-tooltip.patch /tmp/cpamc-quota-tooltip.patch
+RUN git apply --check /tmp/cpamc-quota-tooltip.patch && git apply /tmp/cpamc-quota-tooltip.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/package.json /src/bun.lock ./
@@ -91,7 +93,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.23
+ARG BUILD_VERSION=0.1.24
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

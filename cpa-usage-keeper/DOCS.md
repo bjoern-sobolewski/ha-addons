@@ -69,9 +69,9 @@ available for idle accounts and providers without supported traffic metadata.
 
 Quota views read backend caches every ten seconds, without provider queries.
 Polling pauses while hidden, refreshes when visible, and does not overlap. Focus
-or tap the quota detail control for the source, capture timestamp, relative age
-and account label. Freshness controls follow the remaining amount instead of
-occupying a separate badge column. Data is stale after fifteen minutes or its reset time.
+or tap the remaining percentage to see the last update in seconds in a tooltip.
+The percentage has no permanently visible refresh icon or age. Data is stale
+after fifteen minutes or its reset time.
 Cache reads never update capture timestamps. Traffic caches are in memory and
 can be unavailable after restart until traffic or a fallback query arrives.
 

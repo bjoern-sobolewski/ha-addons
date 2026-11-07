@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.24
+
+- Remove the always-visible quota refresh icon and age. Show the last update in seconds only in a tooltip on the remaining percentage, with keyboard and touch access.
+
 ## 0.1.23
 
 - Add a per-auth-file “Hide email in Keeper” switch to CPAMC. Persist the setting across refresh and re-login, publish a management-only privacy policy, and retain protection when credentials are deleted.

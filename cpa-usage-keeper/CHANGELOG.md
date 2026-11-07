@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6
+
+- Remove the always-visible quota refresh icon and age. Show the last update in seconds only in a tooltip on the remaining percentage, with keyboard and touch access.
+
 ## 0.2.5
 
 - Enforce CPAMC email privacy on all Keeper data APIs, live routing, history, details and CSV exports. Display the first six characters followed by **@provider; preserve private filename actions without exposing original names. Block raw request logs while an email is hidden, retain historical protection across deletion/restarts, and fail closed when policy verification is unavailable.

@@ -1,0 +1,233 @@
+diff --git a/web/src/components/usage/QuotaFreshness.module.scss b/web/src/components/usage/QuotaFreshness.module.scss
+new file mode 100644
+index 00000000..e0590217
+--- /dev/null
++++ b/web/src/components/usage/QuotaFreshness.module.scss
+@@ -0,0 +1,15 @@
++.remaining {
++  padding: 0;
++  border: 0;
++  background: transparent;
++  color: inherit;
++  font: inherit;
++  line-height: inherit;
++  cursor: help;
++
++  &:focus-visible {
++    outline: 2px solid var(--text-secondary);
++    outline-offset: 2px;
++    border-radius: 3px;
++  }
++}
+diff --git a/web/src/components/usage/QuotaFreshness.tsx b/web/src/components/usage/QuotaFreshness.tsx
+index ffb478a8..472854ae 100644
+--- a/web/src/components/usage/QuotaFreshness.tsx
++++ b/web/src/components/usage/QuotaFreshness.tsx
+@@ -1,101 +1,52 @@
+-import { browserDateLocale } from '@/utils/browserDateTime';
+-import { useQuotaAgeClock, quotaAgeLabel } from '@/lib/quotaAgeClock';
+-import { quotaSourceLabel } from './quotaSourceLabel';
+-import { useId, useState } from "react";
+-import { IconRefreshCw } from "@/components/ui/icons";
++import { useEffect, useId, useRef, type ReactNode } from 'react';
++import { useQuotaAgeClock } from '@/lib/quotaAgeClock';
++import { PortalTooltip, usePortalTooltip } from '@/components/ui/PortalTooltip';
++import styles from './QuotaFreshness.module.scss';
+ 
+-
+-export function QuotaFreshness({
+-  capturedAt,
+-  source,
+-  account,
+-  resetAt,
+-  stale,
+-}: {
++export function QuotaFreshness({ capturedAt, children }: {
+   capturedAt?: string;
+-  source?: string;
+-  account: string;
+-  resetAt?: string;
+-  stale?: boolean;
++  children: ReactNode;
+ }) {
+-  const [open, setOpen] = useState(false);
+   const now = useQuotaAgeClock();
+   const tooltipId = useId();
+-  const at = capturedAt ? Date.parse(capturedAt) : NaN;
+-  const seconds = Math.max(0, Math.floor((now - at) / 1000));
+-  const age = quotaAgeLabel(capturedAt, now);
+-  const old = Boolean(
+-    stale ||
+-    !Number.isFinite(at) ||
+-    seconds > 900 ||
+-    (resetAt && Date.parse(resetAt) <= now),
+-  );
+-  const details = `${account}\n${quotaSourceLabel(source)}\n${Number.isFinite(at) ? new Date(at).toLocaleString(browserDateLocale()) : "Capture time unavailable"}\n${old ? "Stale observation" : "Cached observation"}`;
+-  return (
+-    <span
+-      style={{
+-        display: "inline-flex",
+-        position: "relative",
+-        marginInlineStart: 6,
+-        verticalAlign: "baseline",
+-      }}
+-      onMouseEnter={() => setOpen(true)}
+-      onMouseLeave={() => setOpen(false)}
+-    >
+-      <button
+-        type="button"
+-        aria-label={`Last quota refresh: ${age}${old ? ", stale" : ""}`}
+-        aria-describedby={open ? tooltipId : undefined}
+-        onFocus={() => setOpen(true)}
+-        onBlur={() => setOpen(false)}
+-        onClick={() => setOpen(true)}
+-        onKeyDown={(event) => {
+-          if (event.key === "Escape") setOpen(false);
+-        }}
+-        style={{
+-          display: "inline-flex",
+-          alignItems: "center",
+-          gap: 3,
+-          font: "inherit",
+-          fontSize: "0.8em",
+-          fontWeight: 400,
+-          color: old ? "var(--amber-text, var(--text-primary, #b45309))" : "var(--text-secondary, inherit)",
+-          opacity: 1,
+-          background: "transparent",
+-          border: 0,
+-          padding: 0,
+-          cursor: "pointer",
+-          whiteSpace: "nowrap",
+-        }}
+-      >
+-        <IconRefreshCw size={12} aria-hidden="true" />
+-        <span>{age}</span>
+-      </button>
+-      {open && (
+-        <span
+-          id={tooltipId}
+-          role="tooltip"
+-          style={{
+-            display: "block",
+-            whiteSpace: "pre-line",
+-            position: "absolute",
+-            zIndex: 30,
+-            bottom: "100%",
+-            insetInlineEnd: 0,
+-            minWidth: 210,
+-            maxWidth: "min(300px, 80vw)",
+-            padding: 10,
+-            borderRadius: 6,
+-            background: "#172033",
+-            color: "white",
+-            fontSize: 12,
+-            fontWeight: 400,
+-            boxShadow: "0 2px 10px #0005",
+-          }}
+-        >
+-          {details}
+-        </span>
+-      )}
+-    </span>
+-  );
++  const anchor = useRef<HTMLButtonElement>(null);
++  const { tooltip, showOnMouseEnter, hideOnMouseLeave, showOnFocus, hideOnBlur, dismiss } = usePortalTooltip({ trackAnchor: true });
++  const captured = Date.parse(capturedAt ?? '');
++  const seconds = Math.max(0, Math.floor((now - captured) / 1000));
++  const details = Number.isFinite(captured)
++    ? `Last updated: ${new Intl.RelativeTimeFormat(undefined, { numeric: 'always' }).format(-seconds, 'second')}`
++    : 'Last update time unavailable';
++  const lines = [details];
++
++  useEffect(() => {
++    if (!tooltip) return;
++    const outside = (event: PointerEvent) => {
++      if (!anchor.current?.contains(event.target as Node)) dismiss();
++    };
++    const escape = (event: KeyboardEvent) => {
++      if (event.key === 'Escape') dismiss();
++    };
++    document.addEventListener('pointerdown', outside);
++    document.addEventListener('keydown', escape);
++    return () => {
++      document.removeEventListener('pointerdown', outside);
++      document.removeEventListener('keydown', escape);
++    };
++  }, [tooltip, dismiss]);
++
++  return <>
++    <button
++      ref={anchor}
++      type="button"
++      className={styles.remaining}
++      data-quota-updated="true"
++      aria-describedby={tooltip ? tooltipId : undefined}
++      onMouseEnter={(event) => showOnMouseEnter(lines, event.currentTarget)}
++      onMouseLeave={(event) => hideOnMouseLeave(event.currentTarget)}
++      onFocus={(event) => showOnFocus(lines, event.currentTarget)}
++      onBlur={(event) => hideOnBlur(event.currentTarget)}
++      onClick={(event) => showOnFocus(lines, event.currentTarget)}
++    >{children}</button>
++    <PortalTooltip tooltip={tooltip ? { ...tooltip, lines } : null} id={tooltipId} />
++  </>;
+ }
+diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
+index 8982631c..a0a6c36b 100644
+--- a/web/src/components/usage/credentials/CredentialsSection.tsx
++++ b/web/src/components/usage/credentials/CredentialsSection.tsx
+@@ -1970,8 +1970,7 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
+             {resetDuration && (compact && resetLabel
+               ? <QuotaResetCountdown duration={resetDuration} resetLabel={resetLabel} />
+               : <span className={styles.credentialQuotaResetDuration}>{resetDuration}</span>)}
+-            {percentLabel && <strong>{percentLabel}</strong>}
+-            <QuotaFreshness capturedAt={quota.capturedAt} source={quota.source} account={quota.accountLabel ?? "Provider account"} resetAt={quota.resetText} />
++            {percentLabel && <QuotaFreshness capturedAt={quota.capturedAt}><strong>{percentLabel}</strong></QuotaFreshness>}
+           </span>
+         )}
+       </div>
+diff --git a/web/src/components/usage/test/QuotaFreshnessClock.test.tsx b/web/src/components/usage/test/QuotaFreshnessClock.test.tsx
+index 5c67986d..4c3a0c48 100644
+--- a/web/src/components/usage/test/QuotaFreshnessClock.test.tsx
++++ b/web/src/components/usage/test/QuotaFreshnessClock.test.tsx
+@@ -6,16 +6,20 @@ import { QuotaFreshness } from '../QuotaFreshness';
+ import { quotaAgeLabel } from '@/lib/quotaAgeClock';
+ 
+ afterEach(()=>{vi.useRealTimers();vi.restoreAllMocks();});
+-test('age counts up locally across multiple quota windows and releases its shared timer on unmount',async()=>{
++test('remaining percentage alone is visible; freshness opens on focus and updates locally',async()=>{
+  globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+  vi.useFakeTimers();vi.setSystemTime(new Date('2026-10-05T10:00:00Z'));
+  const hidden=vi.spyOn(document,'hidden','get').mockReturnValue(false);
+  const container=document.createElement('div');document.body.appendChild(container);const root=createRoot(container);
+- await act(async()=>root.render(<><QuotaFreshness account="fixture" capturedAt="2026-10-05T09:59:50Z" source="websocket_event"/><QuotaFreshness account="fixture2" capturedAt="2026-10-05T09:59:00Z"/></>));
+- expect(container.textContent).toContain('10s ago');expect(container.textContent).toContain('1m 0s ago');expect(vi.getTimerCount()).toBe(1);
+- await act(async()=>vi.advanceTimersByTime(3000));expect(container.textContent).toContain('13s ago');expect(container.textContent).toContain('1m 3s ago');
+- hidden.mockReturnValue(true);await act(async()=>vi.advanceTimersByTime(5000));expect(container.textContent).toContain('13s ago');
+- hidden.mockReturnValue(false);await act(async()=>document.dispatchEvent(new Event('visibilitychange')));expect(container.textContent).toContain('18s ago');
++ await act(async()=>root.render(<><QuotaFreshness capturedAt="2026-10-05T09:59:50Z"><strong>58%</strong></QuotaFreshness><QuotaFreshness capturedAt="2026-10-05T09:59:00Z">99%</QuotaFreshness></>));
++ expect(container.textContent).toBe('58%99%');expect(container.querySelector('svg')).toBeNull();expect(document.querySelector('[role="tooltip"]')).toBeNull();expect(vi.getTimerCount()).toBe(1);
++ const button=container.querySelector('button')!;
++ await act(async()=>button.dispatchEvent(new FocusEvent('focusin',{bubbles:true})));
++ expect(document.querySelector('[role="tooltip"]')?.textContent).toBe('Last updated: 10 seconds ago');
++ await act(async()=>vi.advanceTimersByTime(3000));expect(document.querySelector('[role="tooltip"]')?.textContent).toBe('Last updated: 13 seconds ago');
++ hidden.mockReturnValue(true);await act(async()=>vi.advanceTimersByTime(5000));expect(document.querySelector('[role="tooltip"]')?.textContent).toBe('Last updated: 13 seconds ago');
++ hidden.mockReturnValue(false);await act(async()=>document.dispatchEvent(new Event('visibilitychange')));expect(document.querySelector('[role="tooltip"]')?.textContent).toBe('Last updated: 18 seconds ago');
++ await act(async()=>document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'})));expect(document.querySelector('[role="tooltip"]')).toBeNull();expect(container.textContent).toBe('58%99%');
+  await act(async()=>root.unmount());container.remove();expect(vi.getTimerCount()).toBe(0);
+ });
+ test('age handles unknown and future timestamps without creating a fresh capture',()=>{
+diff --git a/web/src/pages/KeyQuotaPage.tsx b/web/src/pages/KeyQuotaPage.tsx
+index 9951e3b8..ca58ffd0 100644
+--- a/web/src/pages/KeyQuotaPage.tsx
++++ b/web/src/pages/KeyQuotaPage.tsx
+@@ -57,9 +57,8 @@ export function QuotaAccounts({accounts}: {accounts: ViewerQuotaAccount[]}) {
+       {account.rows.map((row, index) => <div className={styles.row} key={index}>
+ 
+         <div><strong>{row.label}</strong>{row.metric && <span className={styles.metric}>{row.metric}</span>}</div>
+-        <div>{t('key_quota.remaining')}: <strong>{quotaRemaining(row)}</strong>
++        <div>{t('key_quota.remaining')}: <QuotaFreshness capturedAt={row.captured_at ?? account.updated_at}><strong>{quotaRemaining(row)}</strong></QuotaFreshness>
+           {row.remaining_percent == null && row.limit != null && ` / ${row.limit.toLocaleString(browserDateLocale())}`}
+-          <QuotaFreshness capturedAt={row.captured_at ?? account.updated_at} source={row.source} account={account.label} resetAt={row.reset_at} stale={row.stale} />
+         </div>
+         {row.remaining_percent != null && <progress max={100} value={Math.max(0, Math.min(100, row.remaining_percent))} aria-label={`${row.label}: ${t('key_quota.remaining')}`} />}
+         {row.limit_reached && <p className={styles.notice}>{t('key_quota.exhausted')}</p>}

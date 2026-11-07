@@ -73,8 +73,8 @@ delete the credential. A different account or cancellation leaves the existing
 credential intact. Refresh credentials continues to use the existing refresh
 token and cannot recover an expired or revoked refresh token.
 
-Auth Files adds a small refresh icon and compact age beside quota percentages.
-Hover, focus or tap it for the provider observation timestamp and source.
+Hover, focus or tap the remaining quota percentage to see the last update in
+seconds in a tooltip. No refresh icon or age is permanently shown beside it.
 The timestamp is captured when the quota response arrives; cache reads and
 optional metadata enrichment do not refresh it. The indicator makes no provider
 requests and does not reset quota. Dates use the viewer browser’s time zone and

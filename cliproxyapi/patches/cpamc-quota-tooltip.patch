@@ -1,0 +1,140 @@
+diff --git a/src/features/quota/QuotaObservedPercent.module.scss b/src/features/quota/QuotaObservedPercent.module.scss
+index beca7f7..84f053b 100644
+--- a/src/features/quota/QuotaObservedPercent.module.scss
++++ b/src/features/quota/QuotaObservedPercent.module.scss
+@@ -1,39 +1,19 @@
+ .remaining {
+-  display: inline-flex;
+-  align-items: baseline;
+-  gap: 5px;
+-  white-space: nowrap;
+-}
+-.age {
+-  display: inline-flex;
+-  align-items: center;
+-  gap: 3px;
+-  padding: 2px 0;
++  padding: 0;
+   border: 0;
+   background: transparent;
+-  color: var(--text-tertiary);
+-  font: inherit;
+-  font-size: 11px;
+-  font-weight: 400;
+-  white-space: nowrap;
+-  cursor: pointer;
+-  svg {
+-    flex-shrink: 0;
+-    stroke-width: 1.6;
+-  }
++  font-family: inherit;
++  cursor: help;
+   &:focus-visible {
+     outline: 2px solid var(--primary-color);
+     outline-offset: 2px;
+     border-radius: 3px;
+   }
+-  &[data-stale] {
+-    color: var(--warning-text);
+-  }
+ }
+ .tooltip {
+   position: fixed;
+   z-index: 10000;
+-  width: 280px;
++  width: max-content;
+   max-width: calc(100vw - 16px);
+   box-sizing: border-box;
+   padding: 10px;
+diff --git a/src/features/quota/QuotaObservedPercent.tsx b/src/features/quota/QuotaObservedPercent.tsx
+index 07ffb6c..f6f0f44 100644
+--- a/src/features/quota/QuotaObservedPercent.tsx
++++ b/src/features/quota/QuotaObservedPercent.tsx
+@@ -9,7 +9,6 @@ import {
+ } from 'react';
+ import { createPortal } from 'react-dom';
+ import { useTranslation } from 'react-i18next';
+-import { IconRefreshCw } from '@/components/ui/icons';
+ import { createSharedClock } from '@/utils/time/sharedClock';
+ import { type QuotaObservation, observationAge } from './observationFormat';
+ import { AuthFileObservation } from './authFileObservation';
+@@ -26,7 +25,7 @@ const noSubscribe = () => () => {};
+ const frozen = Date.now();
+ const serverSnapshot = () => frozen;
+ 
+-/** The native percentage remains unchanged; only an Auth Files host adds an age. */
++/** Observation age is available only from the remaining percentage tooltip. */
+ export function QuotaObservedPercent({
+   className,
+   children,
+@@ -80,26 +79,16 @@ export function QuotaObservedPercent({
+     };
+   }, [open]);
+   const content = age
+-    ? [
+-        `${t('quota_updated.updated')}: ${age.timestamp}`,
+-        age.relative,
+-        `${t('quota_updated.source')}: ${t(`quota_traffic.${observation?.source === 'websocket_event' ? 'websocket' : ['api_response_headers', 'usage_header'].includes(observation?.source ?? '') ? 'traffic' : observation?.source?.startsWith('scheduled') ? 'scheduled' : 'provider'}`)}`,
+-        ...(age.stale ? [t('quota_updated.stale')] : []),
+-      ].join('\n')
++    ? `${t('quota_updated.updated')}: ${new Intl.RelativeTimeFormat(undefined, { numeric: 'always' }).format(-Math.max(0, Math.floor((now - age.captured) / 1000)), 'second')}`
+     : '';
+   if (!age || !showAge) return <span className={className}>{children}</span>;
+   return (
+     <>
+-      <span className={styles.remaining}>
+-        <span className={className}>{children}</span>
+-        {age && (
+-          <button
++      <button
+             ref={anchor}
+             type="button"
+-            className={styles.age}
++            className={`${className} ${styles.remaining}`}
+             data-quota-updated="true"
+-            data-stale={age.stale || undefined}
+-            aria-label={`${t('quota_updated.updated')}: ${age.relative}`}
+             aria-expanded={open}
+             aria-describedby={open ? id : undefined}
+             onMouseEnter={() => setOpen(true)}
+@@ -114,11 +103,8 @@ export function QuotaObservedPercent({
+               }
+             }}
+           >
+-            <IconRefreshCw size={11} aria-hidden="true" />
+-            <span>{age.compact}</span>
+-          </button>
+-        )}
+-      </span>
++        {children}
++      </button>
+       {open &&
+         age &&
+         createPortal(
+diff --git a/tests/nativeQuotaObservation.test.tsx b/tests/nativeQuotaObservation.test.tsx
+index f4dd769..68a2a2b 100644
+--- a/tests/nativeQuotaObservation.test.tsx
++++ b/tests/nativeQuotaObservation.test.tsx
+@@ -115,7 +115,7 @@ test('quota usage capture precedes slower metadata reads and survives later cach
+   expect(CODEX_CONFIG.canResetQuota?.(state)).toBe(true);
+ });
+ 
+-test('inline age keeps native plan, credits, manual-reset expiry and provider windows', () => {
++test('percentage tooltip keeps native plan, credits, manual-reset expiry and provider windows without a visible age', () => {
+   const classes = Object.fromEntries(
+     QUOTA_CLASS_KEYS.map((key) => [key, key])
+   ) as unknown as QuotaClassMap;
+@@ -163,8 +163,10 @@ test('inline age keeps native plan, credits, manual-reset expiry and provider wi
+     '86%',
+   ])
+     expect(inline).toContain(content);
+-  expect(inline).toContain('aria-label="Last updated:');
+-  expect(native).not.toContain('aria-label="Last updated:');
++  expect(inline).toContain('data-quota-updated="true"');
++  expect(native).not.toContain('data-quota-updated');
++  expect(inline).not.toContain('Last updated:');
++  expect(inline).not.toContain('role="tooltip"');
+   expect(inline).not.toContain('secondary');
+-  expect(inline.match(/<svg/g)?.length).toBe(1);
++  expect(inline).not.toContain('<svg');
+ });

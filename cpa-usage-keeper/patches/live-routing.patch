@@ -1,0 +1,491 @@
+diff --git a/internal/api/router.go b/internal/api/router.go
+index cd5fe1c4..6c1278a0 100644
+--- a/internal/api/router.go
++++ b/internal/api/router.go
+@@ -183,6 +183,7 @@ func NewRouter(
+ 	if len(optionalProviders) > 0 {
+ 		registerQuotaPolicyRoutes(adminProtected, optionalProviders[0].QuotaPolicies, optionalProviders[0].Live)
+ 		registerSessionRebalanceRoutes(adminProtected, optionalProviders[0].QuotaPolicies)
++		registerRoutingActivityRoutes(adminProtected, optionalProviders[0].QuotaPolicies)
+ 	}
+ 	registerAuthSessionManagementRoutes(adminProtected, authHandler)
+ 	registerCPAAPIKeyRoutes(adminProtected, cpaAPIKeyProvider, usageProvider)
+diff --git a/internal/api/routing_activity.go b/internal/api/routing_activity.go
+new file mode 100644
+index 00000000..c4c35cc1
+--- /dev/null
++++ b/internal/api/routing_activity.go
+@@ -0,0 +1,32 @@
++package api
++
++import (
++	"context"
++	"encoding/json"
++	"github.com/gin-gonic/gin"
++	"net/http"
++	"time"
++)
++
++type routingActivityReader interface {
++	RoutingActivity(context.Context) (json.RawMessage, int, error)
++}
++
++func registerRoutingActivityRoutes(router gin.IRoutes, provider QuotaPolicyProvider) {
++	router.GET("/routing/activity", func(c *gin.Context) {
++		p, ok := provider.(routingActivityReader)
++		if !ok {
++			c.JSON(503, gin.H{"error": "Live routing unavailable"})
++			return
++		}
++		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
++		defer cancel()
++		body, status, err := p.RoutingActivity(ctx)
++		if err != nil || status != http.StatusOK || !json.Valid(body) {
++			c.JSON(502, gin.H{"error": "Live routing unavailable"})
++			return
++		}
++		c.Header("Cache-Control", "no-store")
++		c.Data(200, "application/json", body)
++	})
++}
+diff --git a/internal/cpa/routing_activity.go b/internal/cpa/routing_activity.go
+new file mode 100644
+index 00000000..7e52baeb
+--- /dev/null
++++ b/internal/cpa/routing_activity.go
+@@ -0,0 +1,12 @@
++package cpa
++
++import (
++	"context"
++	"encoding/json"
++)
++
++func (c *Client) RoutingActivity(ctx context.Context) (json.RawMessage, int, error) {
++	var out json.RawMessage
++	status, _, err := c.doManagementJSONRequest(ctx, "/v8/management/routing/activity", &out, "live routing")
++	return out, status, err
++}
+diff --git a/internal/quota/traffic_sync.go b/internal/quota/traffic_sync.go
+index fca86e94..3585a935 100644
+--- a/internal/quota/traffic_sync.go
++++ b/internal/quota/traffic_sync.go
+@@ -47,6 +47,9 @@ func (r *TrafficQuotaSyncRunner) Run(ctx context.Context) error {
+ 			for streamCtx.Err() == nil {
+ 				_ = stream.WatchLive(streamCtx, func(topics []string) {
+ 					for _, topic := range topics {
++						if topic == "routing" {
++							r.service.Live.Publish("routing")
++						}
+ 						if topic == "rebalance" {
+ 							r.service.Live.Publish("rebalance")
+ 						}
+diff --git a/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx
+index fcaa71d5..82f30eda 100644
+--- a/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx
++++ b/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx
+@@ -59,6 +59,9 @@ const mountCard = async (events: UsageEvent[]) => {
+     root,
+     unmount: async () => {
+       await act(async () => root.unmount());
++      // Resize/scroll observers can leave a trailing virtualizer debounce in happy-dom.
++      // Settle it while the DOM still exists instead of firing after environment teardown.
++      await act(async () => new Promise(resolve => setTimeout(resolve, 180)));
+       container.remove();
+     },
+   };
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index 3f95fba0..7f20dd95 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -271,6 +271,7 @@ const resources = {
+         back_to_cpa_aria: 'Back To CPA Management',
+         tabs_aria_label: 'Usage sections',
+         tab_overview: 'Overview',
++        tab_routing: 'Live routing',
+         tab_realtime: 'Realtime',
+         insights_requests: "Window requests",
+         insights_tokens: "Window tokens",
+@@ -1368,6 +1369,7 @@ const resources = {
+         back_to_cpa_aria: '返回CPA管理界面',
+         tabs_aria_label: '用量页面分区',
+         tab_overview: '概览',
++        tab_routing: 'Live routing',
+         tab_realtime: '实时',
+         insights_requests: "窗口请求数",
+         insights_tokens: "窗口 Token",
+@@ -2465,6 +2467,7 @@ const resources = {
+         back_to_cpa_aria: '返回CPA管理介面',
+         tabs_aria_label: '用量頁面分區',
+         tab_overview: '總覽',
++        tab_routing: 'Live routing',
+         tab_realtime: '即時',
+         insights_requests: "視窗請求數",
+         insights_tokens: "視窗 Token",
+diff --git a/web/src/lib/live.ts b/web/src/lib/live.ts
+index fb241595..345cba2e 100644
+--- a/web/src/lib/live.ts
++++ b/web/src/lib/live.ts
+@@ -1,6 +1,6 @@
+ import { apiFetch, apiPath } from './api';
+ 
+-export type LiveTopic = 'sync' | 'usage' | 'quota' | 'accounts' | 'clock' | 'rebalance';
++export type LiveTopic = 'sync' | 'usage' | 'quota' | 'accounts' | 'clock' | 'rebalance' | 'routing';
+ export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'paused';
+ type Listener = (topics: LiveTopic[]) => void;
+ const listeners = new Set<Listener>();
+@@ -40,7 +40,7 @@ async function connect() {
+         if (!data) continue;
+         const payload = JSON.parse(data) as { topics?: unknown };
+         if (!Array.isArray(payload.topics)) continue;
+-        const topics = payload.topics.filter((topic): topic is LiveTopic => ['sync', 'usage', 'quota', 'accounts', 'clock', 'rebalance'].includes(String(topic)));
++        const topics = payload.topics.filter((topic): topic is LiveTopic => ['sync', 'usage', 'quota', 'accounts', 'clock', 'rebalance', 'routing'].includes(String(topic)));
+         attempts = 0; setStatus('live'); listeners.forEach(listener => listener(topics));
+       }
+     }
+diff --git a/web/src/lib/usageNavigation.ts b/web/src/lib/usageNavigation.ts
+index 6c170837..18e50651 100644
+--- a/web/src/lib/usageNavigation.ts
++++ b/web/src/lib/usageNavigation.ts
+@@ -1,6 +1,7 @@
+ export const USAGE_TAB_OPTIONS = [
+   'overview',
+   'realtime',
++ 'routing',
+   'analysis',
+   'ranking',
+   'events',
+@@ -15,6 +16,7 @@ export const DEFAULT_USAGE_TAB: UsageTab = 'overview';
+ const USAGE_TAB_PATHS: Record<UsageTab, string> = {
+   overview: '/overview',
+   realtime: '/realtime',
++ routing: '/live-routing',
+   analysis: '/analysis',
+   ranking: '/ranking',
+   events: '/request-events',
+diff --git a/web/src/pages/LiveRoutingPage.module.scss b/web/src/pages/LiveRoutingPage.module.scss
+new file mode 100644
+index 00000000..eebe29e2
+--- /dev/null
++++ b/web/src/pages/LiveRoutingPage.module.scss
+@@ -0,0 +1,98 @@
++.page {display:flex;flex-direction:column;gap:20px;color:var(--text-primary);min-width:0}
++.heading {display:flex;justify-content:space-between;align-items:center;gap:20px;padding:8px 2px}
++.heading h1 {font-size:28px;letter-spacing:-.7px;line-height:1.2;margin:6px 0 8px}
++.heading p,.panelHead p {margin:0;color:var(--text-secondary);font-size:13px;line-height:1.5}
++.eyebrow {font-size:10px;font-weight:750;letter-spacing:1.8px;color:var(--text-secondary)}
++.liveControls {display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
++.liveControls small {width:100%;text-align:right;color:var(--text-secondary);font-size:11px}
++.page button,.page select,.page input {font:inherit}
++.page button {cursor:pointer}
++.liveControls button,.panelHead button,.empty button {border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);border-radius:9px;padding:8px 12px;font-size:12px}
++.page button:focus-visible,.page input:focus-visible,.page select:focus-visible {outline:2px solid #5f89ec;outline-offset:3px}
++.live {display:inline-flex;gap:7px;align-items:center;padding:8px 10px;font-size:12px;color:var(--text-secondary)}
++.live i {width:7px;height:7px;background:#b28b37;border-radius:50%}
++.live[data-status=live] i {background:#36ad83;box-shadow:0 0 0 3px #36ad831a}
++.metrics {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
++.metric {border:1px solid var(--border-color);border-radius:14px;padding:17px 20px;background:var(--bg-primary);display:flex;flex-direction:column;gap:9px}
++.metric>span {font-size:12px;color:var(--text-secondary)}
++.metric strong {font-size:32px;font-weight:650;line-height:1.1;font-variant-numeric:tabular-nums;letter-spacing:-1px}
++.metric small {color:var(--text-secondary);font-size:11px}
++.allocations {display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
++.allocations button {text-align:left;min-width:0;overflow:hidden;border:1px solid var(--border-color);border-radius:12px;background:var(--bg-primary);padding:14px 16px;color:var(--text-primary)}
++.allocations button>span {font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-secondary)}
++.allocations button>strong {display:block;margin:6px 0 10px;font-size:13px;overflow-wrap:anywhere}
++.allocations button>div {font-size:11px;color:var(--text-secondary)}
++.allocations b {color:var(--text-primary);font-size:15px}
++.allocations em {font-style:normal;margin:0 5px}
++.bar {margin-top:12px;height:3px;background:var(--bg-secondary);border-radius:3px;overflow:hidden}
++.bar i {display:block;height:100%;background:#6888dc;border-radius:3px}
++.workspace {display:grid;grid-template-columns:minmax(0,1.9fr) minmax(290px,1fr);align-items:start;gap:16px}
++.panel,.inspector {border:1px solid var(--border-color);background:var(--bg-primary);border-radius:14px;min-width:0;overflow:hidden}
++.panelHead {display:flex;justify-content:space-between;gap:12px;align-items:center;padding:18px 20px;border-bottom:1px solid var(--border-color)}
++.panelHead h2 {font-size:15px;margin:0 0 5px;font-weight:650}
++.panelHead h2>span {font-size:11px;color:var(--text-secondary);font-weight:500;margin-left:5px}
++.filters {display:flex;flex-wrap:wrap;gap:8px;padding:14px 16px;border-bottom:1px solid var(--border-color)}
++.filters input {flex:1 1 230px;min-width:100px}
++.filters input,.filters select {background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;color:var(--text-primary);font-size:12px;padding:9px 10px}
++.filters select {min-width:100px;flex:0 1 auto;max-width:100%}
++.tableWrap {overflow:auto;max-height:620px}
++.tableWrap table {border-collapse:collapse;width:100%;text-align:left;font-size:12px}
++.tableWrap th {background:var(--bg-secondary);color:var(--text-secondary);font-size:10px;text-transform:uppercase;font-weight:600;letter-spacing:.65px;padding:12px 15px;white-space:nowrap;position:sticky;top:0}
++.tableWrap td {padding:15px;border-top:1px solid var(--border-color);vertical-align:top;overflow-wrap:anywhere;max-width:240px}
++.tableWrap td>strong {font-size:12px;font-weight:600}
++.tableWrap small {display:block;color:var(--text-secondary);font-size:10px;line-height:1.6;margin-top:5px}
++.tableWrap tr[data-selected=true] {background:color-mix(in srgb,#6389e4 9%,var(--bg-primary))}
++.rowButton {padding:0;border:0;background:none;color:var(--text-primary);font-weight:600;font-size:12px;text-align:left;line-height:1.5}
++.rowButton:hover {color:#7394e8}
++.age {white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--text-secondary)}
++.badge {display:inline-flex;padding:4px 7px;font-size:10px;border-radius:6px;background:var(--bg-secondary);color:var(--text-secondary);white-space:nowrap}
++.badge[data-state=running] {background:#6686de1c;color:color-mix(in srgb,var(--text-primary) 32%,#6389e4)}
++.badge[data-state=idle] {background:#279c7718;color:#31a780}
++.badge[data-state=waiting_tools],.badge[data-state=protocol_wait] {background:#bd8b241a;color:#b59340}
++.drain {display:block;color:#b59340;font-size:10px;margin-top:6px}
++.empty {padding:42px 24px;text-align:center;color:var(--text-secondary)}
++.empty>span {font-size:28px;color:#8292b7;display:block;margin-bottom:14px}
++.empty h3 {font-size:14px;color:var(--text-primary);font-weight:600;margin:0 0 8px}
++.empty p {font-size:12px;line-height:1.7;margin:0 auto;max-width:310px}
++.empty button {margin-top:16px}
++.detail {padding:18px}
++.reason {font-size:13px;font-weight:600;color:color-mix(in srgb,var(--text-primary) 32%,#6389e4);background:#6a87d412;padding:11px 12px;border-radius:8px}
++.flow {display:flex;flex-direction:column;align-items:center;gap:6px;padding:20px 6px;font-size:12px;text-align:center;overflow-wrap:anywhere}
++.flow b {color:var(--text-secondary);font-weight:400}
++.flow strong {padding:9px 12px;border:1px solid var(--border-color);border-radius:8px;font-weight:600;max-width:100%}
++.detail dl {display:grid;grid-template-columns:1fr 1.2fr;gap:12px 8px;border-top:1px solid var(--border-color);padding-top:16px;font-size:11px}
++.detail dt {color:var(--text-secondary)}
++.detail dd {margin:0;text-align:right;overflow-wrap:anywhere}
++.detail h3 {font-size:12px;margin:22px 0 8px}
++.hint {font-size:11px;line-height:1.6;color:var(--text-secondary)}
++.candidates {list-style:none;padding:0;margin:12px 0 0}
++.candidates li {display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-top:1px solid var(--border-color);font-size:11px}
++.candidates strong {display:block;font-size:11px;font-weight:600;overflow-wrap:anywhere}
++.candidates small {display:block;color:var(--text-secondary);font-size:10px;margin-top:5px}
++.candidates span {color:var(--text-secondary);font-size:10px;text-align:right;flex-shrink:0;max-width:110px}
++.candidates span[data-selected=true] {color:#36ad83}
++.warning {border:1px solid #bd8b2440;color:var(--text-primary);background:#bd8b240c;border-radius:9px;padding:12px 15px;font-size:12px;line-height:1.6}
++.lower {display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
++.jobs {padding:0 20px;max-height:400px;overflow:auto}
++.job {padding:16px 0;border-bottom:1px solid var(--border-color)}
++.job:last-child {border-bottom:0}
++.job>div {display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
++.job time {font-size:10px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
++.job>strong {font-size:12px;font-weight:600}
++.job p,.job>small {font-size:11px;line-height:1.6;margin:7px 0 0;color:var(--text-secondary)}
++.quiet {padding:22px 0;color:var(--text-secondary);font-size:12px;line-height:1.6}
++.timeline {list-style:none;margin:0;padding:0 20px;max-height:400px;overflow:auto}
++.timeline li {display:flex;gap:15px;padding:14px 0;border-bottom:1px solid var(--border-color)}
++.timeline li:last-child {border-bottom:0}
++.timeline time {font-size:10px;color:var(--text-secondary);font-variant-numeric:tabular-nums;padding-top:2px;white-space:nowrap}
++.timeline strong {display:block;font-size:12px;font-weight:500}
++.timeline small {display:block;color:var(--text-secondary);font-size:10px;margin-top:5px;overflow-wrap:anywhere}
++.timeline button {border:0;background:none;padding:0;color:#7897e1;font-size:10px}
++.bindingToggle {display:flex;align-items:center;justify-content:space-between;width:100%;text-align:left;gap:12px;padding:18px 20px;border:0;background:none;color:var(--text-primary)}
++.bindingToggle strong {font-weight:600;font-size:13px}
++.bindingToggle span {color:var(--text-secondary);font-size:11px}
++.footnote {font-size:10px;line-height:1.7;color:var(--text-secondary);margin:0 2px}
++.panel>.footnote {padding:0 20px 14px}
++@media(max-width:1050px) {.workspace{grid-template-columns:minmax(0,1.5fr) minmax(270px,1fr)}.tableWrap td,.tableWrap th{padding:12px 10px}.metrics{gap:9px}.metric{padding:15px}}
++@media(max-width:800px) {.workspace{grid-template-columns:1fr}.heading{align-items:flex-start}.heading h1{font-size:25px}.heading p{max-width:250px}.liveControls{max-width:200px}.metric strong{font-size:28px}.lower{grid-template-columns:1fr}.tableWrap{max-height:500px}.inspector .empty{padding:26px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
++@media(max-width:480px) {.page{gap:14px}.heading{flex-direction:column;gap:14px}.liveControls{max-width:none;justify-content:flex-start}.liveControls small{width:auto;text-align:left}.heading p{max-width:none}.panelHead{padding:16px}.filters{padding:12px}.filters input{flex-basis:100%}.filters select{flex:1}.tableWrap table{min-width:540px}.allocations{grid-template-columns:1fr}.bindingToggle{padding:16px}.metric{padding:14px}.metric>span{font-size:11px}.metric small{font-size:10px}}
+diff --git a/web/src/pages/LiveRoutingPage.tsx b/web/src/pages/LiveRoutingPage.tsx
+new file mode 100644
+index 00000000..1e2eb36e
+--- /dev/null
++++ b/web/src/pages/LiveRoutingPage.tsx
+@@ -0,0 +1,111 @@
++import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
++import { apiFetch, apiPath } from '@/lib/api'
++import { getLiveStatus, startLiveRefresh, subscribeLiveStatus } from '@/lib/live'
++import styles from './LiveRoutingPage.module.scss'
++
++interface Candidate { account: string; pool: string; priority: number; websocket: boolean; status: string }
++export interface RoutingRow { id: string; kind: string; session?: string; client?: string; model?: string; account?: string; pool?: string; transport: string; state: string; reason?: string; priority: number; active: number; tools: number; draining: boolean; uncertain: boolean; attempts: number; started_at: string; updated_at: string; candidates: Candidate[]; work?: Array<{ id: string; kind: string; state: string; started_at: string }> }
++interface RoutingEvent { id: number; at: string; row: string; account?: string; pool?: string; reason: string }
++interface Binding { session: string; account: string; pool: string; source: string; expires_at: string }
++interface Rebalance { id: number; pool: string; reason: string; reconnect_websockets: boolean; sessions_rebalanced: number; waiting: number; waiting_for_responses: number; waiting_for_tools: number; waiting_for_protocol: number; requested_at: string }
++export interface RoutingSnapshot { activity: { at: string; since: string; rows: RoutingRow[]; events: RoutingEvent[]; dropped: number }; bindings: Binding[]; rebalances: Rebalance[]; accounts: Record<string, string>; clients: Record<string, string> }
++const EMPTY_ROWS: RoutingRow[] = []
++const labels: Record<string, string> = {
++ websocket_preference: 'WebSocket preference, then priority', outside_pin: 'Outside connection pin', http_deprioritized: 'WebSocket preferred', lower_priority: 'Lower priority', scheduler: 'Scheduler selection', pinned: 'Connection pinned', sticky: 'Sticky session', prefix_affinity: 'Matching conversation prefix',
++ compaction_affinity: 'Compaction continuity', parent_affinity: 'Parent session affinity', new_binding: 'New session binding',
++ affinity_failover: 'Temporary affinity failover', affinity_reselected: 'Previous account unavailable',
++ home_scheduler: 'Home scheduler', plugin_scheduler: 'Plugin scheduler', eligible: 'Eligible', selected: 'Selected',
++ disabled: 'Manually disabled', quota_minimum: 'Below quota minimum', model_unsupported: 'Model unavailable',
++ request_policy: 'Request policy excluded', zero_weight: 'Weight is zero', cooldown: 'Account/model blocked', already_tried: 'Already attempted',
++ rebalance_requested: 'Safe rebalance requested', queued: 'Queued', generating: 'Generating', running: 'Running', idle: 'Idle', selecting: 'Selecting account', waiting_tools: 'Waiting for tool output', protocol_wait: 'Protocol state unresolved',
++ reconnecting: 'Reconnecting', completed: 'Request finished', disconnected: 'Connection closed', failed: 'Request failed',
++ priority_saved: 'Priority saved', quota_policy_excluded: 'Quota minimum reached', quota_policy_recovered: 'Account eligibility recovered',
++}
++export function routingLabel(value = ''): string { return value.startsWith('retry_') ? 'Retry · ' + routingLabel(value.slice(6)) : labels[value] ?? value.replaceAll('_', ' ') }
++const short = (value?: string) => value ? value.slice(0, 8) : '—'
++const age = (date: string, now: number) => { const seconds = Math.max(0, Math.floor((now - Date.parse(date)) / 1000)); return seconds < 60 ? seconds + 's' : seconds < 3600 ? Math.floor(seconds / 60) + 'm ' + seconds % 60 + 's' : Math.floor(seconds / 3600) + 'h ' + Math.floor(seconds % 3600 / 60) + 'm' }
++const time = (date: string) => new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
++
++export function LiveRoutingPage() {
++ const [data, setData] = useState<RoutingSnapshot>()
++ const [error, setError] = useState('')
++ const [paused, setPaused] = useState(false)
++ const [revision, setRevision] = useState(0)
++ const [now, setNow] = useState(Date.now())
++ const [selected, setSelected] = useState('')
++ const [query, setQuery] = useState('')
++ const [pool, setPool] = useState('')
++ const [state, setState] = useState('')
++ const [showBindings, setShowBindings] = useState(false)
++ const live = useSyncExternalStore(subscribeLiveStatus, getLiveStatus)
++ useEffect(() => { const tick = setInterval(() => { if (!document.hidden) setNow(Date.now()) }, 1000); return () => clearInterval(tick) }, [])
++ useEffect(() => { const refresh = () => { setPaused(false); setRevision(v => v + 1) }; window.addEventListener('keeper:routing-refresh', refresh); return () => window.removeEventListener('keeper:routing-refresh', refresh) }, [])
++ useEffect(() => {
++  if (paused) return
++  return startLiveRefresh(async signal => {
++   try {
++    const response = await apiFetch(apiPath('/routing/activity'), { signal })
++    if (!response.ok) throw new Error('Live routing is unavailable. Retrying with live updates.')
++    const next = await response.json() as RoutingSnapshot
++    if (!next.activity || !Array.isArray(next.activity.rows)) throw new Error('Live routing returned an unsupported snapshot.')
++    if (!signal.aborted) { setData(next); setError('') }
++   } catch (failure) { if (!signal.aborted) setError(failure instanceof Error ? failure.message : 'Live routing unavailable') }
++  }, ['routing', 'rebalance', 'accounts', 'clock'])
++ }, [paused, revision])
++ const rows = data?.activity.rows ?? EMPTY_ROWS
++ const account = (id?: string) => id ? data?.accounts?.[id] || 'Account ' + short(id) : 'Awaiting selection'
++ const client = (id?: string) => id ? data?.clients?.[id] || 'Client ' + short(id) : 'Unidentified client'
++ const pools = [...new Set([...rows.map(r => r.pool ?? ''), ...(data?.bindings ?? []).map(b => b.pool)].filter(Boolean))].sort()
++ const filtered = rows.filter(r => (!pool || r.pool === pool) && (!state || (state === 'draining' ? r.draining : r.state === state)) && [r.id, r.session, r.model, r.pool, account(r.account), client(r.client)].join(' ').toLowerCase().includes(query.toLowerCase()))
++ const focus = rows.find(r => r.id === selected)
++ const active = rows.reduce((sum, row) => sum + row.active, 0)
++ const sockets = rows.filter(row => row.kind === 'websocket').length
++ const sessions = new Set([...rows.map(r => r.session).filter(Boolean), ...(data?.bindings ?? []).map(b => b.session)]).size
++ const waiting = rows.filter(row => row.draining).length
++ const recent = [...(data?.activity.events ?? [])].reverse().filter(event => (!pool || event.pool === pool) && (!selected || event.row === selected)).slice(0, 30)
++ const balances = [...(data?.rebalances ?? [])].reverse().filter(job => (!pool || job.pool === pool) && (job.waiting > 0 || now - Date.parse(job.requested_at) < 600_000))
++ const allocations = useMemo(() => {
++  const groups = new Map<string, { account: string; pool: string; count: number; active: number; draining: number }>()
++  rows.forEach(row => { if (!row.account) return; const key = row.pool + ':' + row.account; const item = groups.get(key) ?? { account: row.account, pool: row.pool ?? '', count: 0, active: 0, draining: 0 }; item.count++; item.active += row.active; item.draining += Number(row.draining); groups.set(key, item) })
++  return [...groups.values()].sort((a, b) => b.active - a.active || a.account.localeCompare(b.account))
++ }, [rows])
++ return <section className={styles.page} aria-label="Live routing">
++  <header className={styles.heading}>
++   <div><div className={styles.eyebrow}>TRAFFIC CONTROL</div><h1>Live routing</h1><p>Requests, connections and account decisions in one place.</p></div>
++   <div className={styles.liveControls}><span className={styles.live} data-status={paused ? 'paused' : live}><i />{paused ? 'Paused' : live === 'live' ? 'Live' : live === 'paused' ? 'Hidden tab' : 'Reconnecting'}</span><button type="button" onClick={() => setPaused(v => !v)}>{paused ? 'Resume' : 'Pause'}</button><button type="button" onClick={() => { setPaused(false); setRevision(v => v + 1) }}>Refresh</button><small>{data ? 'Snapshot ' + age(data.activity.at, now) + ' ago' : 'Connecting…'}</small></div>
++  </header>
++  {error && <div role="alert" className={styles.warning}>{error}{data && ' Last successful snapshot remains visible.'}</div>}
++  {!!data?.activity.dropped && <div role="status" className={styles.warning}>Activity limit reached · {data.activity.dropped} entries were not tracked. Counts may be incomplete.</div>}
++  <div className={styles.metrics}>
++   {[['Running requests', active, 'Queued and generating'], ['Open WebSockets', sockets, rows.filter(r => r.kind === 'websocket' && r.state === 'idle').length + ' idle'], ['Known sessions', sessions, (data?.bindings.length ?? 0) + ' cached bindings'], ['Draining connections', waiting, rows.reduce((sum, r) => sum + r.tools, 0) + ' pending tool outputs']].map(([label, value, note]) => <div key={label} className={styles.metric}><span>{label}</span><strong>{value}</strong><small>{note}</small></div>)}
++  </div>
++  {allocations.length > 0 && <div className={styles.allocations} aria-label="Account distribution">{allocations.map(item => <button type="button" key={item.pool + item.account} onClick={() => { setQuery(account(item.account)); setPool(item.pool) }}><span>{item.pool}</span><strong>{account(item.account)}</strong><div><b>{item.active}</b> running <em>·</em> {item.count} connections{item.draining > 0 && ' · ' + item.draining + ' draining'}</div><div className={styles.bar}><i style={{ width: Math.max(3, item.active / Math.max(1, active) * 100) + '%' }} /></div></button>)}</div>}
++  <div className={styles.workspace}>
++   <div className={styles.panel}>
++    <div className={styles.panelHead}><div><h2>Active traffic <span>{filtered.length}</span></h2><p>Select a row to inspect its route.</p></div>{selected && <button type="button" onClick={() => setSelected('')}>Clear selection</button>}</div>
++    <div className={styles.filters}><input aria-label="Search live traffic" placeholder="Search session, model, account or client…" value={query} onChange={event => setQuery(event.target.value)} /><select aria-label="Provider pool" value={pool} onChange={event => setPool(event.target.value)}><option value="">All pools</option>{pools.map(value => <option key={value}>{value}</option>)}</select><select aria-label="Traffic state" value={state} onChange={event => setState(event.target.value)}><option value="">All states</option>{['running', 'waiting_tools', 'idle', 'draining', 'selecting', 'protocol_wait'].map(value => <option key={value} value={value}>{value === 'draining' ? 'Draining' : routingLabel(value)}</option>)}</select></div>
++    <div className={styles.tableWrap}><table><thead><tr><th>Session / client</th><th>Route</th><th>State</th><th>Age</th></tr></thead><tbody>{filtered.slice(0, 200).map(row => <tr key={row.id} data-selected={selected === row.id}><td><button className={styles.rowButton} type="button" onClick={() => setSelected(row.id)} aria-pressed={selected === row.id}>{row.session ? 'Session ' + short(row.session) : 'Request ' + short(row.id)}</button><small>{client(row.client)} · {row.kind === 'websocket' ? 'WebSocket' : 'HTTP'}</small></td><td><strong>{account(row.account)}</strong><small>{row.model || 'Waiting for request'}{row.pool && ' · ' + row.pool}</small></td><td><span className={styles.badge} data-state={row.state}>{routingLabel(row.state)}</span>{row.draining && <span className={styles.drain}>Draining safely</span>}<small>{row.active > 0 && row.active + ' active / queued'}{row.tools > 0 && (row.active > 0 ? ' · ' : '') + row.tools + ' tool outputs'}</small></td><td className={styles.age}>{age(row.started_at, now)}</td></tr>)}</tbody></table></div>
++    {!filtered.length && <div className={styles.empty}><span>↔</span><h3>{data ? rows.length ? 'No matching traffic' : 'No active traffic' : 'Loading live activity…'}</h3><p>{rows.length ? 'Adjust the filters to see more connections.' : 'New requests and open WebSockets will appear here automatically.'}</p>{(query || pool || state) && <button type="button" onClick={() => { setQuery(''); setPool(''); setState('') }}>Clear filters</button>}</div>}
++    {filtered.length > 200 && <p className={styles.footnote}>Showing the first 200 of {filtered.length} matching connections. Narrow the filters.</p>}
++   </div>
++   <aside className={styles.inspector} aria-label="Routing inspector">
++    <div className={styles.panelHead}><div><h2>Routing inspector</h2><p>{focus ? 'Observed at ' + time(focus.updated_at) : 'Understand why an account was chosen.'}</p></div></div>
++    {focus ? <div className={styles.detail}>
++     <div className={styles.reason}>{routingLabel(focus.reason) || 'Selection pending'}</div>
++     <div className={styles.flow}><span>{client(focus.client)}</span><b>↓</b><span>{focus.model || 'Waiting for model'}</span><b>↓</b><strong>{account(focus.account)}</strong></div>
++     <dl><dt>Connection</dt><dd>{focus.kind === 'websocket' ? 'WebSocket' : 'HTTP'} · {short(focus.id)}</dd><dt>Priority</dt><dd>P{focus.priority}</dd><dt>Account selections</dt><dd>{focus.attempts}</dd><dt>Current work</dt><dd>{focus.active} active / queued · {focus.tools} tools</dd></dl>
++     {focus.draining && <div className={styles.warning}>Rebalance pending · {focus.uncertain ? 'waiting for protocol state to resolve or disconnect' : focus.active > 0 ? 'waiting for response work to finish' : focus.tools > 0 ? 'waiting for tool output' : 'reconnecting at the safe boundary'}.</div>}
++     {(focus.work?.length ?? 0) > 0 && <><h3>Requests on this connection</h3><ul className={styles.candidates}>{focus.work?.map(work => <li key={work.id}><div><strong>Request {short(work.id)}</strong><small>{work.kind} · {age(work.started_at, now)}</small></div><span>{routingLabel(work.state)}</span></li>)}</ul></>}
++     <h3>Accounts at selection</h3><p className={styles.hint}>Eligibility snapshot when this route was selected. Priority, affinity and WebSocket capability can affect the result.</p>
++     <ul className={styles.candidates}>{focus.candidates.map(candidate => <li key={candidate.account}><div><strong>{account(candidate.account)}</strong><small>P{candidate.priority} · {candidate.websocket ? 'WebSocket capable' : 'HTTP only'}</small></div><span data-selected={candidate.status === 'selected'}>{routingLabel(candidate.status)}</span></li>)}</ul>
++    </div> : <div className={styles.empty}><span>⌖</span><h3>{selected ? 'Connection finished' : 'Follow a request'}</h3><p>{selected ? 'Its recent routing events remain below.' : 'Select a session to see its account, routing reason and eligibility snapshot.'}</p></div>}
++   </aside>
++  </div>
++  <div className={styles.lower}>
++   <section className={styles.panel} aria-label="Rebalance activity"><div className={styles.panelHead}><div><h2>Rebalance activity</h2><p>Latest changes and safe drain progress.</p></div></div><div className={styles.jobs}>{balances.length ? balances.map(job => <div key={job.id} className={styles.job}><div><span className={styles.badge} data-state={job.waiting ? 'waiting_tools' : 'idle'}>{job.waiting ? 'Draining' : 'Applied'}</span><time>{time(job.requested_at)}</time></div><strong>{routingLabel(job.reason)} · {job.pool}</strong><p>Affinity cleared{job.reconnect_websockets ? ' · ' + job.sessions_rebalanced + ' rebalanced · ' + job.waiting + ' waiting' : ' · existing sockets retained'}</p>{job.waiting > 0 && <small>{job.waiting_for_responses} response · {job.waiting_for_tools} tool · {job.waiting_for_protocol} protocol waits</small>}</div>) : <div className={styles.quiet}>No recent rebalances. Active drains remain visible until they finish.</div>}</div></section>
++   <section className={styles.panel} aria-label="Routing timeline"><div className={styles.panelHead}><div><h2>Routing timeline</h2><p>{selected ? 'Selected connection' : 'Recent decisions'} · last 10 minutes</p></div></div><ol className={styles.timeline}>{recent.length ? recent.map(event => <li key={event.id}><time>{time(event.at)}</time><div><strong>{routingLabel(event.reason)}</strong><small>{account(event.account)} · {event.pool || 'unassigned'} · <button type="button" onClick={() => setSelected(event.row)}>{short(event.row)}</button></small></div></li>) : <li className={styles.quiet}>No recent routing events.</li>}</ol></section>
++  </div>
++  <section className={styles.panel}><button type="button" className={styles.bindingToggle} aria-expanded={showBindings} onClick={() => setShowBindings(v => !v)}><strong>Cached session affinity</strong><span>{data?.bindings.length ?? 0} bindings · {showBindings ? 'Hide' : 'Show'}</span></button>{showBindings && <><p className={styles.footnote}>A cached binding can outlive its connection. It does not mean a request is running.</p><div className={styles.tableWrap}><table><thead><tr><th>Session</th><th>Account / pool</th><th>Affinity</th><th>Expires</th></tr></thead><tbody>{(data?.bindings ?? []).filter(b => !pool || b.pool === pool).slice(0, 200).map(binding => <tr key={binding.session}><td>{short(binding.session)}</td><td>{account(binding.account)}<small>{binding.pool}</small></td><td>{binding.source === 'prefix' ? 'Conversation prefix' : 'Explicit session'}</td><td>{time(binding.expires_at)}</td></tr>)}</tbody></table></div></>}</section>
++  <p className={styles.footnote}>Local runtime activity since {data ? time(data.activity.since) : '…'} · resets on CPA restart · session and client IDs are opaque references.</p>
++ </section>
++}
+diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
+index 0ee607c3..69b78ca1 100644
+--- a/web/src/pages/UsagePage.tsx
++++ b/web/src/pages/UsagePage.tsx
+@@ -1,5 +1,6 @@
+ import { AdminRankingSection, type AdminRankingHandle } from '@/features/ranking/AdminRankingSection';
+ import { ChartLifecycleProvider, useChartRefresh, type ChartRefreshSignal } from '@/components/usage/charts/chartLifecycle';
++import { LiveRoutingPage } from './LiveRoutingPage';
+ import { SessionRebalanceProgress } from '@/components/usage/credentials/SessionRebalanceProgress';
+ import { CredentialEditModal } from '@/components/usage/credentials/CredentialEditModal';
+ import { UsageComparisonCharts } from '@/components/usage/UsageComparisonCharts';
+@@ -78,6 +79,7 @@ type Translate = (key: string) => string;
+ const USAGE_TAB_LABEL_KEYS: Record<UsageTab, string> = {
+   overview: 'usage_stats.tab_overview',
+   realtime: 'usage_stats.tab_realtime',
++ routing: 'usage_stats.tab_routing',
+   analysis: 'usage_stats.tab_analysis',
+   ranking: 'usage_stats.tab_ranking',
+   events: 'usage_stats.tab_events',
+@@ -145,7 +147,7 @@ export const getCredentialSectionVisibility = (tab: UsageTab) => ({
+   showAiProvider: tab === 'ai-provider',
+ });
+ 
+-export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'realtime' && tab !== 'ranking' && tab !== 'settings' && !getCredentialSectionVisibility(tab).enabled;
++export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'routing' && tab !== 'realtime' && tab !== 'ranking' && tab !== 'settings' && !getCredentialSectionVisibility(tab).enabled;
+ 
+ export const shouldShowApiKeyFilter = (tab: UsageTab) => tab === 'realtime' || shouldShowRangeControls(tab);
+ 
+@@ -1009,7 +1011,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+ 
+   const tabOptions = useMemo(
+     () => getUsageTabOptions(t, { includeRanking: !isEmbeddedInCPAMC }),
+-    [t],
++    [t, isEmbeddedInCPAMC],
+   );
+   const apiKeySelectOptions = useMemo(
+     () => [
+@@ -1749,6 +1751,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+   }, [onAuthRequired, requestLogAccessEnabled, showTopNotice, t]);
+ 
+   const refreshActiveTabData = useCallback(async () => {
++    if (activeTab === 'routing') { window.dispatchEvent(new Event('keeper:routing-refresh')); return; }
+     if (!apiKeyFilterReady && shouldShowApiKeyFilter(activeTab)) return;
+     if (activeTab === 'realtime') {
+       await loadRealtime((response) => {
+@@ -2215,6 +2218,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+               autoRefreshControl={autoRefreshControl}
+             />}
+ 
++            {activeTab === 'routing' && <LiveRoutingPage />}
+             {activeTab === 'overview' && (error || comparisonsError) && <div className={styles.errorBox}>{(error || comparisonsError) === 'AUTH_REQUIRED' ? t('auth.session_expired') : (error || comparisonsError)}</div>}
+             {activeTab === 'settings' && authSessionsError && <div className={styles.errorBox}>{authSessionsError}</div>}
+             {activeTab === 'settings' && apiKeySettingsError && <div className={styles.errorBox}>{apiKeySettingsError}</div>}
+diff --git a/web/src/pages/test/LiveRoutingPage.test.tsx b/web/src/pages/test/LiveRoutingPage.test.tsx
+new file mode 100644
+index 00000000..2834d543
+--- /dev/null
++++ b/web/src/pages/test/LiveRoutingPage.test.tsx
+@@ -0,0 +1,34 @@
++// @vitest-environment happy-dom
++import { act } from 'react'
++import { createRoot } from 'react-dom/client'
++import { expect, it, vi } from 'vitest'
++import { apiFetch } from '@/lib/api'
++import { LiveRoutingPage, type RoutingSnapshot } from '../LiveRoutingPage'
++globalThis.IS_REACT_ACT_ENVIRONMENT = true
++const live = vi.hoisted(() => ({ refresh: undefined as undefined | ((signal: AbortSignal) => Promise<unknown>), stop: vi.fn() }))
++vi.mock('@/lib/live', () => ({ startLiveRefresh: (refresh: (signal: AbortSignal) => Promise<unknown>) => { live.refresh = refresh; void refresh(new AbortController().signal); return live.stop }, subscribeLiveStatus: () => () => {}, getLiveStatus: () => 'live' }))
++vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), apiPath: (value: string) => value }))
++it('distinguishes live work from cached affinity and preserves the last snapshot on failure', async () => {
++ const date = new Date().toISOString()
++ const payload: RoutingSnapshot = { activity: { at: date, since: date, dropped: 0, events: [], rows: [{ id: 'socket-one', kind: 'websocket', session: 'session-one', client: 'client-one', model: 'example-model', account: 'account-one', pool: 'codex', transport: 'websocket', state: 'waiting_tools', reason: 'pinned', priority: 2, active: 0, tools: 1, draining: true, uncertain: false, attempts: 1, started_at: date, updated_at: date, candidates: [{ account: 'account-one', pool: 'codex', priority: 2, websocket: true, status: 'selected' }] }] }, bindings: [{ session: 'cached-only', account: 'account-one', pool: 'codex', source: 'prefix', expires_at: date }], rebalances: [], accounts: { 'account-one': 'Example account' }, clients: { 'client-one': 'Example client' } }
++ vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => payload } as Response)
++ const container = document.createElement('div'); document.body.append(container); const root = createRoot(container)
++ try {
++  await act(async () => root.render(<LiveRoutingPage />))
++  expect(container.textContent).toContain('Waiting for tool output')
++  expect(container.textContent).toContain('Example client')
++  expect(container.textContent).not.toContain('Session cached-o')
++  const button = [...container.querySelectorAll('button')].find(b => b.textContent === 'Session session-')!
++  await act(async () => button.click())
++  expect(container.textContent).toContain('Connection pinned')
++  expect(container.textContent).toContain('waiting for tool output')
++  expect(container.textContent).toContain('Accounts at selection')
++  vi.mocked(apiFetch).mockRejectedValue(new Error('Connection lost'))
++  await act(async () => live.refresh!(new AbortController().signal))
++  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Last successful snapshot')
++  expect(container.textContent).toContain('Example account')
++  await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Pause')!.click())
++  expect(live.stop).toHaveBeenCalled()
++  expect(container.textContent).toContain('Paused')
++ } finally { await act(async () => root.unmount()); container.remove() }
++})
+diff --git a/web/src/pages/test/UsagePage.logic.test.ts b/web/src/pages/test/UsagePage.logic.test.ts
+index 22453e44..9b3e30f7 100644
+--- a/web/src/pages/test/UsagePage.logic.test.ts
++++ b/web/src/pages/test/UsagePage.logic.test.ts
+@@ -822,6 +822,7 @@ describe('UsagePage tab labels', () => {
+     expect(labels).toEqual([
+       'translated:usage_stats.tab_overview',
+       'translated:usage_stats.tab_realtime',
++      'translated:usage_stats.tab_routing',
+       'translated:usage_stats.tab_analysis',
+       'translated:usage_stats.tab_ranking',
+       'translated:usage_stats.tab_events',

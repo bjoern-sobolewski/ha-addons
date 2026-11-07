@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.22
+
+- Add private, bounded live routing telemetry for HTTP requests, WebSockets, queued responses, tool waits and safe session drains.
+- Report observed account decisions, candidate eligibility and current session affinity without retaining request bodies, keys or raw session identifiers.
+- Publish routing changes through the existing authenticated live stream; activity resets on restart.
+
 ## 0.1.21
 
 - Add pool-scoped session rebalancing with safe response/tool/steering draining, affinity epochs and WebSocket reconnection.

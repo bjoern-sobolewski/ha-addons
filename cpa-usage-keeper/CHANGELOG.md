@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4
+
+- Add an administrator Live routing dashboard combining active traffic, account distribution, routing reasons, candidate eligibility and rebalance progress.
+- Inspect individual connections, queued/generating requests and pending tool outputs, with pool/state/search filters and pause/resume controls.
+- Distinguish cached affinity from active sessions; retain the latest snapshot on errors and support narrow layouts and light/dark themes.
+
 ## 0.2.3
 
 - Add separate **Save priority** and **Save & rebalance sessions** actions with explicit existing-session behavior.

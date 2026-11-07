@@ -41,17 +41,19 @@ COPY patches/quota-policy.patch /tmp/quota-policy.patch
 RUN git apply --check /tmp/quota-policy.patch && git apply /tmp/quota-policy.patch
 COPY patches/session-rebalance.patch /tmp/session-rebalance.patch
 RUN git apply --check /tmp/session-rebalance.patch && git apply /tmp/session-rebalance.patch
+COPY patches/live-routing.patch /tmp/live-routing.patch
+RUN git apply --check /tmp/live-routing.patch && git apply /tmp/live-routing.patch
 
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./
 RUN go mod download
 COPY --from=source /src/ ./
-RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/sessionrebalance ./internal/live ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/routinglive ./internal/sessionrebalance ./internal/live ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/api/handlers/openai
-RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api -run 'TestManagementV8'
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.5" -o /out/CLIProxyAPI ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api ./sdk/api/handlers -run 'TestManagementV8|TestRoutingActivity'
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.6" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -85,7 +87,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.21
+ARG BUILD_VERSION=0.1.22
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

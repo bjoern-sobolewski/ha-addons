@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.21
+
+- Add pool-scoped session rebalancing with safe response/tool/steering draining, affinity epochs and WebSocket reconnection.
+- Separately persist affinity rebalancing (default on) and safe WebSocket reconnect (opt-in), with atomic edits and backward-compatible settings migration.
+- Rebalance after quota exclusion and stable higher-preference eligibility recovery, with routing eligibility checks and reconnect throttling; use existing local observations without provider probes.
+- Wait for saved priorities to reach runtime before explicit rebalancing; preserve the existing WebSocket-versus-priority routing rule.
+
 ## 0.1.20
 
 - Persist optional per-account, per-observed-window quota minimums and enforce them across selection, retries, affinity and pinned WebSocket turns.

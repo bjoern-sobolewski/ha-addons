@@ -19,6 +19,8 @@ RUN git apply --check /tmp/browser-locale-shared-reset.patch && git apply /tmp/b
 
 COPY patches/quota-policy.patch /tmp/quota-policy.patch
 RUN git apply --check /tmp/quota-policy.patch && git apply /tmp/quota-policy.patch
+COPY patches/session-rebalance.patch /tmp/session-rebalance.patch
+RUN git apply --check /tmp/session-rebalance.patch && git apply /tmp/session-rebalance.patch
 
 FROM node:24-alpine AS web-builder
 WORKDIR /src/web
@@ -37,7 +39,7 @@ COPY --from=source /src/internal/ ./internal/
 COPY --from=source /src/web/static.go ./web/static.go
 COPY --from=web-builder /src/web/dist ./web/dist
 RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=tmpfs,target=/tmp go test ./internal/...
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=2.0.3-main.7b2b670-ha.3" -o /out/cpa-usage-keeper ./cmd/server/main.go
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=2.0.3-main.7b2b670-ha.4" -o /out/cpa-usage-keeper ./cmd/server/main.go
 
 FROM ghcr.io/willxup/cpa-usage-keeper:2.0.3@sha256:e56daad41fea07eff80045b0efb41f4c80f092ab3e87090a4089e0446cfe6855
 USER root
@@ -48,7 +50,7 @@ COPY run.sh bootstrap.py nginx.conf viewer-locations.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 ENV WORK_DIR=/data TZ=Europe/Berlin
 EXPOSE 8082
-ARG BUILD_VERSION=0.2.2
+ARG BUILD_VERSION=0.2.3
 LABEL io.hass.name="CPA Usage Keeper" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

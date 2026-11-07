@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3
+
+- Add separate **Save priority** and **Save & rebalance sessions** actions with explicit existing-session behavior.
+- Add compact independent affinity/reconnect controls; keep WebSocket reconnection opt-in for quota policies and priority saves.
+- Remove explanatory paragraphs from quota and priority editors, and show live pool progress for saves, exclusions and eligibility recovery.
+- Keep rebalance failures distinct from successful priority persistence and retain administrator-only access.
+
 ## 0.2.2
 
 - Add administrator quota minimum editors to account cards and details, with independent optional windows and clear exclusion reasons.

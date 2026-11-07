@@ -1,0 +1,732 @@
+diff --git a/internal/api/credential_priority.go b/internal/api/credential_priority.go
+index 8379fab6..5898b0da 100644
+--- a/internal/api/credential_priority.go
++++ b/internal/api/credential_priority.go
+@@ -2,6 +2,7 @@ package api
+ 
+ import (
+ 	"bytes"
++	"context"
+ 	"encoding/json"
+ 	"errors"
+ 	"net/http"
+@@ -17,7 +18,9 @@ const maxCredentialPriority = int64(9_007_199_254_740_991)
+ var credentialPriorityIntegerPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
+ 
+ type credentialPriorityRequest struct {
+-	Priority json.RawMessage `json:"priority"`
++	Priority  json.RawMessage `json:"priority"`
++	Rebalance bool            `json:"rebalance_sessions"`
++	Reconnect bool            `json:"reconnect_websockets"`
+ }
+ 
+ func registerCredentialPriorityRoutes(router gin.IRoutes, provider service.CredentialPriorityProvider) {
+@@ -36,6 +39,18 @@ func registerCredentialPriorityRoutes(router gin.IRoutes, provider service.Crede
+ 				writeCredentialPriorityError(c, err)
+ 				return
+ 			}
++			if c.GetBool("rebalance_sessions") {
++				if p, ok := provider.(interface {
++					RebalanceSessions(context.Context, string, int, bool) (json.RawMessage, error)
++				}); ok {
++					response.Rebalance, err = p.RebalanceSessions(c.Request.Context(), c.Param("auth_index"), priority, c.GetBool("reconnect_websockets"))
++					if err != nil {
++						response.RebalanceError = "Priority saved; session rebalance failed. Retry Save & rebalance sessions."
++					}
++				} else {
++					response.RebalanceError = "Priority saved; session rebalance unavailable."
++				}
++			}
+ 			c.JSON(http.StatusOK, response)
+ 		})
+ 	}
+@@ -63,6 +78,8 @@ func bindCredentialPriorityRequest(c *gin.Context) (int, bool) {
+ 		c.JSON(http.StatusBadRequest, gin.H{"error": "priority must be a safe integer"})
+ 		return 0, false
+ 	}
++	c.Set("rebalance_sessions", request.Rebalance)
++	c.Set("reconnect_websockets", request.Rebalance && request.Reconnect)
+ 	return int(parsed), true
+ }
+ 
+diff --git a/internal/api/router.go b/internal/api/router.go
+index b1139203..cd5fe1c4 100644
+--- a/internal/api/router.go
++++ b/internal/api/router.go
+@@ -182,6 +182,7 @@ func NewRouter(
+ 	registerCredentialPriorityRoutes(adminProtected, credentialPriorityProvider)
+ 	if len(optionalProviders) > 0 {
+ 		registerQuotaPolicyRoutes(adminProtected, optionalProviders[0].QuotaPolicies, optionalProviders[0].Live)
++		registerSessionRebalanceRoutes(adminProtected, optionalProviders[0].QuotaPolicies)
+ 	}
+ 	registerAuthSessionManagementRoutes(adminProtected, authHandler)
+ 	registerCPAAPIKeyRoutes(adminProtected, cpaAPIKeyProvider, usageProvider)
+diff --git a/internal/api/session_rebalance.go b/internal/api/session_rebalance.go
+new file mode 100644
+index 00000000..968c20ca
+--- /dev/null
++++ b/internal/api/session_rebalance.go
+@@ -0,0 +1,29 @@
++package api
++
++import (
++	"context"
++	"encoding/json"
++	"github.com/gin-gonic/gin"
++	"net/http"
++)
++
++type sessionRebalanceReader interface {
++	SessionRebalances(context.Context, string, json.RawMessage) (json.RawMessage, int, error)
++}
++
++func registerSessionRebalanceRoutes(router gin.IRoutes, provider QuotaPolicyProvider) {
++	router.GET("/sessions/rebalances", func(c *gin.Context) {
++		p, ok := provider.(sessionRebalanceReader)
++		if !ok {
++			c.JSON(503, gin.H{"error": "session rebalance service unavailable"})
++			return
++		}
++		result, status, err := p.SessionRebalances(c.Request.Context(), http.MethodGet, nil)
++		if err != nil || status != 200 || !json.Valid(result) {
++			c.JSON(502, gin.H{"error": "session rebalance progress unavailable"})
++			return
++		}
++		c.Header("Cache-Control", "no-store")
++		c.Data(200, "application/json", result)
++	})
++}
+diff --git a/internal/api/test/session_rebalance_priority_test.go b/internal/api/test/session_rebalance_priority_test.go
+new file mode 100644
+index 00000000..8f9fe3bf
+--- /dev/null
++++ b/internal/api/test/session_rebalance_priority_test.go
+@@ -0,0 +1,57 @@
++package test
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"strings"
++	"testing"
++)
++
++type rebalancePriorityProvider struct {
++	*priorityProviderStub
++	calls int
++	fail  bool
++}
++
++func (p *rebalancePriorityProvider) RebalanceSessions(_ context.Context, index string, priority int, reconnect bool) (json.RawMessage, error) {
++	if p.authIndex != index || p.priority != priority || p.err != nil {
++		panic("rebalance ran before successful priority save")
++	}
++	p.calls++
++	if p.fail {
++		return nil, errors.New("secret-upstream-error")
++	}
++	return json.RawMessage(`{"id":1,"pool":"codex","sessions_rebalanced":5,"waiting":2}`), nil
++}
++func TestSessionRebalanceOnlyAfterPrioritySave(t *testing.T) {
++	for _, path := range []string{"/api/v1/credentials/auth-1/priority", "/api/v1/ai-providers/auth-1/priority"} {
++		for _, tc := range []struct {
++			name, body              string
++			saveFail, rebalanceFail bool
++			status, calls           int
++		}{
++			{"plain", `{"priority":3}`, false, false, 200, 0},
++			{"explicit", `{"priority":3,"rebalance_sessions":true}`, false, false, 200, 1},
++			{"failed save", `{"priority":3,"rebalance_sessions":true}`, true, false, 500, 0},
++			{"saved but rebalance failed", `{"priority":3,"rebalance_sessions":true}`, false, true, 200, 1},
++		} {
++			t.Run(path+tc.name, func(t *testing.T) {
++				p := &rebalancePriorityProvider{priorityProviderStub: &priorityProviderStub{}, fail: tc.rebalanceFail}
++				if tc.saveFail {
++					p.err = errors.New("secret-upstream-error")
++				}
++				r := priorityRouteRequest(t, p, path, tc.body)
++				if r.Code != tc.status || p.calls != tc.calls {
++					t.Fatalf("status %d calls %d", r.Code, p.calls)
++				}
++				if strings.Contains(r.Body.String(), "secret-upstream-error") {
++					t.Fatal("upstream detail leaked")
++				}
++				if tc.rebalanceFail && !strings.Contains(r.Body.String(), "Priority saved") {
++					t.Fatal("partial success misreported")
++				}
++			})
++		}
++	}
++}
+diff --git a/internal/cpa/session_rebalance.go b/internal/cpa/session_rebalance.go
+new file mode 100644
+index 00000000..dfc298e4
+--- /dev/null
++++ b/internal/cpa/session_rebalance.go
+@@ -0,0 +1,19 @@
++package cpa
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++)
++
++func (c *Client) SessionRebalances(ctx context.Context, method string, body json.RawMessage) (json.RawMessage, int, error) {
++	var result json.RawMessage
++	var status int
++	var err error
++	if method == http.MethodGet {
++		status, _, err = c.doManagementJSONRequest(ctx, "/v8/management/sessions/rebalances", &result, "session rebalance")
++	} else {
++		status, _, err = c.doManagementJSONRequestWithBody(ctx, method, "/v8/management/sessions/rebalances", body, &result, "session rebalance")
++	}
++	return result, status, err
++}
+diff --git a/internal/quota/traffic_sync.go b/internal/quota/traffic_sync.go
+index 41884984..fca86e94 100644
+--- a/internal/quota/traffic_sync.go
++++ b/internal/quota/traffic_sync.go
+@@ -46,6 +46,11 @@ func (r *TrafficQuotaSyncRunner) Run(ctx context.Context) error {
+ 			defer close(done)
+ 			for streamCtx.Err() == nil {
+ 				_ = stream.WatchLive(streamCtx, func(topics []string) {
++					for _, topic := range topics {
++						if topic == "rebalance" {
++							r.service.Live.Publish("rebalance")
++						}
++					}
+ 					for _, topic := range topics {
+ 						if topic == "quota" || topic == "sync" {
+ 							r.service.Live.Publish("quota")
+diff --git a/internal/service/credential_priority.go b/internal/service/credential_priority.go
+index 093e64d0..863b1f17 100644
+--- a/internal/service/credential_priority.go
++++ b/internal/service/credential_priority.go
+@@ -2,6 +2,7 @@ package service
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"errors"
+ 	"fmt"
+ 	"net/http"
+@@ -36,8 +37,10 @@ type CredentialPriorityProvider interface {
+ }
+ 
+ type CredentialPriorityResponse struct {
+-	AuthIndex string `json:"auth_index"`
+-	Priority  int    `json:"priority"`
++	Rebalance      json.RawMessage `json:"rebalance,omitempty"`
++	RebalanceError string          `json:"rebalance_error,omitempty"`
++	AuthIndex      string          `json:"auth_index"`
++	Priority       int             `json:"priority"`
+ }
+ 
+ type credentialPriorityService struct {
+@@ -219,3 +222,18 @@ func priorityFetchError(err error) error {
+ 	}
+ 	return fmt.Errorf("upstream response is unavailable")
+ }
++
++func (s *credentialPriorityService) RebalanceSessions(ctx context.Context, index string, priority int, reconnect bool) (json.RawMessage, error) {
++	client, ok := s.client.(interface {
++		SessionRebalances(context.Context, string, json.RawMessage) (json.RawMessage, int, error)
++	})
++	if !ok {
++		return nil, fmt.Errorf("session rebalance unsupported")
++	}
++	body, _ := json.Marshal(map[string]any{"auth_index": index, "expected_priority": priority, "reconnect_websockets": reconnect})
++	result, status, err := client.SessionRebalances(ctx, http.MethodPost, body)
++	if err != nil || status != http.StatusOK || !json.Valid(result) {
++		return nil, fmt.Errorf("session rebalance failed")
++	}
++	return result, nil
++}
+diff --git a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
+index c1a9c904..203b4731 100644
+--- a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
++++ b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
+@@ -30,7 +30,7 @@ interface AiProviderCredentialsSectionProps {
+   /** 正在写入上游状态的 Keeper identity id 集合，用于阻止重复点击。 */
+   statusPendingIdentityIds?: ReadonlySet<string>
+   onToggleStatus?: (identityId: string, authIndex: string, disabled: boolean) => void
+-  onSavePriority?: (identityId: string, authIndex: string, priority: number) => Promise<void>
++  onSavePriority?: (identityId: string, authIndex: string, priority: number, rebalanceSessions?: boolean, reconnectWebsockets?: boolean) => Promise<void>
+   onPageChange: (page: number) => void
+   onPageSizeChange: (pageSize: number) => void
+   onActiveOnlyChange: (activeOnly: boolean) => void
+@@ -110,7 +110,7 @@ export function AiProviderCredentialsSection({ reportingOnly = false, rows, tota
+                 displayName={row.displayName}
+                 readOnly={reportingOnly || row.identity.is_deleted}
+                 openAIShared={row.identity.type.trim().toLowerCase() === 'openai'}
+-                onSave={onSavePriority ? (priority) => onSavePriority(row.identity.id || row.identity.identity, row.identity.identity, priority) : undefined}
++                onSave={onSavePriority ? (priority, rebalance, reconnect) => rebalance ? onSavePriority(row.identity.id || row.identity.identity, row.identity.identity, priority, true, reconnect) : onSavePriority(row.identity.id || row.identity.identity, row.identity.identity, priority) : undefined}
+               />
+             </span>
+           ) : undefined}
+diff --git a/web/src/components/usage/credentials/CredentialEditModal.tsx b/web/src/components/usage/credentials/CredentialEditModal.tsx
+index 64485c0d..dcc88001 100644
+--- a/web/src/components/usage/credentials/CredentialEditModal.tsx
++++ b/web/src/components/usage/credentials/CredentialEditModal.tsx
+@@ -106,9 +106,9 @@ export function CredentialEditModal({ selection, onClose, onSaveField, onSaved,
+         </div>
+         {!statusSupported && <p className="hint">{t('usage_stats.credentials_edit_unsupported')}</p>}
+         <Input label={t('usage_stats.credentials_edit_priority')} type="text" value={priority} disabled={saving || readOnly}
+-          hint={t('usage_stats.credentials_priority_order_hint')} onChange={(event) => setPriority(event.target.value)} />
++          onChange={(event) => setPriority(event.target.value)} />
+         {selection.kind === 'ai-provider' && identity.type.trim().toLowerCase() === 'openai' &&
+-          <p className="hint">{t('usage_stats.credentials_priority_openai_scope')}</p>}
++          <strong>Shared provider priority</strong>}
+         {partial && <p className={styles.credentialEditPartial} role="status">{t('usage_stats.credentials_edit_partial')}</p>}
+         {error && <p className="error-box" role="alert">{error}</p>}
+       </form>
+diff --git a/web/src/components/usage/credentials/CredentialPriorityEditor.tsx b/web/src/components/usage/credentials/CredentialPriorityEditor.tsx
+index c0cf2bd1..f0fb92d1 100644
+--- a/web/src/components/usage/credentials/CredentialPriorityEditor.tsx
++++ b/web/src/components/usage/credentials/CredentialPriorityEditor.tsx
+@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
+ import { useTranslation } from 'react-i18next'
+ import { useCredentialEnterSave } from './useCredentialEnterSave'
+ import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
+-import { IconCheck, IconX } from '@/components/ui/icons'
++import { IconX } from '@/components/ui/icons'
+ import styles from './CredentialSections.module.scss'
+ 
+ interface CredentialPriorityEditorProps {
+@@ -11,7 +11,7 @@ interface CredentialPriorityEditorProps {
+   displayName: string
+   readOnly?: boolean
+   openAIShared?: boolean
+-  onSave?: (priority: number) => Promise<void>
++  onSave?: (priority: number, rebalanceSessions?: boolean, reconnectWebsockets?: boolean) => Promise<void>
+ }
+ 
+ interface PopoverPosition { left: number; top: number }
+@@ -31,6 +31,7 @@ export function CredentialPriorityEditor({ priority, displayName, readOnly = fal
+   const currentPriority = typeof priority === 'number' && Number.isFinite(priority) ? priority : 0
+   const [editing, setEditing] = useState(false)
+   const [draft, setDraft] = useState(String(currentPriority))
++  const [reconnect, setReconnect] = useState(false)
+   const [saving, setSaving] = useState(false)
+   const [error, setError] = useState('')
+   const [position, setPosition] = useState<PopoverPosition | null>(null)
+@@ -41,8 +42,7 @@ export function CredentialPriorityEditor({ priority, displayName, readOnly = fal
+   const restoreFocusRef = useRef(false)
+   const focusedOpenRef = useRef(false)
+   const popoverId = useId()
+-  const hintId = useId()
+-  const noteId = useId()
++
+   const errorId = useId()
+ 
+   useEffect(() => {
+@@ -140,7 +140,7 @@ export function CredentialPriorityEditor({ priority, displayName, readOnly = fal
+     }
+   }, [editing, currentPriority])
+ 
+-  const save = async () => {
++  const save = async (rebalance = false) => {
+     if (busyRef.current || !onSave) return
+     const parsed = parseCredentialPriority(draft)
+     if (parsed === null) {
+@@ -151,7 +151,8 @@ export function CredentialPriorityEditor({ priority, displayName, readOnly = fal
+     setSaving(true)
+     setError('')
+     try {
+-      await onSave(parsed)
++      if (rebalance) await onSave(parsed, true, reconnect)
++ else await onSave(parsed)
+       busyRef.current = false
+       close(true)
+     } catch {
+@@ -163,7 +164,7 @@ export function CredentialPriorityEditor({ priority, displayName, readOnly = fal
+     }
+   }
+ 
+-  const enterSave = useCredentialEnterSave(save)
++  const enterSave = useCredentialEnterSave(() => save())
+ 
+   if (!onSave || readOnly) {
+     if (priority === null || priority === undefined) return null
+@@ -210,19 +211,20 @@ export function CredentialPriorityEditor({ priority, displayName, readOnly = fal
+               disabled={saving}
+               aria-label={t('usage_stats.credentials_priority_input', { name: displayName })}
+               aria-invalid={Boolean(error) || undefined}
+-              aria-describedby={[hintId, openAIShared ? noteId : '', error ? errorId : ''].filter(Boolean).join(' ')}
++              aria-describedby={error ? errorId : undefined}
+               onChange={(event) => { setDraft(event.target.value); setError('') }}
+               {...enterSave}
+             />
+-            <button type="button" className={styles.credentialPriorityAction} onClick={() => void save()} disabled={saving}
++            <button type="button" className={`${styles.credentialPriorityAction} ${styles.credentialPrioritySave}`} onClick={() => void save()} disabled={saving}
+               aria-label={saving ? t('usage_stats.credentials_priority_saving') : t('usage_stats.credentials_priority_save')}>
+-              {saving ? <LoadingSpinner size={12} /> : <IconCheck size={13} />}
++              {saving ? <LoadingSpinner size={12} /> : 'Save priority'}
+             </button>
+             <button type="button" className={styles.credentialPriorityAction} onClick={cancel} disabled={saving}
+               aria-label={t('usage_stats.credentials_priority_cancel')}><IconX size={13} /></button>
+           </div>
+-          <span id={hintId} className={styles.credentialPriorityScope}>{t('usage_stats.credentials_priority_order_hint')}</span>
+-          {openAIShared && <span id={noteId} className={styles.credentialPriorityScope}>{t('usage_stats.credentials_priority_openai_scope')}</span>}
++          {openAIShared && <strong className={styles.credentialPriorityScope}>Shared provider priority</strong>}
++          <label className={styles.credentialPriorityScope}><input type="checkbox" checked={reconnect} disabled={saving} onChange={event => setReconnect(event.target.checked)} /> Reconnect WebSockets when safe</label>
++          <button type="button" className={`${styles.credentialPriorityAction} ${styles.credentialPrioritySave}`} disabled={saving} onClick={() => void save(true)}>Save &amp; rebalance sessions</button>
+           {error && <span id={errorId} className={styles.credentialPriorityError} role="alert">{error}</span>}
+         </div>,
+         document.body,
+diff --git a/web/src/components/usage/credentials/CredentialSections.module.scss b/web/src/components/usage/credentials/CredentialSections.module.scss
+index 9f862e25..060e6813 100644
+--- a/web/src/components/usage/credentials/CredentialSections.module.scss
++++ b/web/src/components/usage/credentials/CredentialSections.module.scss
+@@ -3790,3 +3790,5 @@ $credential-provider-icon-size: 30px;
+ .credentialUsageLegend {display: flex;gap: 10px;font-size: 10px;font-variant-numeric: tabular-nums;line-height: 1.25;}
+ .credentialUsagePeak {margin-left: auto;color: var(--text-tertiary);}
+ @media(prefers-reduced-motion: reduce) {.credentialUsageStack,.credentialUsageSuccess,.credentialUsageFailure {transition: none;}}
++
++.credentialPrioritySave { width: auto; min-height: 30px; height: auto; padding: 4px 8px; font-size: 12px; white-space: normal; }
+diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
+index d29ff7a2..8982631c 100644
+--- a/web/src/components/usage/credentials/CredentialsSection.tsx
++++ b/web/src/components/usage/credentials/CredentialsSection.tsx
+@@ -130,7 +130,7 @@ interface CredentialsSectionProps {
+   /** 正在写入上游状态的 Keeper identity id 集合，用于阻止重复点击。 */
+   statusPendingIdentityIds?: ReadonlySet<string>
+   onToggleStatus?: (identityId: string, authIndex: string, disabled: boolean) => void
+-  onSavePriority?: (identityId: string, authIndex: string, priority: number) => Promise<void>
++  onSavePriority?: (identityId: string, authIndex: string, priority: number, rebalanceSessions?: boolean, reconnectWebsockets?: boolean) => Promise<void>
+   onRefreshInspectionStatus: () => Promise<void>
+   onStartInspection: () => Promise<void>
+   onAfterInvalidAccountAction?: () => Promise<void>
+@@ -328,7 +328,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+                   priority={row.identity.priority}
+                   displayName={row.displayName}
+                   readOnly={reportingOnly || row.identity.is_deleted}
+-                  onSave={onSavePriority ? (priority) => onSavePriority(row.identity.id || row.identity.identity, row.identity.identity, priority) : undefined}
++                  onSave={onSavePriority ? (priority, rebalance, reconnect) => rebalance ? onSavePriority(row.identity.id || row.identity.identity, row.identity.identity, priority, true, reconnect) : onSavePriority(row.identity.id || row.identity.identity, row.identity.identity, priority) : undefined}
+                 />
+               </span>
+             ) : undefined}
+diff --git a/web/src/components/usage/credentials/QuotaPolicyPanel.tsx b/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
+index a90d583e..79da81ee 100644
+--- a/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
++++ b/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
+@@ -14,7 +14,10 @@ export interface PolicyWindow {
+   excluded: boolean
+   reason: string
+ }
++export interface RebalanceSettings { rebalance_sessions: boolean; reconnect_websockets: boolean }
++const defaultRebalanceSettings: RebalanceSettings = { rebalance_sessions: true, reconnect_websockets: false }
+ export interface AccountPolicy {
++  rebalance_settings?: RebalanceSettings
+   auth_index: string
+   provider: string
+   manually_disabled: boolean
+@@ -78,6 +81,8 @@ function SupportedQuotaPolicyPanel({ authIndex, provider }: { authIndex: string;
+   const [editing, setEditing] = useState(false)
+   const [draft, setDraft] = useState<Record<string, string>>({})
+   const [expected, setExpected] = useState<Record<string, number>>({})
++  const [behavior, setBehavior] = useState<RebalanceSettings>(defaultRebalanceSettings)
++  const [expectedBehavior, setExpectedBehavior] = useState<RebalanceSettings>(defaultRebalanceSettings)
+   const [windows, setWindows] = useState<PolicyWindow[]>([])
+   const [pending, setPending] = useState(false)
+   const [error, setError] = useState('')
+@@ -85,6 +90,8 @@ function SupportedQuotaPolicyPanel({ authIndex, provider }: { authIndex: string;
+   const configured = Object.keys(account.thresholds).length > 0
+   const begin = () => {
+     setExpected({ ...account.thresholds })
++    setBehavior({ ...(account.rebalance_settings ?? defaultRebalanceSettings) })
++    setExpectedBehavior({ ...(account.rebalance_settings ?? defaultRebalanceSettings) })
+     setWindows(account.windows)
+     setDraft(Object.fromEntries(account.windows.map(window => [window.id, window.minimum_remaining_percent == null ? '' : String(window.minimum_remaining_percent)])))
+     setError(''); setEditing(true)
+@@ -100,7 +107,7 @@ function SupportedQuotaPolicyPanel({ authIndex, provider }: { authIndex: string;
+     try {
+       const response = await apiFetch(apiPath('/quota/policies'), {
+         method: 'PUT', headers: { 'Content-Type': 'application/json' },
+-        body: JSON.stringify({ auth_index: authIndex, provider, thresholds, expected_thresholds: expected }),
++        body: JSON.stringify({ auth_index: authIndex, provider, thresholds, expected_thresholds: expected, rebalance_settings: behavior, expected_rebalance_settings: expectedBehavior }),
+       })
+       if (!response.ok) throw new Error(response.status === 409 ? 'Policy changed elsewhere. Cancel and reopen to load it.' : 'Could not save quota policy. Reload and retry.')
+       await refresh(); setEditing(false)
+@@ -115,21 +122,20 @@ function SupportedQuotaPolicyPanel({ authIndex, provider }: { authIndex: string;
+       </span>
+       {!editing && <button type="button" onClick={begin}>Edit minimums</button>}
+     </div>
+-    {data.error && <p role="alert">Live policy state unavailable. Displayed state may be outdated.</p>}
++    {data.error && <div role="alert">Live policy state unavailable</div>}
+     {!editing && configured && <ul>{account.windows.filter(window => window.minimum_remaining_percent !== null).map(window => <li key={window.id}>
+       {window.label}: minimum {window.minimum_remaining_percent}% · {window.remaining_percent === null ? 'Unknown' : `${window.remaining_percent.toFixed(1)}% remaining`}
+       {window.excluded && <strong> · {policyReason(window.reason)}</strong>}
+     </li>)}</ul>}
+     {editing && <form onSubmit={event => { event.preventDefault(); void save() }}>
+-      <p>Exclude this whole account from new requests when any configured window is at or below its minimum. Model-specific and reserve limits also apply to the whole account.</p>
+-      <p>Blank leaves a window unrestricted. 0% stops at exhaustion. Unknown quota, data older than 15 minutes, and passed resets exclude configured windows until a fresh observation arrives. No provider query is added. Existing scheduled or manual quota refresh can restore availability.</p>
+-      <p>Manual enable/disable and priority stay separate. Running requests finish. Bound WebSocket turns are rejected while excluded; reconnect with full context to use another eligible account.</p>
+-      {!windows.length && <p>No percentage windows observed for this account yet.</p>}
++      {!windows.length && <div role="status">No percentage windows observed</div>}
+       {windows.map(window => <label className={styles.window} key={window.id}>
+         <span>{window.label}<small>{window.remaining_percent === null ? 'Unknown quota' : `${window.remaining_percent.toFixed(1)}% remaining`}{window.reason ? ` · ${policyReason(window.reason)}` : ''}</small></span>
+         <input aria-label={`Minimum remaining percentage: ${window.label}`} inputMode="decimal" type="number" min="0" max="100" step="any" placeholder="Off" value={draft[window.id] ?? ''} disabled={pending} onChange={event => setDraft({ ...draft, [window.id]: event.target.value })} />
+       </label>)}
+-      {error && <p role="alert">{error}</p>}
++      <label className={styles.window}><span>Rebalance session affinity</span><input type="checkbox" checked={behavior.rebalance_sessions} disabled={pending} onChange={event => setBehavior({ ...behavior, rebalance_sessions: event.target.checked })} /></label>
++      <label className={styles.window}><span>Reconnect WebSockets when safe</span><input type="checkbox" checked={behavior.reconnect_websockets} disabled={pending || !behavior.rebalance_sessions} onChange={event => setBehavior({ ...behavior, reconnect_websockets: event.target.checked })} /></label>
++      {error && <div role="alert">{error}</div>}
+       <div className={styles.actions}><button type="submit" disabled={pending}>{pending ? 'Saving…' : 'Save minimums'}</button><button type="button" disabled={pending} onClick={() => setEditing(false)}>Cancel</button></div>
+     </form>}
+   </section>
+diff --git a/web/src/components/usage/credentials/SessionRebalanceProgress.tsx b/web/src/components/usage/credentials/SessionRebalanceProgress.tsx
+new file mode 100644
+index 00000000..6626bbe3
+--- /dev/null
++++ b/web/src/components/usage/credentials/SessionRebalanceProgress.tsx
+@@ -0,0 +1,40 @@
++import { useEffect, useState } from 'react'
++import { apiFetch, apiPath } from '@/lib/api'
++import { startLiveRefresh } from '@/lib/live'
++
++interface Progress {
++  reconnect_websockets: boolean
++  id: number
++  pool: string
++  reason: string
++  sessions_rebalanced: number
++  waiting: number
++  requested_at: string
++}
++
++// Admin page only. Uses the existing SSE connection and local CPA state.
++export function SessionRebalanceProgress() {
++  const [items, setItems] = useState<Progress[]>([])
++  const [failed, setFailed] = useState(false)
++  useEffect(() => startLiveRefresh(async signal => {
++    try {
++      const response = await apiFetch(apiPath('/sessions/rebalances'), { signal })
++      if (!response.ok) throw new Error('Progress unavailable')
++      const data = await response.json() as { items: Progress[] }
++      if (signal.aborted) return
++      const latest = new Map<string, Progress>()
++      for (const item of data.items) {
++        if (item.waiting > 0 || Date.now() - Date.parse(item.requested_at) < 600_000) latest.set(`${item.pool}:${item.waiting > 0 ? 'waiting' : 'latest'}`, item)
++      }
++      setItems([...latest.values()]); setFailed(false)
++    } catch { if (!signal.aborted) setFailed(true) }
++  }, ['rebalance', 'clock']), [])
++  return <div aria-label="Session rebalance progress" aria-live="polite">
++    {failed && <p role="status">Session rebalance progress unavailable. Waiting sessions continue safely.</p>}
++    {items.map(item => <p key={item.id} role="status">
++      {item.reason === 'priority_saved' ? 'Priority saved' : item.reason === 'quota_policy_recovered' ? 'Account eligibility recovered' : 'Quota policy excluded an account'}
++      {' · '}{item.pool}{' · Affinity rebalanced'}
++      {item.reconnect_websockets && <>{' · '}{item.sessions_rebalanced} sessions rebalanced{' · '}{item.waiting} waiting</>}
++    </p>)}
++  </div>
++}
+diff --git a/web/src/components/usage/credentials/test/CredentialEditModal.test.tsx b/web/src/components/usage/credentials/test/CredentialEditModal.test.tsx
+index 5ebba4e2..f45d295c 100644
+--- a/web/src/components/usage/credentials/test/CredentialEditModal.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialEditModal.test.tsx
+@@ -114,7 +114,7 @@ describe('credential unified editor', () => {
+     await render(save, 'openai')
+     expect(document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(true)
+     expect(document.body.textContent).toContain('credentials_edit_unsupported')
+-    expect(document.body.textContent).toContain('credentials_priority_openai_scope')
++    expect(document.body.textContent).toContain('Shared provider priority')
+     await change(field('priority'), '7')
+     await act(async () => button('save').click())
+     expect(save.mock.calls).toEqual([[{ field: 'priority', value: 7 }]])
+diff --git a/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx b/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx
+index f275cbe0..afa0d572 100644
+--- a/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx
+@@ -53,7 +53,7 @@ describe('CredentialPriorityEditor', () => {
+     expect(container.querySelector('[role="dialog"]')).toBeNull()
+     const input = popover()!.querySelector<HTMLInputElement>('input')!
+     expect(document.activeElement).toBe(input)
+-    expect(input.getAttribute('aria-describedby')).toContain(popover()!.querySelector('span')!.id)
++    expect(input.getAttribute('aria-describedby')).toBeNull()
+     await act(async () => changeInput(input, '1.5'))
+     await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+     expect(onSave).not.toHaveBeenCalled()
+@@ -74,8 +74,8 @@ describe('CredentialPriorityEditor', () => {
+     await act(async () => root.render(<CredentialPriorityEditor priority={3} displayName="Provider" onSave={onSave} openAIShared />))
+     await act(async () => container.querySelector<HTMLButtonElement>('button')!.click())
+     const input = popover()!.querySelector<HTMLInputElement>('input')!
+-    expect(popover()!.textContent).toContain('usage_stats.credentials_priority_openai_scope')
+-    expect(popover()!.textContent).toContain('usage_stats.credentials_priority_order_hint')
++    expect(popover()!.textContent).toContain('Shared provider priority')
++    expect(popover()!.textContent).not.toContain('usage_stats.credentials_priority_order_hint')
+     await act(async () => changeInput(input, '4'))
+     await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await Promise.resolve() })
+     expect(input.value).toBe('4')
+@@ -177,4 +177,14 @@ describe('CredentialPriorityEditor', () => {
+     expect(popover()).toBeNull()
+   })
+ 
++  it('rebalances only through the explicit second save button', async () => {
++    const onSave = vi.fn(async () => undefined)
++    await act(async () => root.render(<CredentialPriorityEditor priority={3} displayName="Auth" onSave={onSave} />))
++    await act(async () => container.querySelector<HTMLButtonElement>('button')!.click())
++    const rebalance = [...popover()!.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Save & rebalance sessions')!
++    expect(rebalance).toBeDefined()
++    await act(async () => rebalance.click())
++    expect(onSave).toHaveBeenCalledExactlyOnceWith(3, true, false)
++  })
++
+ })
+diff --git a/web/src/components/usage/credentials/test/QuotaPolicyPanel.test.tsx b/web/src/components/usage/credentials/test/QuotaPolicyPanel.test.tsx
+index 8fa542d6..a52c4cb6 100644
+--- a/web/src/components/usage/credentials/test/QuotaPolicyPanel.test.tsx
++++ b/web/src/components/usage/credentials/test/QuotaPolicyPanel.test.tsx
+@@ -30,14 +30,19 @@ describe('Quota policy controls', () => {
+       expect(apiFetch).toHaveBeenCalledTimes(1)
+       expect(container.textContent).toContain('Excluded by quota policy')
+       await act(async () => container.querySelector<HTMLButtonElement>('button')!.click())
+-      expect(container.querySelectorAll('input')).toHaveLength(2)
+-      expect(container.querySelectorAll<HTMLInputElement>('input')[1].value).toBe('')
++      expect(container.querySelectorAll('input[type="number"]')).toHaveLength(2)
++      const checkboxes = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
++      expect(checkboxes[0].checked).toBe(true)
++      expect(checkboxes[1].checked).toBe(false)
++      await act(async () => checkboxes[1].click())
++      expect(container.querySelectorAll('form p')).toHaveLength(0)
++      expect(container.querySelectorAll<HTMLInputElement>('input[type="number"]')[1].value).toBe('')
+       vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => ({ items: [{ ...account, excluded: false, thresholds: {}, windows: account.windows.map(window => ({ ...window, minimum_remaining_percent: null })) }] }) } as Response)
+       await act(async () => { await live.refresh!() })
+       expect(container.querySelector<HTMLInputElement>('input')!.value).toBe('10')
+       await act(async () => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
+       const put = vi.mocked(apiFetch).mock.calls.find(([, options]) => options?.method === 'PUT')!
+-      expect(JSON.parse(put[1]!.body as string)).toEqual({ auth_index: 'a', provider: 'codex', thresholds: { weekly: 10 }, expected_thresholds: { weekly: 10 } })
++      expect(JSON.parse(put[1]!.body as string)).toEqual({ auth_index: 'a', provider: 'codex', thresholds: { weekly: 10 }, expected_thresholds: { weekly: 10 }, rebalance_settings: { rebalance_sessions: true, reconnect_websockets: true }, expected_rebalance_settings: { rebalance_sessions: true, reconnect_websockets: false } })
+     } finally { await act(async () => root.unmount()); container.remove() }
+     expect(live.stop).toHaveBeenCalledTimes(1)
+   })
+diff --git a/web/src/components/usage/credentials/useCredentialsTabData.ts b/web/src/components/usage/credentials/useCredentialsTabData.ts
+index c9f91edb..22d26604 100644
+--- a/web/src/components/usage/credentials/useCredentialsTabData.ts
++++ b/web/src/components/usage/credentials/useCredentialsTabData.ts
+@@ -104,8 +104,8 @@ export interface CredentialsTabData {
+   credentialStatusPendingIdentityIds: ReadonlySet<string>
+   toggleCredentialStatus: (identityId: string, authIndex: string, disabled: boolean) => void
+   toggleAiProviderStatus: (identityId: string, authIndex: string, disabled: boolean) => void
+-  saveCredentialPriority: (identityId: string, authIndex: string, priority: number) => Promise<void>
+-  saveAiProviderPriority: (identityId: string, authIndex: string, priority: number) => Promise<void>
++  saveCredentialPriority: (identityId: string, authIndex: string, priority: number, rebalanceSessions?: boolean, reconnectWebsockets?: boolean) => Promise<void>
++  saveAiProviderPriority: (identityId: string, authIndex: string, priority: number, rebalanceSessions?: boolean, reconnectWebsockets?: boolean) => Promise<void>
+   refresh: () => Promise<void>
+   refreshAfterRecalculation: () => Promise<void>
+   saveCredentialField: (kind: CredentialStatusKind, id: string, authIndex: string, change: CredentialEditChange) => Promise<void>
+@@ -231,13 +231,15 @@ export function useCredentialsTabData({ enabledCredentials, enabledAiProviders,
+     void toggleStatusByKind('ai-provider', identityId, authIndex, disabled)
+   }, [toggleStatusByKind])
+ 
+-  const savePriorityByKind = useCallback(async (kind: CredentialStatusKind, _identityId: string, authIndex: string, priority: number) => {
++  const savePriorityByKind = useCallback(async (kind: CredentialStatusKind, _identityId: string, authIndex: string, priority: number, rebalanceSessions?: boolean, reconnectWebsockets?: boolean) => {
+     try {
+-      await setCredentialPriority(kind, authIndex, priority)
++      const result = await (rebalanceSessions ? setCredentialPriority(kind, authIndex, priority, true, reconnectWebsockets) : setCredentialPriority(kind, authIndex, priority))
++
+       // 重新读取当前筛选和排序；OpenAI provider 的其它 key 也通过服务端结果对齐。
+       await refreshCredentialPagesRef.current()
+       onPrioritySaved?.()
+-      onNotice?.('success', i18n.t('usage_stats.credentials_priority_save_success'))
++      if (result?.rebalance_error) onNotice?.('error', result.rebalance_error)
++ else onNotice?.('success', i18n.t('usage_stats.credentials_priority_save_success'))
+     } catch (error) {
+       if (error instanceof ApiError && error.status === 401) onAuthRequired?.()
+       if (error instanceof ApiError && error.status === 404) {
+@@ -255,10 +257,10 @@ export function useCredentialsTabData({ enabledCredentials, enabledAiProviders,
+     }
+   }, [onAuthRequired, onNotice, onPrioritySaved])
+ 
+-  const saveCredentialPriority = useCallback((identityId: string, authIndex: string, priority: number) =>
+-    savePriorityByKind('credential', identityId, authIndex, priority), [savePriorityByKind])
+-  const saveAiProviderPriority = useCallback((identityId: string, authIndex: string, priority: number) =>
+-    savePriorityByKind('ai-provider', identityId, authIndex, priority), [savePriorityByKind])
++  const saveCredentialPriority = useCallback((identityId: string, authIndex: string, priority: number, rebalanceSessions?: boolean, reconnectWebsockets?: boolean) =>
++    savePriorityByKind('credential', identityId, authIndex, priority, rebalanceSessions, reconnectWebsockets), [savePriorityByKind])
++  const saveAiProviderPriority = useCallback((identityId: string, authIndex: string, priority: number, rebalanceSessions?: boolean, reconnectWebsockets?: boolean) =>
++    savePriorityByKind('ai-provider', identityId, authIndex, priority, rebalanceSessions, reconnectWebsockets), [savePriorityByKind])
+ 
+   const saveCredentialField = useCallback(async (kind: CredentialStatusKind, id: string, authIndex: string, change: CredentialEditChange) => {
+     try {
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index aa594281..537d14b5 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -956,15 +956,17 @@ export async function setCredentialDisabled(kind: CredentialStatusKind, authInde
+ }
+ 
+ export interface CredentialPriorityResponse {
++ rebalance?: { id: number; pool: string; sessions_rebalanced: number; waiting: number }
++ rebalance_error?: string
+   auth_index: string
+   priority: number
+ }
+ 
+-export async function setCredentialPriority(kind: CredentialStatusKind, authIndex: string, priority: number): Promise<CredentialPriorityResponse> {
++export async function setCredentialPriority(kind: CredentialStatusKind, authIndex: string, priority: number, rebalanceSessions = false, reconnectWebsockets = false): Promise<CredentialPriorityResponse> {
+   const response = await apiFetch(apiPath(`${credentialStatusPathByKind[kind]}/${encodeURIComponent(authIndex)}/priority`), {
+     method: 'PATCH',
+     headers: { 'Content-Type': 'application/json' },
+-    body: JSON.stringify({ priority }),
++    body: JSON.stringify({ priority, ...(rebalanceSessions ? { rebalance_sessions: true, reconnect_websockets: reconnectWebsockets } : {}) }),
+   })
+   if (!response.ok) {
+     await parseApiError(response, `Failed to update credential priority: ${response.status}`)
+diff --git a/web/src/lib/live.ts b/web/src/lib/live.ts
+index 70483f7f..fb241595 100644
+--- a/web/src/lib/live.ts
++++ b/web/src/lib/live.ts
+@@ -1,6 +1,6 @@
+ import { apiFetch, apiPath } from './api';
+ 
+-export type LiveTopic = 'sync' | 'usage' | 'quota' | 'accounts' | 'clock';
++export type LiveTopic = 'sync' | 'usage' | 'quota' | 'accounts' | 'clock' | 'rebalance';
+ export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'paused';
+ type Listener = (topics: LiveTopic[]) => void;
+ const listeners = new Set<Listener>();
+@@ -40,7 +40,7 @@ async function connect() {
+         if (!data) continue;
+         const payload = JSON.parse(data) as { topics?: unknown };
+         if (!Array.isArray(payload.topics)) continue;
+-        const topics = payload.topics.filter((topic): topic is LiveTopic => ['sync', 'usage', 'quota', 'accounts', 'clock'].includes(String(topic)));
++        const topics = payload.topics.filter((topic): topic is LiveTopic => ['sync', 'usage', 'quota', 'accounts', 'clock', 'rebalance'].includes(String(topic)));
+         attempts = 0; setStatus('live'); listeners.forEach(listener => listener(topics));
+       }
+     }
+diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
+index eebd1790..0ee607c3 100644
+--- a/web/src/pages/UsagePage.tsx
++++ b/web/src/pages/UsagePage.tsx
+@@ -1,5 +1,6 @@
+ import { AdminRankingSection, type AdminRankingHandle } from '@/features/ranking/AdminRankingSection';
+ import { ChartLifecycleProvider, useChartRefresh, type ChartRefreshSignal } from '@/components/usage/charts/chartLifecycle';
++import { SessionRebalanceProgress } from '@/components/usage/credentials/SessionRebalanceProgress';
+ import { CredentialEditModal } from '@/components/usage/credentials/CredentialEditModal';
+ import { UsageComparisonCharts } from '@/components/usage/UsageComparisonCharts';
+ import type { ModelSpeedRefreshSignal } from '@/components/usage/model-speed/modelSpeedAnimation';
+@@ -2328,7 +2329,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+ 
+             {credentialSectionVisibility.enabled && (
+               <>
+-                {credentialsData.error && <div className={styles.errorBox}>{credentialsData.error}</div>}
++                <SessionRebalanceProgress />
++ {credentialsData.error && <div className={styles.errorBox}>{credentialsData.error}</div>}
+                 <CredentialProviderFilterBar
+                   scope={activeCredentialProviderFilterScope}
+                   typeCounts={credentialTypeCountsForProviderFilter}
+diff --git a/web/test-helpers/liveStream.ts b/web/test-helpers/liveStream.ts
+index d73f8206..c5013ec1 100644
+--- a/web/test-helpers/liveStream.ts
++++ b/web/test-helpers/liveStream.ts
+@@ -3,7 +3,7 @@ import { apiFetch } from '../src/lib/api';
+ export function mockLiveStream() {
+  const streams:ReadableStreamDefaultController<Uint8Array>[]=[];
+  vi.mocked(apiFetch).mockImplementation(async (_url,init)=>{
+- if(String(_url).endsWith("/quota/policies")) return new Response(JSON.stringify({items:[]}),{headers:{"Content-Type":"application/json"}});
++ if((String(_url).endsWith("/quota/policies") || String(_url).endsWith("/sessions/rebalances"))) return new Response(JSON.stringify({items:[]}),{headers:{"Content-Type":"application/json"}});
+   let controller!:ReadableStreamDefaultController<Uint8Array>;
+   const body=new ReadableStream<Uint8Array>({start(value){controller=value;streams.push(value);}});
+   init?.signal?.addEventListener('abort',()=>{try{controller.close();}catch{/* already closed */}});

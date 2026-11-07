@@ -1,0 +1,1868 @@
+diff --git a/internal/api/handlers/management/quota_policy.go b/internal/api/handlers/management/quota_policy.go
+index 141712a7..9b058a57 100644
+--- a/internal/api/handlers/management/quota_policy.go
++++ b/internal/api/handlers/management/quota_policy.go
+@@ -30,13 +30,15 @@ func (h *Handler) GetQuotaPolicies(c *gin.Context) {
+ 
+ func (h *Handler) PutQuotaPolicy(c *gin.Context) {
+ 	var body struct {
+-		AuthIndex  string              `json:"auth_index"`
+-		Provider   string              `json:"provider"`
+-		Thresholds map[string]*float64 `json:"thresholds"`
+-		Expected   *map[string]float64 `json:"expected_thresholds"`
++		AuthIndex                 string                          `json:"auth_index"`
++		Provider                  string                          `json:"provider"`
++		Thresholds                map[string]*float64             `json:"thresholds"`
++		Expected                  *map[string]float64             `json:"expected_thresholds"`
++		RebalanceSettings         *quotatraffic.RebalanceSettings `json:"rebalance_settings"`
++		ExpectedRebalanceSettings *quotatraffic.RebalanceSettings `json:"expected_rebalance_settings"`
+ 	}
+ 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32768)
+-	if c.ShouldBindJSON(&body) != nil || body.AuthIndex == "" || body.Thresholds == nil || body.Expected == nil {
++	if c.ShouldBindJSON(&body) != nil || body.AuthIndex == "" || body.Thresholds == nil || body.Expected == nil || (body.RebalanceSettings != nil && body.ExpectedRebalanceSettings == nil) {
+ 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid quota policy"})
+ 		return
+ 	}
+@@ -57,7 +59,7 @@ func (h *Handler) PutQuotaPolicy(c *gin.Context) {
+ 				}
+ 				values[id] = *n
+ 			}
+-			if err := quotatraffic.RoutingPolicies.CompareAndSet(a.Index, a.Provider, values, *body.Expected); err != nil {
++			if err := quotatraffic.RoutingPolicies.CompareAndSetWithRebalance(a.Index, a.Provider, values, *body.Expected, body.RebalanceSettings, body.ExpectedRebalanceSettings); err != nil {
+ 				if errors.Is(err, quotatraffic.ErrPolicyChanged) {
+ 					c.JSON(http.StatusConflict, gin.H{"error": "quota policy changed; reload and retry"})
+ 					return
+diff --git a/internal/api/handlers/management/session_rebalance.go b/internal/api/handlers/management/session_rebalance.go
+new file mode 100644
+index 00000000..342ca7a6
+--- /dev/null
++++ b/internal/api/handlers/management/session_rebalance.go
+@@ -0,0 +1,59 @@
++package management
++
++import (
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/sessionrebalance"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"net/http"
++	"time"
++)
++
++func (h *Handler) GetSessionRebalances(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	c.JSON(http.StatusOK, gin.H{"items": sessionrebalance.Default.Snapshots()})
++}
++func (h *Handler) PostSessionRebalance(c *gin.Context) {
++	var body struct {
++		AuthIndex           string `json:"auth_index"`
++		ExpectedPriority    *int   `json:"expected_priority"`
++		ReconnectWebsockets bool   `json:"reconnect_websockets"`
++	}
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4096)
++	if c.ShouldBindJSON(&body) != nil || body.AuthIndex == "" || body.ExpectedPriority == nil {
++		c.JSON(400, gin.H{"error": "auth_index required"})
++		return
++	}
++	if h.authManager != nil {
++		deadline := time.NewTimer(5 * time.Second)
++		defer deadline.Stop()
++		tick := time.NewTicker(25 * time.Millisecond)
++		defer tick.Stop()
++		for {
++			h.mu.Lock()
++			reloadReady := h.appliedReloadGeneration >= h.reloadGeneration
++			h.mu.Unlock()
++			for _, a := range h.authManager.List() {
++				if a != nil && a.Index == body.AuthIndex {
++					pool := coreauth.SessionRebalancePool(a)
++					if pool == "" {
++						break
++					}
++					if !reloadReady || coreauth.SessionRebalancePriority(a) != *body.ExpectedPriority {
++						continue
++					}
++					c.JSON(200, h.authManager.RebalanceSessions(pool, "priority_saved", body.ReconnectWebsockets))
++					return
++				}
++			}
++			select {
++			case <-c.Request.Context().Done():
++				return
++			case <-deadline.C:
++				c.JSON(409, gin.H{"error": "saved priority is not active yet; retry rebalance"})
++				return
++			case <-tick.C:
++			}
++		}
++	}
++	c.JSON(404, gin.H{"error": "account pool not found"})
++}
+diff --git a/internal/api/handlers/management/session_rebalance_test.go b/internal/api/handlers/management/session_rebalance_test.go
+new file mode 100644
+index 00000000..24ad2f61
+--- /dev/null
++++ b/internal/api/handlers/management/session_rebalance_test.go
+@@ -0,0 +1,63 @@
++package management
++
++import (
++	"context"
++	"encoding/json"
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/sessionrebalance"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestSessionRebalanceWaitsForRuntimePriority(t *testing.T) {
++	old := sessionrebalance.Default
++	sessionrebalance.Default = sessionrebalance.New()
++	defer func() { sessionrebalance.Default = old }()
++	m := coreauth.NewManager(nil, nil, nil)
++	a, err := m.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{ID: t.Name(), Provider: "codex", Attributes: map[string]string{"priority": "0"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	h := &Handler{authManager: m}
++	closed := make(chan struct{})
++	s := sessionrebalance.Default.Register(func() { close(closed) })
++	s.SetPool("codex")
++	defer s.Unregister()
++	started := make(chan struct{})
++	done := make(chan *httptest.ResponseRecorder)
++	go func() {
++		data, _ := json.Marshal(map[string]any{"auth_index": a.Index, "expected_priority": 7, "reconnect_websockets": true})
++		r := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(r)
++		c.Request = httptest.NewRequest("POST", "/", strings.NewReader(string(data)))
++		c.Request.Header.Set("Content-Type", "application/json")
++		close(started)
++		h.PostSessionRebalance(c)
++		done <- r
++	}()
++	<-started
++	select {
++	case <-closed:
++		t.Fatal("retired socket before saved priority reached runtime")
++	case <-time.After(50 * time.Millisecond):
++	}
++	if _, _, err := m.Modify(coreauth.WithSkipPersist(context.Background()), a.ID, a.RegistrationEpoch, func(current *coreauth.Auth) error { current.Attributes["priority"] = "7"; return nil }); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case r := <-done:
++		if r.Code != 200 {
++			t.Fatal(r.Code)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("did not observe runtime reload")
++	}
++	select {
++	case <-closed:
++	case <-time.After(time.Second):
++		t.Fatal("did not retire after runtime reload")
++	}
++}
+diff --git a/internal/api/server.go b/internal/api/server.go
+index b1c8e7e2..6e82f7bf 100644
+--- a/internal/api/server.go
++++ b/internal/api/server.go
+@@ -310,6 +310,9 @@ func (s *Server) Start() error {
+ 		return fmt.Errorf("failed to start HTTP server: server not initialized")
+ 	}
+ 
++	rebalanceCtx, stopRebalance := context.WithCancel(context.Background())
++	defer stopRebalance()
++	go s.handlers.AuthManager.WatchQuotaRebalances(rebalanceCtx)
+ 	addr := s.server.Addr
+ 	listener, errListen := net.Listen("tcp", addr)
+ 	if errListen != nil {
+diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
+index c5139fa2..ef459b1b 100644
+--- a/internal/api/server_management_v8.go
++++ b/internal/api/server_management_v8.go
+@@ -27,6 +27,8 @@ func (s *Server) registerManagementV8Routes() {
+ 	v8.GET("/access/api-key-names", s.mgmt.GetAPIKeyNames)
+ 	v8.PATCH("/access/api-key-names", s.mgmt.PatchAPIKeyNames)
+ 	v8.GET("/quota/observations", s.mgmt.GetQuotaObservations)
++	v8.GET("/sessions/rebalances", s.mgmt.GetSessionRebalances)
++	v8.POST("/sessions/rebalances", s.mgmt.PostSessionRebalance)
+ 	v8.GET("/quota/policies", s.mgmt.GetQuotaPolicies)
+ 	v8.PUT("/quota/policies", s.mgmt.PutQuotaPolicy)
+ 	v8.GET("/live", s.mgmt.GetLiveStats)
+diff --git a/internal/quotatraffic/policy.go b/internal/quotatraffic/policy.go
+index de07ad9a..70b4de67 100644
+--- a/internal/quotatraffic/policy.go
++++ b/internal/quotatraffic/policy.go
+@@ -31,27 +31,44 @@ type WindowPolicy struct {
+ 	Reason     string    `json:"reason"`
+ }
+ 
++type RebalanceSettings struct {
++	RebalanceSessions   bool `json:"rebalance_sessions"`
++	ReconnectWebsockets bool `json:"reconnect_websockets"`
++}
++
++func DefaultRebalanceSettings() RebalanceSettings { return RebalanceSettings{RebalanceSessions: true} }
++
++type policyFile struct {
++	Version           int                           `json:"version"`
++	Policies          map[string]map[string]float64 `json:"policies"`
++	RebalanceSettings map[string]RebalanceSettings  `json:"rebalance_settings"`
++}
++
+ type PolicyState struct {
+-	AuthIndex        string             `json:"auth_index"`
+-	Provider         string             `json:"provider"`
+-	ManuallyDisabled bool               `json:"manually_disabled"`
+-	Thresholds       map[string]float64 `json:"thresholds"`
+-	Windows          []WindowPolicy     `json:"windows"`
+-	Excluded         bool               `json:"excluded"`
+-	Reason           string             `json:"reason"`
++	RebalanceSettings RebalanceSettings  `json:"rebalance_settings"`
++	AuthIndex         string             `json:"auth_index"`
++	Provider          string             `json:"provider"`
++	ManuallyDisabled  bool               `json:"manually_disabled"`
++	Thresholds        map[string]float64 `json:"thresholds"`
++	Windows           []WindowPolicy     `json:"windows"`
++	Excluded          bool               `json:"excluded"`
++	Reason            string             `json:"reason"`
+ }
+ 
+ type PolicyStore struct {
+ 	mu       sync.RWMutex
+ 	path     string
+ 	settings map[string]map[string]float64
++	behavior map[string]RebalanceSettings
+ }
+ 
+ // Settings belong to CPA so every consumer, retry and pinned transport sees the
+ // same policy even when Keeper is offline. No credential or provider body is stored.
+ var RoutingPolicies = NewPolicyStore()
+ 
+-func NewPolicyStore() *PolicyStore            { return &PolicyStore{settings: map[string]map[string]float64{}} }
++func NewPolicyStore() *PolicyStore {
++	return &PolicyStore{settings: map[string]map[string]float64{}, behavior: map[string]RebalanceSettings{}}
++}
+ func policyKey(index, provider string) string { return provider + ":" + index }
+ 
+ func validThresholds(values map[string]float64) bool {
+@@ -73,11 +90,25 @@ func (s *PolicyStore) Load(filename string) error {
+ 	defer s.mu.Unlock()
+ 	data, err := os.ReadFile(filename)
+ 	settings := map[string]map[string]float64{}
++	behavior := map[string]RebalanceSettings{}
+ 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+ 		return fmt.Errorf("read quota policy file: %w", err)
+ 	}
+ 	if err == nil {
+-		if json.Unmarshal(data, &settings) != nil || settings == nil || len(settings) > 4096 {
++		var envelope map[string]json.RawMessage
++		if json.Unmarshal(data, &envelope) != nil {
++			return errors.New("invalid quota policy file")
++		}
++		if _, versioned := envelope["version"]; versioned {
++			var file policyFile
++			if json.Unmarshal(data, &file) != nil || file.Version != 2 || file.RebalanceSettings == nil {
++				return errors.New("invalid quota policy file")
++			}
++			settings, behavior = file.Policies, file.RebalanceSettings
++		} else if json.Unmarshal(data, &settings) != nil {
++			return errors.New("invalid quota policy file")
++		}
++		if settings == nil || len(settings) > 4096 || len(behavior) > 4096 {
+ 			return errors.New("invalid quota policy file")
+ 		}
+ 		for key, v := range settings {
+@@ -87,6 +118,13 @@ func (s *PolicyStore) Load(filename string) error {
+ 			}
+ 		}
+ 	}
++	for key := range behavior {
++		provider, index, ok := strings.Cut(key, ":")
++		if !ok || index == "" || (provider != "codex" && provider != "claude") {
++			return errors.New("invalid quota policy file")
++		}
++	}
++	s.behavior = behavior
+ 	s.path = filename
+ 	s.settings = settings
+ 	return nil
+@@ -102,17 +140,35 @@ func (s *PolicyStore) Thresholds(index, provider string) map[string]float64 {
+ 	return out
+ }
+ 
++func (s *PolicyStore) RebalanceSettings(index, provider string) RebalanceSettings {
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++	return s.rebalanceSettingsLocked(policyKey(index, provider))
++}
++func (s *PolicyStore) rebalanceSettingsLocked(key string) RebalanceSettings {
++	if value, ok := s.behavior[key]; ok {
++		return value
++	}
++	return DefaultRebalanceSettings()
++}
++
+ // Set commits to disk before publishing to readers. Failed persistence keeps the
+ // old policy active; replacing one account never overwrites another's settings.
+ var ErrPolicyChanged = errors.New("quota policy changed")
+ 
+ func (s *PolicyStore) Set(index, provider string, values map[string]float64) error {
+-	return s.set(index, provider, values, nil)
++	return s.set(index, provider, values, nil, nil, nil)
+ }
+ func (s *PolicyStore) CompareAndSet(index, provider string, values, expected map[string]float64) error {
+-	return s.set(index, provider, values, &expected)
++	return s.set(index, provider, values, &expected, nil, nil)
++}
++func (s *PolicyStore) CompareAndSetWithRebalance(index, provider string, values, expected map[string]float64, behavior, expectedBehavior *RebalanceSettings) error {
++	if behavior != nil && expectedBehavior == nil {
++		return errors.New("expected rebalance settings required")
++	}
++	return s.set(index, provider, values, &expected, behavior, expectedBehavior)
+ }
+-func (s *PolicyStore) set(index, provider string, values map[string]float64, expected *map[string]float64) error {
++func (s *PolicyStore) set(index, provider string, values map[string]float64, expected *map[string]float64, behavior, expectedBehavior *RebalanceSettings) error {
+ 	if index == "" || (provider != "codex" && provider != "claude") || !validThresholds(values) {
+ 		return errors.New("invalid quota policy")
+ 	}
+@@ -126,6 +182,16 @@ func (s *PolicyStore) set(index, provider string, values map[string]float64, exp
+ 			}
+ 		}
+ 	}
++	if expectedBehavior != nil && s.rebalanceSettingsLocked(policyKey(index, provider)) != *expectedBehavior {
++		return ErrPolicyChanged
++	}
++	nextBehavior := make(map[string]RebalanceSettings, len(s.behavior)+1)
++	for k, v := range s.behavior {
++		nextBehavior[k] = v
++	}
++	if behavior != nil {
++		nextBehavior[policyKey(index, provider)] = *behavior
++	}
+ 	next := make(map[string]map[string]float64, len(s.settings)+1)
+ 	for k, v := range s.settings {
+ 		next[k] = v
+@@ -146,7 +212,7 @@ func (s *PolicyStore) set(index, provider string, values map[string]float64, exp
+ 	if s.path == "" {
+ 		return errors.New("quota policy persistence is unavailable")
+ 	}
+-	data, err := json.MarshalIndent(next, "", "  ")
++	data, err := json.MarshalIndent(policyFile{Version: 2, Policies: next, RebalanceSettings: nextBehavior}, "", "  ")
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -173,6 +239,7 @@ func (s *PolicyStore) set(index, provider string, values map[string]float64, exp
+ 		return err
+ 	}
+ 	s.settings = next
++	s.behavior = nextBehavior
+ 	live.Default.Publish("quota")
+ 	return nil
+ }
+@@ -250,7 +317,7 @@ func observationWindow(o Observation) (WindowPolicy, bool) {
+ // limits: this intentionally needs no guessing about provider model aliases.
+ func (s *PolicyStore) State(index, provider string, now time.Time) PolicyState {
+ 	thresholds := s.Thresholds(index, provider)
+-	state := PolicyState{AuthIndex: index, Provider: provider, Thresholds: thresholds, Windows: []WindowPolicy{}}
++	state := PolicyState{RebalanceSettings: s.RebalanceSettings(index, provider), AuthIndex: index, Provider: provider, Thresholds: thresholds, Windows: []WindowPolicy{}}
+ 	windows := map[string]WindowPolicy{}
+ 	for _, o := range Read(map[string]bool{index: true}) {
+ 		if o.Provider == provider {
+diff --git a/internal/quotatraffic/rebalance_settings_test.go b/internal/quotatraffic/rebalance_settings_test.go
+new file mode 100644
+index 00000000..4adac588
+--- /dev/null
++++ b/internal/quotatraffic/rebalance_settings_test.go
+@@ -0,0 +1,41 @@
++package quotatraffic
++
++import (
++	"errors"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestRebalanceSettingsMigrationPersistenceAndConflict(t *testing.T) {
++	file := filepath.Join(t.TempDir(), "policy.json")
++	if err := os.WriteFile(file, []byte(`{"codex:a":{"window":10}}`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	s := NewPolicyStore()
++	if err := s.Load(file); err != nil {
++		t.Fatal(err)
++	}
++	initial := s.RebalanceSettings("a", "codex")
++	if !initial.RebalanceSessions || initial.ReconnectWebsockets {
++		t.Fatal(initial)
++	}
++	opted := RebalanceSettings{true, true}
++	values := map[string]float64{"window": 10}
++	if err := s.CompareAndSetWithRebalance("a", "codex", values, values, &opted, &initial); err != nil {
++		t.Fatal(err)
++	}
++	if err := s.CompareAndSetWithRebalance("a", "codex", values, values, &initial, &initial); !errors.Is(err, ErrPolicyChanged) {
++		t.Fatal("stale behavior overwrite", err)
++	}
++	if err := s.Set("a", "codex", map[string]float64{}); err != nil {
++		t.Fatal(err)
++	}
++	reopened := NewPolicyStore()
++	if err := reopened.Load(file); err != nil {
++		t.Fatal(err)
++	}
++	if reopened.RebalanceSettings("a", "codex") != opted {
++		t.Fatal("old request or threshold clearing lost preferences")
++	}
++}
+diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
+index faa656b9..27d06287 100644
+--- a/internal/runtime/executor/codex_websockets_duplex.go
++++ b/internal/runtime/executor/codex_websockets_duplex.go
+@@ -307,7 +307,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 		}
+ 		processCreatePayload := func(payload []byte) bool {
+ 			consumedPayload = payload
+-			if !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
++			cliproxyauth.CheckSessionRebalanceQuota(ctx)
++			if !cliproxyauth.SessionRebalanceDraining(ctx) && !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
+ 				return rejectQuotaPolicy()
+ 			}
+ 			if allowed, keepOpen := authorizePayload(payload, false); !allowed {
+@@ -469,7 +470,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 				}
+ 				switch gjson.GetBytes(payload, "type").String() {
+ 				case "response.steer":
+-					if !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
++					cliproxyauth.CheckSessionRebalanceQuota(ctx)
++					if !cliproxyauth.SessionRebalanceDraining(ctx) && !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
+ 						if !rejectQuotaPolicy() {
+ 							return
+ 						}
+@@ -543,7 +545,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 					continue
+ 
+ 				case "response.create", "response.append":
+-					if !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
++					cliproxyauth.CheckSessionRebalanceQuota(ctx)
++					if !cliproxyauth.SessionRebalanceDraining(ctx) && !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
+ 						if !rejectQuotaPolicy() {
+ 							return
+ 						}
+diff --git a/internal/sessionrebalance/rebalance.go b/internal/sessionrebalance/rebalance.go
+new file mode 100644
+index 00000000..75a2c5cd
+--- /dev/null
++++ b/internal/sessionrebalance/rebalance.go
+@@ -0,0 +1,324 @@
++// Package sessionrebalance coordinates conservative, pool-scoped socket draining.
++package sessionrebalance
++
++import (
++	"context"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
++	"github.com/tidwall/gjson"
++	"sync"
++	"time"
++)
++
++type Snapshot struct {
++	ReconnectWebsockets bool      `json:"reconnect_websockets"`
++	AffinityRebalanced  bool      `json:"affinity_rebalanced"`
++	ID                  uint64    `json:"id"`
++	Pool                string    `json:"pool"`
++	Reason              string    `json:"reason"`
++	Rebalanced          int       `json:"sessions_rebalanced"`
++	Waiting             int       `json:"waiting"`
++	WaitingResponses    int       `json:"waiting_for_responses"`
++	WaitingTools        int       `json:"waiting_for_tools"`
++	WaitingProtocol     int       `json:"waiting_for_protocol"`
++	RequestedAt         time.Time `json:"requested_at"`
++}
++type job struct {
++	Snapshot
++	waiting map[*Session]bool
++}
++type Coordinator struct {
++	mu       sync.Mutex
++	sequence uint64
++	epochs   map[string]uint64
++	sessions map[*Session]bool
++	jobs     []*job
++}
++
++var Default = New()
++
++func New() *Coordinator {
++	return &Coordinator{epochs: map[string]uint64{}, sessions: map[*Session]bool{}}
++}
++
++type operation struct{ event, kind, response, parent, steer string }
++type Session struct {
++	owner *Coordinator
++	born  uint64
++	pools map[string]bool
++	ops   []*operation
++	tools map[string]bool
++	// Ambiguous protocol state waits for disconnect instead of guessing idle.
++	uncertain        bool
++	draining, closed bool
++	close            func()
++}
++
++func (c *Coordinator) Register(close func()) *Session {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	s := &Session{owner: c, born: c.sequence, pools: map[string]bool{}, tools: map[string]bool{}, close: close}
++	c.sessions[s] = true
++	return s
++}
++func (s *Session) SetPool(pool string) {
++	if s == nil || pool == "" {
++		return
++	}
++	c := s.owner
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	s.pools[pool] = true
++	if c.epochs[pool] > s.born {
++		s.draining = true
++		for _, j := range c.jobs {
++			if j.ReconnectWebsockets && j.Pool == pool && j.ID > s.born && !s.closed {
++				j.waiting[s] = true
++			}
++		}
++	}
++	s.finishLocked()
++}
++func (s *Session) Draining() bool {
++	if s == nil {
++		return false
++	}
++	s.owner.mu.Lock()
++	defer s.owner.mu.Unlock()
++	return s.draining && !s.closed
++}
++func (s *Session) Unregister() {
++	if s == nil {
++		return
++	}
++	c := s.owner
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	delete(c.sessions, s)
++	for _, j := range c.jobs {
++		delete(j.waiting, s)
++	}
++	live.Default.Publish("rebalance")
++}
++func (c *Coordinator) Request(pool, reason string, reconnect ...bool) Snapshot {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	c.sequence++
++	retire := len(reconnect) == 0 || reconnect[0]
++	if retire {
++		c.epochs[pool] = c.sequence
++	}
++	j := &job{Snapshot: Snapshot{ReconnectWebsockets: retire, AffinityRebalanced: true, ID: c.sequence, Pool: pool, Reason: reason, RequestedAt: time.Now()}, waiting: map[*Session]bool{}}
++	// A newer request supersedes progress for this pool; the sessions keep draining.
++	retained := c.jobs[:0]
++	for _, old := range c.jobs {
++		if old.Pool != pool || (!retire && len(old.waiting) > 0) {
++			retained = append(retained, old)
++		}
++	}
++	c.jobs = append(retained, j)
++	// Completed history is bounded; active drains are retained.
++	if len(c.jobs) > 64 {
++		for i, old := range c.jobs {
++			if len(old.waiting) == 0 && old != j {
++				c.jobs = append(c.jobs[:i], c.jobs[i+1:]...)
++				break
++			}
++		}
++	}
++	for s := range c.sessions {
++		if retire && s.pools[pool] && !s.closed {
++			s.draining = true
++			j.waiting[s] = true
++			s.finishLocked()
++		}
++	}
++	live.Default.Publish("rebalance")
++	return j.snapshot()
++}
++func (j *job) snapshot() Snapshot {
++	v := j.Snapshot
++	v.Waiting = len(j.waiting)
++	for s := range j.waiting {
++		if len(s.ops) > 0 {
++			v.WaitingResponses++
++		}
++		if len(s.tools) > 0 {
++			v.WaitingTools++
++		}
++		if s.uncertain {
++			v.WaitingProtocol++
++		}
++	}
++	return v
++}
++func (c *Coordinator) Snapshots() []Snapshot {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	out := make([]Snapshot, 0, len(c.jobs))
++	for _, j := range c.jobs {
++		out = append(out, j.snapshot())
++	}
++	return out
++}
++func (s *Session) finishLocked() {
++	if !s.draining || s.closed || s.uncertain || len(s.ops) > 0 || len(s.tools) > 0 {
++		return
++	}
++	s.closed = true
++	for _, j := range s.owner.jobs {
++		if j.waiting[s] {
++			delete(j.waiting, s)
++			j.Rebalanced++
++		}
++	}
++	// Fence admission before closing. The callback serializes its close frame
++	// behind the final successful downstream data write.
++	go s.close()
++	live.Default.Publish("rebalance")
++}
++
++// Input runs before enqueueing: queued creates prevent idle retirement.
++func (s *Session) Input(payload []byte) bool {
++	if s == nil {
++		return true
++	}
++	c := s.owner
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if s.closed {
++		return false
++	}
++	kind := gjson.GetBytes(payload, "type").String()
++	if kind != "response.create" && kind != "response.append" && kind != "response.steer" {
++		return true
++	}
++	if len(s.ops) >= 256 {
++		s.uncertain = true
++		return true
++	}
++	s.ops = append(s.ops, &operation{event: gjson.GetBytes(payload, "event_id").String(), kind: kind, parent: gjson.GetBytes(payload, "previous_response_id").String()})
++	gjson.GetBytes(payload, "input").ForEach(func(_, item gjson.Result) bool {
++		if item.Get("type").String() == "function_call_output" || item.Get("type").String() == "custom_tool_call_output" {
++			delete(s.tools, item.Get("call_id").String())
++		}
++		return true
++	})
++	return true
++}
++
++// Output runs after delivery. Ambiguous errors conservatively block retirement.
++func (s *Session) Output(payload []byte) {
++	if s == nil {
++		return
++	}
++	c := s.owner
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	kind := gjson.GetBytes(payload, "type").String()
++	id := gjson.GetBytes(payload, "response.id").String()
++	switch kind {
++	case "response.created":
++		var op *operation
++		for _, o := range s.ops {
++			if o.kind != "response.steer" && o.response == "" {
++				op = o
++				break
++			}
++		}
++		if op == nil {
++			op = &operation{kind: "automatic"}
++			s.ops = append(s.ops, op)
++		}
++		op.response = id
++		parent := gjson.GetBytes(payload, "response.previous_response_id").String()
++		for _, o := range s.ops {
++			if o.kind == "response.steer" && o.steer != "" && (parent == "" || o.parent == parent) {
++				o.response = id
++			}
++		}
++	case "response.steer.accepted":
++		for _, o := range s.ops {
++			if o.kind == "response.steer" && o.steer == "" {
++				o.steer = gjson.GetBytes(payload, "steer.id").String()
++				if parent := gjson.GetBytes(payload, "steer.previous_response_id").String(); parent != "" {
++					o.parent = parent
++				}
++				break
++			}
++		}
++	case "response.steer.failed":
++		event := gjson.GetBytes(payload, "error.event_id").String()
++		steer := gjson.GetBytes(payload, "steer.id").String()
++		for i, o := range s.ops {
++			if o.kind == "response.steer" && ((steer != "" && o.steer == steer) || (event != "" && o.event == event)) {
++				s.ops = append(s.ops[:i], s.ops[i+1:]...)
++				break
++			}
++		}
++	case "response.output_item.done":
++		s.observeTool(gjson.GetBytes(payload, "item"))
++	case "response.completed", "response.done", "response.incomplete", "response.failed", "error":
++		gjson.GetBytes(payload, "response.output").ForEach(func(_, item gjson.Result) bool { s.observeTool(item); return true })
++		if id == "" {
++			id = gjson.GetBytes(payload, "response_id").String()
++		}
++		event := gjson.GetBytes(payload, "error.event_id").String()
++		matched := false
++		keep := s.ops[:0]
++		for _, o := range s.ops {
++			done := (id != "" && o.response == id) || (event != "" && o.event == event)
++			if done {
++				matched = true
++			} else {
++				keep = append(keep, o)
++			}
++		}
++		s.ops = keep
++		if !matched {
++			if len(s.ops) == 1 && s.ops[0].kind != "response.steer" && s.ops[0].response == "" {
++				s.ops = nil
++			} else if len(s.ops) > 0 {
++				s.uncertain = true
++			}
++		}
++	}
++	s.finishLocked()
++}
++func (s *Session) observeTool(item gjson.Result) {
++	kind := item.Get("type").String()
++	if kind == "function_call" || kind == "custom_tool_call" {
++		if id := item.Get("call_id").String(); id != "" {
++			if len(s.tools) >= 4096 {
++				s.uncertain = true
++			} else {
++				s.tools[id] = true
++			}
++		}
++	}
++}
++
++type contextKey struct{}
++
++func WithSession(ctx context.Context, s *Session) context.Context {
++	return context.WithValue(ctx, contextKey{}, s)
++}
++func FromContext(ctx context.Context) *Session {
++	if ctx == nil {
++		return nil
++	}
++	s, _ := ctx.Value(contextKey{}).(*Session)
++	return s
++}
++
++type quotaCheckKey struct{}
++
++func WithQuotaCheck(ctx context.Context, check func()) context.Context {
++	return context.WithValue(ctx, quotaCheckKey{}, check)
++}
++func CheckQuota(ctx context.Context) {
++	if ctx != nil {
++		if check, ok := ctx.Value(quotaCheckKey{}).(func()); ok {
++			check()
++		}
++	}
++}
+diff --git a/internal/sessionrebalance/rebalance_test.go b/internal/sessionrebalance/rebalance_test.go
+new file mode 100644
+index 00000000..71b1073d
+--- /dev/null
++++ b/internal/sessionrebalance/rebalance_test.go
+@@ -0,0 +1,140 @@
++package sessionrebalance
++
++import (
++	"sync"
++	"testing"
++	"time"
++)
++
++func assertNotClosed(t *testing.T, ch <-chan struct{}) {
++	t.Helper()
++	select {
++	case <-ch:
++		t.Fatal("closed before safe boundary")
++	default:
++	}
++}
++func assertClosed(t *testing.T, ch <-chan struct{}) {
++	t.Helper()
++	select {
++	case <-ch:
++	case <-time.After(time.Second):
++		t.Fatal("safe session not closed")
++	}
++}
++func TestSessionRebalanceDrainsToolsAndQueuedCreates(t *testing.T) {
++	c := New()
++	closed := make(chan struct{})
++	s := c.Register(func() { close(closed) })
++	defer s.Unregister()
++	s.Input([]byte(`{"type":"response.create","event_id":"one"}`))
++	s.SetPool("codex")
++	s.Output([]byte(`{"type":"response.created","response":{"id":"r1"}}`))
++	j := c.Request("codex", "priority_saved")
++	if j.Waiting != 1 || j.Rebalanced != 0 {
++		t.Fatal(j)
++	}
++	s.Output([]byte(`{"type":"response.completed","response":{"id":"r1","output":[{"type":"function_call","call_id":"tool1"},{"type":"custom_tool_call","call_id":"tool2"}]}}`))
++	assertNotClosed(t, closed)
++	s.Input([]byte(`{"type":"response.create","event_id":"two","previous_response_id":"r1","input":[{"type":"function_call_output","call_id":"tool1"}]}`))
++	s.Output([]byte(`{"type":"response.created","response":{"id":"r2"}}`))
++	s.Output([]byte(`{"type":"response.completed","response":{"id":"r2","output":[]}}`))
++	assertNotClosed(t, closed)
++	s.Input([]byte(`{"type":"response.create","event_id":"three","input":[{"type":"custom_tool_call_output","call_id":"tool2"}]}`))
++	s.Input([]byte(`{"type":"response.create","event_id":"four"}`))
++	s.Output([]byte(`{"type":"response.created","response":{"id":"r3"}}`))
++	s.Output([]byte(`{"type":"response.completed","response":{"id":"r3","output":[]}}`))
++	assertNotClosed(t, closed)
++	s.Output([]byte(`{"type":"error","error":{"event_id":"four"}}`))
++	assertClosed(t, closed)
++	if s.Input([]byte(`{"type":"response.create"}`)) {
++		t.Fatal("admitted input after retirement")
++	}
++	j = c.Snapshots()[0]
++	if j.Rebalanced != 1 || j.Waiting != 0 {
++		t.Fatal(j)
++	}
++}
++func TestSessionRebalancePoolScopeAndLateSelection(t *testing.T) {
++	c := New()
++	one, two, other, late := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
++	a := c.Register(func() { close(one) })
++	a.SetPool("codex")
++	b := c.Register(func() { close(two) })
++	b.SetPool("codex")
++	x := c.Register(func() { close(other) })
++	x.SetPool("claude")
++	l := c.Register(func() { close(late) })
++	l.Input([]byte(`{"type":"response.create"}`))
++	c.Request("codex", "priority_saved")
++	assertClosed(t, one)
++	assertClosed(t, two)
++	assertNotClosed(t, other)
++	l.SetPool("codex")
++	assertNotClosed(t, late)
++	l.Output([]byte(`{"type":"response.completed","response":{"id":"late"}}`))
++	assertClosed(t, late)
++	fresh := c.Register(func() { t.Error("new session retired by old request") })
++	fresh.SetPool("codex")
++	for _, s := range []*Session{a, b, x, l, fresh} {
++		s.Unregister()
++	}
++}
++func TestSessionRebalanceAcceptedSteerWaitsForSuccessor(t *testing.T) {
++	c := New()
++	closed := make(chan struct{})
++	s := c.Register(func() { close(closed) })
++	defer s.Unregister()
++	s.Input([]byte(`{"type":"response.create"}`))
++	s.SetPool("codex")
++	s.Output([]byte(`{"type":"response.created","response":{"id":"r1"}}`))
++	s.Input([]byte(`{"type":"response.steer","event_id":"steer","previous_response_id":"r1"}`))
++	c.Request("codex", "quota_policy_excluded")
++	s.Output([]byte(`{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r1"}}`))
++	s.Output([]byte(`{"type":"response.completed","response":{"id":"r1"}}`))
++	assertNotClosed(t, closed)
++	s.Output([]byte(`{"type":"response.created","response":{"id":"r2","previous_response_id":"r1"}}`))
++	s.Output([]byte(`{"type":"response.completed","response":{"id":"r2"}}`))
++	assertClosed(t, closed)
++}
++func TestSessionRebalanceConcurrentAdmission(t *testing.T) {
++	for range 100 {
++		c := New()
++		closed := make(chan struct{})
++		s := c.Register(func() { close(closed) })
++		s.SetPool("codex")
++		var admitted bool
++		var wg sync.WaitGroup
++		wg.Add(2)
++		go func() { defer wg.Done(); admitted = s.Input([]byte(`{"type":"response.create","event_id":"race"}`)) }()
++		go func() { defer wg.Done(); c.Request("codex", "priority_saved") }()
++		wg.Wait()
++		if admitted {
++			assertNotClosed(t, closed)
++			s.Output([]byte(`{"type":"error","error":{"event_id":"race"}}`))
++		}
++		assertClosed(t, closed)
++		s.Unregister()
++	}
++}
++
++func TestAffinityOnlyDoesNotDrainOrRetireSockets(t *testing.T) {
++	c := New()
++	closed := make(chan struct{}, 1)
++	s := c.Register(func() { closed <- struct{}{} })
++	defer s.Unregister()
++	s.SetPool("codex")
++	snapshot := c.Request("codex", "priority_saved", false)
++	if snapshot.Waiting != 0 || snapshot.Rebalanced != 0 || snapshot.ReconnectWebsockets || !snapshot.AffinityRebalanced || s.Draining() {
++		t.Fatal(snapshot)
++	}
++	s.SetPool("codex")
++	if !s.Input([]byte(`{"type":"response.create"}`)) {
++		t.Fatal("affinity reset fenced socket admission")
++	}
++	select {
++	case <-closed:
++		t.Fatal("affinity reset closed socket")
++	default:
++	}
++}
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index f2fa2a0e..76c7e3d1 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/gorilla/websocket"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/sessionrebalance"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+@@ -121,9 +122,10 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
+ }
+ 
+ type responsesWebsocketWriter struct {
+-	conn    *websocket.Conn
+-	writeMu sync.Mutex
+-	closing atomic.Bool
++	conn      *websocket.Conn
++	writeMu   sync.Mutex
++	closing   atomic.Bool
++	rebalance *sessionrebalance.Session
+ }
+ 
+ func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
+@@ -355,10 +357,25 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 	}
+ 	writer := newResponsesWebsocketWriter(conn)
+ 	passthroughSessionID := uuid.NewString()
++	writer.rebalance = sessionrebalance.Default.Register(func() {
++		writer.writeMu.Lock()
++		defer writer.writeMu.Unlock()
++		if writer.closing.CompareAndSwap(false, true) {
++			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "Session rebalanced; reconnect with full context"), time.Now().Add(5*time.Second))
++			_ = conn.Close()
++		}
++	})
++	defer writer.rebalance.Unregister()
+ 	// After the upgrade, error-only HTTP logs cannot consume deferred bodies.
+ 	// Apply the policy before routing so plugin callbacks inherit it as well.
+ 	socketCtx, cancelSocket := context.WithCancelCause(logging.WithDeferredAPIRequestCaptureDisabled(c.Request.Context()))
+ 	defer cancelSocket(nil)
++	socketCtx = sessionrebalance.WithSession(socketCtx, writer.rebalance)
++	socketCtx = sessionrebalance.WithQuotaCheck(socketCtx, func() {
++		if h != nil && h.AuthManager != nil {
++			h.AuthManager.CheckQuotaRebalances(nil, time.Now())
++		}
++	})
+ 	c.Request = c.Request.WithContext(socketCtx)
+ 	upgradeRequest := c.Request.Clone(socketCtx)
+ 	// The reader owns the client socket so an in-flight interrupt is not stuck
+@@ -606,9 +623,10 @@ requestLoop:
+ 		)
+ 		pluginExecutorID := handlers.PreparedStreamPluginExecutor(executionParent)
+ 		isPluginExecutorRoute := pluginExecutorID != ""
++		sessionrebalance.CheckQuota(socketCtx)
+ 		if pinnedAuthID != "" {
+ 			pinnedAuth, homeRuntime, ok := sessionAuthByIDWithSource(pinnedAuthID)
+-			if ok && pinnedAuth != nil && !coreauth.QuotaPolicyAllows(pinnedAuth, time.Now()) {
++			if ok && pinnedAuth != nil && !writer.rebalance.Draining() && !coreauth.QuotaPolicyAllows(pinnedAuth, time.Now()) {
+ 				if errWrite := writeResponsesWebsocketQuotaPolicyExcluded(writer, wsTimelineLog, payload); errWrite != nil {
+ 					wsTerminateErr = errWrite
+ 					return
+@@ -620,7 +638,7 @@ requestLoop:
+ 				providerKey = strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
+ 			}
+ 			state, hasState := pinnedAuthByProvider[providerKey]
+-			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, requestModelName, state.modelKey, homeRuntime) {
++			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, requestModelName, state.modelKey, homeRuntime, writer.rebalance.Draining()) {
+ 				pinnedAuthID = ""
+ 			}
+ 		}
+@@ -630,14 +648,14 @@ requestLoop:
+ 				for providerKey := range providerSet {
+ 					state, ok := pinnedAuthByProvider[providerKey]
+ 					candidateAuth, homeRuntime, okAuth := sessionAuthByIDWithSource(state.authID)
+-					if ok && okAuth && candidateAuth != nil && !coreauth.QuotaPolicyAllows(candidateAuth, time.Now()) {
++					if ok && okAuth && candidateAuth != nil && !writer.rebalance.Draining() && !coreauth.QuotaPolicyAllows(candidateAuth, time.Now()) {
+ 						if errWrite := writeResponsesWebsocketQuotaPolicyExcluded(writer, wsTimelineLog, payload); errWrite != nil {
+ 							wsTerminateErr = errWrite
+ 							return
+ 						}
+ 						continue requestLoop
+ 					}
+-					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime) {
++					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime, writer.rebalance.Draining()) {
+ 						pinnedAuthID = state.authID
+ 					} else {
+ 						delete(pinnedAuthByProvider, providerKey)
+@@ -925,6 +943,7 @@ requestLoop:
+ 			if !ok || selectedAuth == nil {
+ 				return
+ 			}
++			writer.rebalance.SetPool(coreauth.SessionRebalancePool(selectedAuth))
+ 			attemptedUpstreamMode = upstreamModeForAuth(selectedAuth)
+ 			codexDuplexStream.Store(duplexInput != nil && attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
+ 			preserveNativeOutput.Store(nativeRequest && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_input.go b/sdk/api/handlers/openai/openai_responses_websocket_input.go
+index 5ea827eb..be60f283 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_input.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_input.go
+@@ -193,6 +193,9 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
+ 					continue
+ 				}
+ 			}
++			if !writer.rebalance.Input(payload) {
++				return
++			}
+ 			message := cliproxyexecutor.WebsocketInput{Payload: payload, Epoch: msgEpoch}
+ 			select {
+ 			case input <- message:
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_session.go b/sdk/api/handlers/openai/openai_responses_websocket_session.go
+index 7a5a0aae..cd78dbc0 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_session.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_session.go
+@@ -131,7 +131,7 @@ func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {
+ 	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
+ }
+ 
+-func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName string, pinnedModelKey string, homeRuntime bool) bool {
++func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName string, pinnedModelKey string, homeRuntime bool, draining ...bool) bool {
+ 	if auth == nil {
+ 		return false
+ 	}
+@@ -142,7 +142,7 @@ func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName str
+ 			return false
+ 		}
+ 	}
+-	if !responsesWebsocketAuthAvailableForModel(auth, modelKey, time.Now()) {
++	if !responsesWebsocketAuthAvailableForModel(auth, modelKey, time.Now(), draining...) {
+ 		return false
+ 	}
+ 
+@@ -207,8 +207,8 @@ func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
+ 	return strings.EqualFold(strings.TrimSpace(auth.Provider), "codex")
+ }
+ 
+-func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {
+-	if auth == nil || !coreauth.QuotaPolicyAllows(auth, now) {
++func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time, draining ...bool) bool {
++	if auth == nil || (!(len(draining) > 0 && draining[0]) && !coreauth.QuotaPolicyAllows(auth, now)) {
+ 		return false
+ 	}
+ 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
+index 70ee202e..6931c648 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
+@@ -303,7 +303,11 @@ func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimeline
+ 	if writer.closing.Load() {
+ 		return websocket.ErrCloseSent
+ 	}
+-	return writer.conn.WriteMessage(websocket.TextMessage, payload)
++	errWrite := writer.conn.WriteMessage(websocket.TextMessage, payload)
++	if errWrite == nil {
++		writer.rebalance.Output(payload)
++	}
++	return errWrite
+ }
+ 
+ func appendWebsocketTimelineDisconnect(timeline websocketTimelineAppender, err error, timestamp time.Time) {
+diff --git a/sdk/cliproxy/auth/conductor.go b/sdk/cliproxy/auth/conductor.go
+index 3f485fcf..c073d1f9 100644
+--- a/sdk/cliproxy/auth/conductor.go
++++ b/sdk/cliproxy/auth/conductor.go
+@@ -172,6 +172,9 @@ type resultPolicyHolder struct {
+ 
+ // Manager orchestrates auth lifecycle, selection, execution, and persistence.
+ type Manager struct {
++	quotaRebalanceMu          sync.Mutex
++	quotaRebalancePrevious    map[string]bool
++	quotaRecoveryState        *quotaRebalanceState
+ 	store                     Store
+ 	cooldownStore             CooldownStateStore
+ 	pendingCooldownStateStore CooldownStateStore
+diff --git a/sdk/cliproxy/auth/conductor_selection.go b/sdk/cliproxy/auth/conductor_selection.go
+index 246f0963..137e8d60 100644
+--- a/sdk/cliproxy/auth/conductor_selection.go
++++ b/sdk/cliproxy/auth/conductor_selection.go
+@@ -84,6 +84,8 @@ type requiredAuthKindContextKey struct{}
+ type credentialPolicyContextKey struct{}
+ 
+ type authSelectionEligibility struct {
++	drainAuthID      string
++	drainAllowed     func() bool
+ 	requiredKind     string
+ 	credentialPolicy string
+ 	disallowFreeAuth bool
+@@ -107,6 +109,10 @@ func credentialPolicyFromContext(ctx context.Context) string {
+ 
+ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
+ 	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
++	if SessionRebalanceDraining(ctx) {
++		eligibility.drainAuthID = pinnedAuthIDFromMetadata(opts.Metadata)
++		eligibility.drainAllowed = func() bool { return SessionRebalanceDraining(ctx) }
++	}
+ 	if ctx != nil {
+ 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
+ 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
+@@ -1908,6 +1914,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
+ 	}
+ 
+ 	opts.EnsureMetadata()
++	m.stampSessionRebalance(opts)
+ 	clearSchedulerSelectionID(opts.Metadata)
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
+ 
+@@ -1947,6 +1954,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
+ 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+ 			continue
+ 		}
++		candidate = eligibility.forDrain(candidate)
+ 		if !eligibility.allows(candidate) {
+ 			continue
+ 		}
+@@ -2174,6 +2182,7 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
+ 
+ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+ 	opts.EnsureMetadata()
++	m.stampSessionRebalance(opts)
+ 	clearSchedulerSelectionID(opts.Metadata)
+ 	if m.HomeEnabled() {
+ 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
+@@ -2182,7 +2191,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+ 
+-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
++	if SessionRebalanceDraining(ctx) || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+ 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
+ 	}
+ 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+@@ -2193,6 +2202,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
+ 			if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
+ 				continue
+ 			}
++			candidate = eligibility.forDrain(candidate)
+ 			if !eligibility.allows(candidate) {
+ 				continue
+ 			}
+@@ -2241,6 +2251,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
+ 	}
+ 
+ 	opts.EnsureMetadata()
++	m.stampSessionRebalance(opts)
+ 	clearSchedulerSelectionID(opts.Metadata)
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
+ 
+@@ -2286,6 +2297,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
+ 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+ 			continue
+ 		}
++		candidate = eligibility.forDrain(candidate)
+ 		if !eligibility.allows(candidate) {
+ 			continue
+ 		}
+@@ -2363,6 +2375,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
+ 
+ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+ 	opts.EnsureMetadata()
++	m.stampSessionRebalance(opts)
+ 	clearSchedulerSelectionID(opts.Metadata)
+ 	if m.HomeEnabled() {
+ 		return m.pickNextViaHome(ctx, model, opts, tried)
+@@ -2370,7 +2383,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+ 
+-	if m.hasPluginScheduler() || !m.useSchedulerFastPath() {
++	if SessionRebalanceDraining(ctx) || m.hasPluginScheduler() || !m.useSchedulerFastPath() {
+ 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+ 	}
+ 
+@@ -2407,6 +2420,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
+ 			if _, ok := providerSet[canonicalSchedulingProvider(executorKeyFromAuth(candidate))]; !ok {
+ 				continue
+ 			}
++			candidate = eligibility.forDrain(candidate)
+ 			if !eligibility.allows(candidate) {
+ 				continue
+ 			}
+@@ -2525,6 +2539,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
+ 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+ 			continue
+ 		}
++		candidate = eligibility.forDrain(candidate)
+ 		if !eligibility.allows(candidate) {
+ 			continue
+ 		}
+@@ -2555,3 +2570,11 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
+ 		}
+ 	}
+ }
++
++func (e authSelectionEligibility) forDrain(a *Auth) *Auth {
++	if a != nil && e.drainAuthID != "" && a.ID == e.drainAuthID && e.drainAllowed != nil && e.drainAllowed() {
++		a = a.Clone()
++		a.quotaDrainAllowed = e.drainAllowed
++	}
++	return a
++}
+diff --git a/sdk/cliproxy/auth/quota_policy.go b/sdk/cliproxy/auth/quota_policy.go
+index b7417778..c5fe127a 100644
+--- a/sdk/cliproxy/auth/quota_policy.go
++++ b/sdk/cliproxy/auth/quota_policy.go
+@@ -1,11 +1,19 @@
+ package auth
+ 
+ import (
++	"context"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/sessionrebalance"
+ 	"time"
+ )
+ 
+ // QuotaPolicyAllows is an admission check, independent of manual disabled and cooldown state.
+ func QuotaPolicyAllows(auth *Auth, now time.Time) bool {
+-	return auth != nil && quotatraffic.RoutingPolicies.Allows(auth.Index, auth.Provider, now)
++	return auth != nil && ((auth.quotaDrainAllowed != nil && auth.quotaDrainAllowed()) || quotatraffic.RoutingPolicies.Allows(auth.Index, auth.Provider, now))
+ }
++
++func SessionRebalanceDraining(ctx context.Context) bool {
++	return sessionrebalance.FromContext(ctx).Draining()
++}
++
++func CheckSessionRebalanceQuota(ctx context.Context) { sessionrebalance.CheckQuota(ctx) }
+diff --git a/sdk/cliproxy/auth/selector.go b/sdk/cliproxy/auth/selector.go
+index 3e28c38a..f74b11af 100644
+--- a/sdk/cliproxy/auth/selector.go
++++ b/sdk/cliproxy/auth/selector.go
+@@ -913,11 +913,14 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
+ // It extracts session ID from multiple sources and maintains session-to-auth
+ // mappings with automatic failover when the bound auth becomes unavailable.
+ type SessionAffinitySelector struct {
+-	fallback          Selector
+-	cache             *SessionCache
+-	matcher           *cliproxysession.MerklePrefixMatcher
+-	subagentAffinity  bool
+-	rebindOnQuotaOnly bool
++	rebalanceMu        sync.Mutex
++	rebalanceEpoch     uint64
++	authRebalanceEpoch map[string]uint64
++	fallback           Selector
++	cache              *SessionCache
++	matcher            *cliproxysession.MerklePrefixMatcher
++	subagentAffinity   bool
++	rebindOnQuotaOnly  bool
+ }
+ 
+ const (
+@@ -1101,10 +1104,35 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
+ // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
+ // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
+ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
++	s.rebalanceMu.Lock()
++	defer s.rebalanceMu.Unlock()
+ 	entry := selectorLogEntry(ctx)
+ 	if opts.Metadata == nil {
+ 		opts.Metadata = make(map[string]any)
+ 	}
++	epoch, stamped := opts.Metadata["session_rebalance_epoch"].(uint64)
++	if !stamped {
++		epoch = s.rebalanceEpoch
++		opts.Metadata["session_rebalance_epoch"] = epoch
++	}
++	stale := false
++	for _, a := range auths {
++		if a != nil && epoch < s.authRebalanceEpoch[a.ID] {
++			stale = true
++			break
++		}
++	}
++	if stale {
++		available, err := getSelectorAvailableAuths(ctx, auths, provider, model, time.Now())
++		if err != nil {
++			return nil, err
++		}
++		return s.fallback.Pick(ctx, provider, model, opts, available)
++	}
++	if SessionRebalanceDraining(ctx) {
++		opts.Metadata["session_rebalance_draining"] = true
++		return s.fallback.Pick(ctx, provider, model, opts, auths)
++	}
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
+ 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
+ 
+@@ -1661,6 +1689,18 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
+ 
+ // OnResult handles session affinity binding or release based on execution outcome.
+ func (s *SessionAffinitySelector) OnResult(res Result) {
++	if s == nil {
++		return
++	}
++	s.rebalanceMu.Lock()
++	defer s.rebalanceMu.Unlock()
++	if draining, _ := res.Options.Metadata["session_rebalance_draining"].(bool); draining {
++		return
++	}
++	epoch, _ := res.Options.Metadata["session_rebalance_epoch"].(uint64)
++	if epoch < s.authRebalanceEpoch[res.AuthID] {
++		return
++	}
+ 	if s == nil || res.AuthID == "" {
+ 		return
+ 	}
+diff --git a/sdk/cliproxy/auth/session_rebalance.go b/sdk/cliproxy/auth/session_rebalance.go
+new file mode 100644
+index 00000000..c1132222
+--- /dev/null
++++ b/sdk/cliproxy/auth/session_rebalance.go
+@@ -0,0 +1,289 @@
++package auth
++
++import (
++	"context"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/sessionrebalance"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"time"
++)
++
++// A pool is the actual scheduling executor, including named compatibility pools.
++func SessionRebalancePool(a *Auth) string {
++	if a == nil {
++		return ""
++	}
++	return canonicalSchedulingProvider(executorKeyFromAuth(a))
++}
++
++func (m *Manager) RebalanceSessions(pool, reason string, reconnect ...bool) sessionrebalance.Snapshot {
++	ids := []string{}
++	for _, a := range m.List() {
++		if SessionRebalancePool(a) == pool {
++			ids = append(ids, a.ID)
++		}
++	}
++	m.selectorMu.Lock()
++	sel := m.selector
++	m.selectorMu.Unlock()
++	if s, ok := sel.(*SessionAffinitySelector); ok && s != nil {
++		s.rebalanceMu.Lock()
++		defer s.rebalanceMu.Unlock()
++		s.rebalanceEpoch++
++		if s.authRebalanceEpoch == nil {
++			s.authRebalanceEpoch = map[string]uint64{}
++		}
++		for _, id := range ids {
++			s.authRebalanceEpoch[id] = s.rebalanceEpoch
++			s.InvalidateAuth(id)
++		}
++	}
++	retire := len(reconnect) > 0 && reconnect[0]
++	return sessionrebalance.Default.Request(pool, reason, retire)
++}
++
++// Recovery must remain preferable for 30 seconds. Automatic socket retirement is
++// additionally limited to once per pool per two minutes; explicit saves bypass it.
++const quotaRecoveryStability = 30 * time.Second
++const quotaReconnectInterval = 2 * time.Minute
++
++type quotaRecovery struct {
++	since     time.Time
++	websocket bool
++}
++type quotaRebalanceState struct {
++	eligible      map[string]bool
++	pending       map[string]quotaRecovery
++	lastReconnect map[string]time.Time
++}
++
++func (m *Manager) CheckQuotaRebalances(previous map[string]bool, now time.Time) {
++	m.quotaRebalanceMu.Lock()
++	defer m.quotaRebalanceMu.Unlock()
++	if previous == nil {
++		if m.quotaRebalancePrevious == nil {
++			m.quotaRebalancePrevious = map[string]bool{}
++		}
++		previous = m.quotaRebalancePrevious
++	}
++	if m.quotaRecoveryState == nil {
++		m.quotaRecoveryState = &quotaRebalanceState{eligible: map[string]bool{}, pending: map[string]quotaRecovery{}, lastReconnect: map[string]time.Time{}}
++	}
++	state := m.quotaRecoveryState
++	auths := m.List()
++	pools := map[string]bool{}
++	reasons := map[string]string{}
++	seen := map[string]bool{}
++	seenRoutes := map[string]bool{}
++	registryRef := registry.GetGlobalRegistry()
++	for _, a := range auths {
++		if a == nil {
++			continue
++		}
++		key := a.Provider + ":" + a.Index
++		seen[key] = true
++		excluded := !QuotaPolicyAllows(a, now)
++		settings := quotatraffic.RoutingPolicies.RebalanceSettings(a.Index, a.Provider)
++		pool := SessionRebalancePool(a)
++		if excluded && !previous[key] && settings.RebalanceSessions {
++			pools[pool] = pools[pool] || settings.ReconnectWebsockets
++			reasons[pool] = "quota_policy_excluded"
++		}
++		previous[key] = excluded
++		if len(quotatraffic.RoutingPolicies.Thresholds(a.Index, a.Provider)) == 0 {
++			continue
++		}
++		// Use the same model mapping, admission checks, weight exclusions and
++		// WebSocket precedence as normal selection, without selecting or probing.
++		for _, model := range registryRef.GetModelsForClient(a.ID) {
++			if model == nil {
++				continue
++			}
++			routeKey := key + "\x00" + model.ID
++			seenRoutes[routeKey] = true
++			var candidates []*Auth
++			for _, candidate := range auths {
++				if candidate != nil && SessionRebalancePool(candidate) == pool && m.authSupportsRouteModel(registryRef, candidate, model.ID) {
++					candidates = append(candidates, candidate)
++				}
++			}
++			m.selectorMu.Lock()
++			selector := m.selector
++			m.selectorMu.Unlock()
++			weighted := false
++			switch sel := selector.(type) {
++			case *WeightedRoundRobinSelector:
++				weighted = true
++			case *SessionAffinitySelector:
++				_, weighted = sel.fallback.(*WeightedRoundRobinSelector)
++			}
++			if weighted {
++				candidates = positiveWeightAuths(candidates)
++			}
++			available, _ := m.availableAuthsForRouteModelAcrossPriorities(candidates, pool, model.ID, now)
++			eligible := false
++			for _, candidate := range available {
++				if candidate.ID == a.ID {
++					eligible = true
++					break
++				}
++			}
++			was, known := state.eligible[routeKey]
++			state.eligible[routeKey] = eligible
++			if !eligible || !settings.RebalanceSessions {
++				delete(state.pending, routeKey)
++				continue
++			}
++			if known && !was {
++				state.pending[routeKey] = quotaRecovery{}
++			}
++			pending, recovering := state.pending[routeKey]
++			if !recovering {
++				continue
++			}
++			httpPreferred := recoveryImprovesPreference(a, available)
++			websocketCandidates := available
++			if pool == "codex" {
++				var enabled []*Auth
++				for _, candidate := range available {
++					if authWebsocketsEnabled(candidate) {
++						enabled = append(enabled, candidate)
++					}
++				}
++				if len(enabled) > 0 {
++					websocketCandidates = enabled
++				}
++			}
++			websocketPreferred := recoveryImprovesPreference(a, websocketCandidates)
++			// A recovered WS-enabled credential also outranks an HTTP-only pin,
++			// independently of numeric priority, just as the existing scheduler does.
++			if pool == "codex" && authWebsocketsEnabled(a) && recoveryIsHighest(a, websocketCandidates) {
++				for _, candidate := range available {
++					if !authWebsocketsEnabled(candidate) {
++						websocketPreferred = true
++					}
++				}
++			}
++			if !httpPreferred && !websocketPreferred {
++				state.pending[routeKey] = quotaRecovery{}
++				continue
++			}
++			if pending.since.IsZero() || pending.websocket != websocketPreferred {
++				state.pending[routeKey] = quotaRecovery{since: now, websocket: websocketPreferred}
++				continue
++			}
++			if now.Sub(pending.since) < quotaRecoveryStability {
++				continue
++			}
++			// Defer a quick recovery until the reconnect quiet period ends. Keep
++			// the stable recovery pending instead of silently losing the migration.
++			if settings.ReconnectWebsockets && websocketPreferred && !state.lastReconnect[pool].IsZero() && now.Sub(state.lastReconnect[pool]) < quotaReconnectInterval {
++				continue
++			}
++			pools[pool] = pools[pool] || (settings.ReconnectWebsockets && websocketPreferred)
++			if reasons[pool] == "" {
++				reasons[pool] = "quota_policy_recovered"
++			}
++			delete(state.pending, routeKey)
++		}
++	}
++	for key := range previous {
++		if !seen[key] {
++			delete(previous, key)
++		}
++	}
++	for key := range state.eligible {
++		if !seenRoutes[key] {
++			delete(state.eligible, key)
++			delete(state.pending, key)
++		}
++	}
++	for pool, reconnect := range pools {
++		if pool == "" {
++			continue
++		}
++		if reconnect && !state.lastReconnect[pool].IsZero() && now.Sub(state.lastReconnect[pool]) < quotaReconnectInterval {
++			reconnect = false
++		}
++		if reconnect {
++			state.lastReconnect[pool] = now
++		}
++		m.RebalanceSessions(pool, reasons[pool], reconnect)
++	}
++}
++func recoveryIsHighest(a *Auth, available []*Auth) bool {
++	found := false
++	for _, candidate := range available {
++		if candidate.ID == a.ID {
++			found = true
++		}
++		if authPriority(candidate) > authPriority(a) {
++			return false
++		}
++	}
++	return found
++}
++func recoveryImprovesPreference(a *Auth, available []*Auth) bool {
++	if !recoveryIsHighest(a, available) {
++		return false
++	}
++	for _, candidate := range available {
++		if authPriority(candidate) < authPriority(a) {
++			return true
++		}
++	}
++	return false
++}
++
++func (m *Manager) WatchQuotaRebalances(ctx context.Context) {
++	if m == nil {
++		return
++	}
++	var previous map[string]bool
++	sub := live.Default.Subscribe("", false)
++	if sub == nil {
++		return
++	}
++	defer sub.Close()
++	tick := time.NewTicker(time.Second)
++	defer tick.Stop()
++	m.CheckQuotaRebalances(previous, time.Now())
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case <-tick.C:
++			m.CheckQuotaRebalances(previous, time.Now())
++		case <-sub.Wake:
++			for _, topic := range sub.Drain() {
++				if topic == "quota" || topic == "accounts" {
++					m.CheckQuotaRebalances(previous, time.Now())
++					break
++				}
++			}
++		}
++	}
++}
++
++func SessionRebalancePriority(a *Auth) int { return authPriority(a) }
++
++// Stamp before snapshotting candidates. An older request may finish, but may
++// not create affinity using a candidate snapshot read before invalidation.
++func (m *Manager) stampSessionRebalance(opts cliproxyexecutor.Options) {
++	if opts.Metadata == nil {
++		return
++	}
++	if _, ok := opts.Metadata["session_rebalance_epoch"]; ok {
++		return
++	}
++	m.selectorMu.Lock()
++	sel := m.selector
++	m.selectorMu.Unlock()
++	if s, ok := sel.(*SessionAffinitySelector); ok && s != nil {
++		s.rebalanceMu.Lock()
++		opts.Metadata["session_rebalance_epoch"] = s.rebalanceEpoch
++		s.rebalanceMu.Unlock()
++	}
++}
+diff --git a/sdk/cliproxy/auth/session_rebalance_test.go b/sdk/cliproxy/auth/session_rebalance_test.go
+new file mode 100644
+index 00000000..a5192361
+--- /dev/null
++++ b/sdk/cliproxy/auth/session_rebalance_test.go
+@@ -0,0 +1,216 @@
++package auth
++
++import (
++	"context"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/sessionrebalance"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++	"net/http"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestSessionRebalanceClearsWholePoolAndFencesLateResults(t *testing.T) {
++	for _, lcp := range []bool{false, true} {
++		t.Run(map[bool]string{false: "explicit", true: "lcp"}[lcp], func(t *testing.T) {
++			s := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, TTL: time.Hour})
++			defer s.Stop()
++			m := NewManager(nil, s, nil)
++			a := &Auth{ID: "rebalance-a", Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "10"}}
++			b := &Auth{ID: "rebalance-b", Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "0"}}
++			x := &Auth{ID: "rebalance-x", Provider: "claude", Status: StatusActive}
++			for _, auth := range []*Auth{a, b, x} {
++				if _, err := m.Register(WithSkipPersist(context.Background()), auth); err != nil {
++					t.Fatal(err)
++				}
++			}
++			opts := cliproxyexecutor.Options{Headers: http.Header{"Session-Id": {"rebalance-session"}}, Metadata: map[string]any{}}
++			if lcp {
++				opts.Headers = nil
++				opts.SourceFormat = sdktranslator.FormatOpenAI
++				opts.OriginalRequest = []byte(`{"messages":[{"role":"system","content":"stable"},{"role":"user","content":"hello"}]}`)
++				opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey] = "rebalance-scope"
++			}
++			got, err := s.Pick(context.Background(), "codex", "model", opts, []*Auth{a, b})
++			if err != nil || got.ID != a.ID {
++				t.Fatalf("initial: %v %v", got, err)
++			}
++			s.cache.Set("mixed::other::model", b.ID)
++			s.cache.Set("claude::unrelated::model", x.ID)
++			// A plain priority save preserves a previously bound session.
++			a.Attributes["priority"] = "0"
++			b.Attributes["priority"] = "20"
++			got, err = s.Pick(context.Background(), "codex", "model", opts, []*Auth{a, b})
++			if err != nil || got.ID != a.ID {
++				t.Fatalf("plain save broke affinity: %v %v", got, err)
++			}
++			m.RebalanceSessions("codex", "priority_saved")
++			// Simulate selection from a candidate snapshot read before invalidation.
++			if _, err := s.Pick(context.Background(), "codex", "model", opts, []*Auth{a, b}); err != nil {
++				t.Fatal(err)
++			}
++			// Simulate an old request completing after cache invalidation.
++			s.OnResult(Result{AuthID: a.ID, Provider: "codex", Model: "model", Success: true, Options: opts})
++			if _, ok := s.cache.Get("mixed::other::model"); ok {
++				t.Fatal("other account in same pool stayed bound")
++			}
++			if _, ok := s.cache.Get("claude::unrelated::model"); !ok {
++				t.Fatal("unrelated pool cleared")
++			}
++			fresh := opts
++			fresh.Metadata = map[string]any{}
++			if lcp {
++				fresh.Metadata[cliproxyexecutor.CallerScopeMetadataKey] = "rebalance-scope"
++			}
++			got, err = s.Pick(context.Background(), "codex", "model", fresh, []*Auth{a, b})
++			if err != nil || got.ID != b.ID {
++				t.Fatalf("late completion restored old binding: %v %v", got, err)
++			}
++		})
++	}
++}
++
++func TestSessionRebalanceQuotaTransitionsAndDrainIsolation(t *testing.T) {
++	oldCoordinator := sessionrebalance.Default
++	sessionrebalance.Default = sessionrebalance.New()
++	defer func() { sessionrebalance.Default = oldCoordinator }()
++	old := quotatraffic.RoutingPolicies
++	defer func() { quotatraffic.RoutingPolicies = old }()
++	store := quotatraffic.NewPolicyStore()
++	quotatraffic.RoutingPolicies = store
++	if err := store.Load(filepath.Join(t.TempDir(), "policy.json")); err != nil {
++		t.Fatal(err)
++	}
++	m := NewManager(nil, nil, nil)
++	a, err := m.Register(WithSkipPersist(context.Background()), &Auth{ID: "auto-rebalance", Provider: "codex", Status: StatusActive})
++	if err != nil {
++		t.Fatal(err)
++	}
++	now := time.Now()
++	quotatraffic.Capture(a.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"79"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now, "websocket_event")
++	if err := store.Set(a.Index, "codex", map[string]float64{"x-codex-primary@300": 20}); err != nil {
++		t.Fatal(err)
++	}
++	previous := map[string]bool{}
++	baseline := len(sessionrebalance.Default.Snapshots())
++	m.CheckQuotaRebalances(previous, now)
++	if len(sessionrebalance.Default.Snapshots()) != baseline {
++		t.Fatal("eligible policy rebalanced")
++	}
++	quotatraffic.Capture(a.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"80"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now.Add(time.Second), "websocket_event")
++	m.CheckQuotaRebalances(previous, now.Add(time.Second))
++	m.CheckQuotaRebalances(previous, now.Add(2*time.Second))
++	if len(sessionrebalance.Default.Snapshots()) != baseline+1 {
++		t.Fatal("transition missing or repeated")
++	}
++	c := sessionrebalance.New()
++	s := c.Register(func() {})
++	defer s.Unregister()
++	s.Input([]byte(`{"type":"response.create"}`))
++	s.SetPool("codex")
++	c.Request("codex", "quota_policy_excluded")
++	ctx := sessionrebalance.WithSession(context.Background(), s)
++	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: a.ID}}
++	drain := authSelectionEligibilityForRequest(ctx, opts).forDrain(a)
++	if !QuotaPolicyAllows(drain, now.Add(time.Second)) {
++		t.Fatal("pending pinned tools cannot drain")
++	}
++	if QuotaPolicyAllows(a, now.Add(time.Second)) {
++		t.Fatal("drain changed shared account eligibility")
++	}
++	unpinned := authSelectionEligibilityForRequest(ctx, cliproxyexecutor.Options{}).forDrain(a)
++	if QuotaPolicyAllows(unpinned, now.Add(time.Second)) {
++		t.Fatal("unpinned request bypassed minimum")
++	}
++}
++
++func TestQuotaRecoveryEligibilityStabilityAndTransport(t *testing.T) {
++	for _, scenario := range []string{"preferred", "disabled", "cooldown", "http-only", "lower-priority", "incompatible"} {
++		t.Run(scenario, func(t *testing.T) {
++			old := quotatraffic.RoutingPolicies
++			defer func() { quotatraffic.RoutingPolicies = old }()
++			store := quotatraffic.NewPolicyStore()
++			quotatraffic.RoutingPolicies = store
++			_ = store.Load(filepath.Join(t.TempDir(), "policy.json"))
++			oldC := sessionrebalance.Default
++			sessionrebalance.Default = sessionrebalance.New()
++			defer func() { sessionrebalance.Default = oldC }()
++			m := NewManager(nil, nil, nil)
++			a, _ := m.Register(WithSkipPersist(context.Background()), &Auth{ID: t.Name() + "a", Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "10", "websockets": "true"}})
++			b, _ := m.Register(WithSkipPersist(context.Background()), &Auth{ID: t.Name() + "b", Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "0", "websockets": "true"}})
++			r := registry.GetGlobalRegistry()
++			r.RegisterClient(a.ID, "codex", []*registry.ModelInfo{{ID: "recovery-model"}})
++			r.RegisterClient(b.ID, "codex", []*registry.ModelInfo{{ID: "recovery-model"}})
++			defer r.UnregisterClient(a.ID)
++			defer r.UnregisterClient(b.ID)
++			now := time.Now()
++			quotatraffic.Capture(a.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"90"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now, "websocket_event")
++			initial := store.RebalanceSettings(a.Index, "codex")
++			opted := quotatraffic.RebalanceSettings{RebalanceSessions: true, ReconnectWebsockets: true}
++			_ = store.CompareAndSetWithRebalance(a.Index, "codex", map[string]float64{"x-codex-primary@300": 20}, map[string]float64{}, &opted, &initial)
++			switch scenario {
++			case "disabled":
++				a.Disabled = true
++			case "cooldown":
++				a.Unavailable = true
++				a.NextRetryAfter = now.Add(time.Hour)
++			case "http-only":
++				a.Attributes["websockets"] = "false"
++			case "lower-priority":
++				a.Attributes["priority"] = "-1"
++			case "incompatible":
++				r.RegisterClient(a.ID, "codex", []*registry.ModelInfo{{ID: "other-model"}})
++			}
++			_, _, _ = m.Modify(WithSkipPersist(context.Background()), a.ID, a.RegistrationEpoch, func(current *Auth) error {
++				current.Disabled = a.Disabled
++				current.Unavailable = a.Unavailable
++				current.NextRetryAfter = a.NextRetryAfter
++				current.Attributes = a.Attributes
++				return nil
++			})
++			previous := map[string]bool{}
++			m.CheckQuotaRebalances(previous, now)
++			quotatraffic.Capture(a.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"10"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now.Add(time.Second), "websocket_event")
++			m.CheckQuotaRebalances(previous, now.Add(time.Second))
++			m.CheckQuotaRebalances(previous, now.Add(20*time.Second))
++			if snapshots := sessionrebalance.Default.Snapshots(); snapshots[len(snapshots)-1].Reason == "quota_policy_recovered" {
++				t.Fatal("unstable recovery triggered")
++			}
++			m.CheckQuotaRebalances(previous, now.Add(132*time.Second))
++			snapshots := sessionrebalance.Default.Snapshots()
++			job := snapshots[len(snapshots)-1]
++			switch scenario {
++			case "preferred":
++				if job.Reason != "quota_policy_recovered" || !job.ReconnectWebsockets {
++					t.Fatal("preferred recovery missing", job)
++				}
++			case "http-only":
++				if job.Reason == "quota_policy_recovered" && job.ReconnectWebsockets {
++					t.Fatal("HTTP recovery outranked WS account")
++				}
++			default:
++				if job.Reason == "quota_policy_recovered" {
++					t.Fatal("nonpreferred recovery", job)
++				}
++			}
++			// Immediate quota flapping may clear affinity but cannot retire another socket.
++			quotatraffic.Capture(a.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"90"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now.Add(133*time.Second), "websocket_event")
++			m.CheckQuotaRebalances(previous, now.Add(133*time.Second))
++			snapshots = sessionrebalance.Default.Snapshots()
++			if scenario == "preferred" && snapshots[len(snapshots)-1].ReconnectWebsockets {
++				t.Fatal("flapping repeatedly reconnects")
++			}
++			quotatraffic.Capture(a.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"10"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now.Add(134*time.Second), "websocket_event")
++			m.CheckQuotaRebalances(previous, now.Add(134*time.Second))
++			quotatraffic.Capture(a.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"90"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now.Add(135*time.Second), "websocket_event")
++			m.CheckQuotaRebalances(previous, now.Add(135*time.Second))
++			snapshots = sessionrebalance.Default.Snapshots()
++			if snapshots[len(snapshots)-1].ReconnectWebsockets {
++				t.Fatal("repeated exclusion bypassed reconnect quiet period")
++			}
++		})
++	}
++}
+diff --git a/sdk/cliproxy/auth/types.go b/sdk/cliproxy/auth/types.go
+index 5da6a3da..03ce8fdc 100644
+--- a/sdk/cliproxy/auth/types.go
++++ b/sdk/cliproxy/auth/types.go
+@@ -51,6 +51,8 @@ func GetRequestInfo(ctx context.Context) *RequestInfo {
+ 
+ // Auth encapsulates the runtime state and metadata associated with a single credential.
+ type Auth struct {
++	// Request-local quota exception, only for draining an already pinned socket.
++	quotaDrainAllowed func() bool
+ 	// ID uniquely identifies the auth record across restarts.
+ 	ID string `json:"id"`
+ 	// RegistrationEpoch tracks monotonic registration cycles across unregister/re-register.

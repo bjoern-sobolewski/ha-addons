@@ -18,7 +18,7 @@ class LiveStream:
                 if line.startswith(b'data:'):
                     payload = json.loads(line[5:])
                     assert set(payload) == {'topics'}, 'SSE exposed data outside sanitized topic names'
-                    assert set(payload['topics']) <= {'sync','usage','quota','accounts','clock'}
+                    assert set(payload['topics']) <= {'sync','usage','quota','accounts','clock','rebalance'}
                     self.frames.put(payload['topics'])
         except (OSError, ValueError):
             pass

@@ -1,0 +1,224 @@
+diff --git a/src/features/authFiles/components/AuthFileDetailsSheet.tsx b/src/features/authFiles/components/AuthFileDetailsSheet.tsx
+index ac1d1ad..221080d 100644
+--- a/src/features/authFiles/components/AuthFileDetailsSheet.tsx
++++ b/src/features/authFiles/components/AuthFileDetailsSheet.tsx
+@@ -249,6 +249,16 @@ export function AuthFileDetailsSheet(props: AuthFileDetailsSheetProps) {
+                     />
+                     <div className="hint">{t('auth_files.disable_cooling_hint')}</div>
+                   </div>
++                  <div className="form-group">
++                    <label>{t('auth_files.keeper_email_hidden_label')}</label>
++                    <ToggleSwitch
++                      checked={editor.hideEmailInKeeper}
++                      onChange={(value) => onChange('hideEmailInKeeper', value)}
++                      disabled={disableControls || editor.saving || !editor.json}
++                      ariaLabel={t('auth_files.keeper_email_hidden_label')}
++                    />
++                    <div className="hint">{t('auth_files.keeper_email_hidden_hint')}</div>
++                  </div>
+                   {supportsAuthFileWebsockets(editor.providerKey) && (
+                     <div className="form-group">
+                       <label>{t('auth_files.websockets_label')}</label>
+diff --git a/src/features/authFiles/hooks/useAuthFilesPrefixProxyEditor.ts b/src/features/authFiles/hooks/useAuthFilesPrefixProxyEditor.ts
+index f96acf4..9731bbc 100644
+--- a/src/features/authFiles/hooks/useAuthFilesPrefixProxyEditor.ts
++++ b/src/features/authFiles/hooks/useAuthFilesPrefixProxyEditor.ts
+@@ -50,6 +50,7 @@ export type PrefixProxyEditorField =
+   | 'priority'
+   | 'weight'
+   | 'disableCooling'
++  | 'hideEmailInKeeper'
+   | 'websockets'
+   | 'usingApi'
+   | 'useSiwc'
+@@ -78,6 +79,8 @@ export type PrefixProxyEditorState = {
+   weightError: string | null;
+   disableCooling: boolean;
+   disableCoolingTouched: boolean;
++  hideEmailInKeeper: boolean;
++  hideEmailInKeeperTouched: boolean;
+   websockets: boolean;
+   websocketsTouched: boolean;
+   useSiwc: boolean;
+@@ -363,6 +366,10 @@ export const buildAuthFileFieldsPatch = (
+     }
+   }
+ 
++  if (editor.hideEmailInKeeperTouched && editor.hideEmailInKeeper !== (original.hide_email_in_keeper === true)) {
++    patch.hide_email_in_keeper = editor.hideEmailInKeeper;
++  }
++
+   if (supportsAuthFileWebsockets(editor.providerKey) && editor.websocketsTouched) {
+     const originalWebsockets = readAuthFileWebsockets(original);
+     const nextWebsockets = Boolean(editor.websockets);
+@@ -466,6 +473,10 @@ const buildPrefixProxyUpdatedText = (
+   applyCredentialPolicyPatch(next, patch);
+   applyHeadersPatch(next, patch.headers);
+ 
++  if (patch.hide_email_in_keeper !== undefined) {
++    next.hide_email_in_keeper = patch.hide_email_in_keeper;
++  }
++
+   if (patch.websockets !== undefined) {
+     next = applyAuthFileWebsockets(next, patch.websockets);
+   }
+@@ -548,6 +559,8 @@ export function useAuthFilesPrefixProxyEditor(
+       weightError: null,
+       disableCooling: false,
+       disableCoolingTouched: false,
++      hideEmailInKeeper: false,
++      hideEmailInKeeperTouched: false,
+       websockets: false,
+       websocketsTouched: false,
+       useSiwc: false,
+@@ -636,6 +649,8 @@ export function useAuthFilesPrefixProxyEditor(
+           weightError: null,
+           disableCooling,
+           disableCoolingTouched: false,
++          hideEmailInKeeper: json.hide_email_in_keeper === true,
++          hideEmailInKeeperTouched: false,
+           websockets,
+           websocketsTouched: false,
+           useSiwc: supportsAuthFileSiwc(providerKey) && readAuthFileUseSiwc(json),
+@@ -699,6 +714,9 @@ export function useAuthFilesPrefixProxyEditor(
+           disableCoolingTouched: true,
+         };
+       }
++      if (field === 'hideEmailInKeeper') {
++        return { ...prev, hideEmailInKeeper: Boolean(value), hideEmailInKeeperTouched: true };
++      }
+       if (field === 'websockets') {
+         return { ...prev, websockets: Boolean(value), websocketsTouched: true };
+       }
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index ca0d1ea..d6a117b 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -423,6 +423,8 @@
+     "disable_cooling_hint": "Skip failure cooldown and exponential backoff only for this credential; other credentials are unaffected.",
+     "use_siwc_label": "Use SIWC (use_siwc)",
+     "use_siwc_hint": "Use the bound SIWC credential when enabled. Turning this off only disables SIWC and preserves binding data. Complete binding before enabling.",
++    "keeper_email_hidden_label": "Hide email in Keeper",
++    "keeper_email_hidden_hint": "Keeper shows only the first 6 characters, then **@provider. Full emails cannot be revealed in Keeper. Raw request logs are unavailable while an email is hidden. Reload open Keeper pages after saving.",
+     "websockets_label": "WebSockets (websockets)",
+     "websockets_hint": "Enable Responses API websocket transport for this credential.",
+     "using_api_label": "Use official API (using_api)",
+diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
+index f684bbb..c2de716 100644
+--- a/src/i18n/locales/ko.json
++++ b/src/i18n/locales/ko.json
+@@ -420,6 +420,8 @@
+     "disable_cooling_hint": "이 자격 증명에 대해서만 실패 쿨다운 및 지수 백오프를 건너뜁니다. 다른 자격 증명에는 영향을 주지 않습니다.",
+     "use_siwc_label": "SIWC 사용 (use_siwc)",
+     "use_siwc_hint": "활성화하면 연결된 SIWC 자격 증명을 사용합니다. 끄면 SIWC만 비활성화되며 연결 데이터는 유지됩니다. 활성화하기 전에 연결을 완료하세요.",
++    "keeper_email_hidden_label": "Keeper에서 이메일 숨기기",
++    "keeper_email_hidden_hint": "Keeper에는 처음 6자와 **@도메인만 표시되며 전체 이메일을 볼 수 없습니다. 이메일을 숨기는 동안 원본 요청 로그를 사용할 수 없습니다. 저장 후 열린 Keeper 페이지를 새로고침하세요.",
+     "websockets_label": "WebSockets (websockets)",
+     "websockets_hint": "이 자격 증명에 대해 Responses API WebSocket 전송을 활성화합니다.",
+     "using_api_label": "공식 API 사용 (using_api)",
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index 9c0686e..67ad014 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -426,6 +426,8 @@
+     "disable_cooling_hint": "Отключает cooldown после ошибок и экспоненциальную задержку только для этих учётных данных; остальные не затрагиваются.",
+     "use_siwc_label": "Использовать SIWC (use_siwc)",
+     "use_siwc_hint": "Использовать привязанные учётные данные SIWC. Выключение отключает SIWC, сохраняя данные привязки. Перед включением выполните привязку.",
++    "keeper_email_hidden_label": "Скрывать почту в Keeper",
++    "keeper_email_hidden_hint": "Keeper показывает первые 6 символов и **@домен. Полный адрес нельзя раскрыть. Пока адрес скрыт, исходные журналы запросов недоступны. После сохранения обновите страницы Keeper.",
+     "websockets_label": "WebSockets (websockets)",
+     "websockets_hint": "Включает websocket-транспорт Responses API для этих учётных данных.",
+     "using_api_label": "Использовать официальный API (using_api)",
+diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
+index 86ced14..afadc4c 100644
+--- a/src/i18n/locales/tr.json
++++ b/src/i18n/locales/tr.json
+@@ -402,6 +402,8 @@
+     "disable_cooling_hint": "Yalnızca Bu Kimlik Bilgisi için Hata Soğumasını ve Üstel Geri Çekilmeyi Atla. Diğer Kimlik Bilgileri Etkilenmez.",
+     "use_siwc_label": "SIWC Kullan (use_siwc)",
+     "use_siwc_hint": "Etkinleştirildiğinde Bağlı SIWC Kimlik Bilgisini Kullanır. Kapatmak Yalnızca SIWC'yi Devre Dışı Bırakır ve Bağlama Verilerini Korur. Etkinleştirmeden Önce Bağlamayı Tamamla.",
++    "keeper_email_hidden_label": "Keeper’da e-postayı gizle",
++    "keeper_email_hidden_hint": "Keeper yalnızca ilk 6 karakteri ve **@sağlayıcıyı gösterir. Tam adres açılamaz. Gizli e-posta varken ham istek günlükleri kullanılamaz. Kaydettikten sonra açık Keeper sayfalarını yenileyin.",
+     "websockets_label": "WebSockets (websockets)",
+     "websockets_hint": "Bu Kimlik Bilgisi için Responses API WebSocket Taşımasını Etkinleştir.",
+     "using_api_label": "Resmi API Kullan (using_api)",
+diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
+index cbe1ba0..96377aa 100644
+--- a/src/i18n/locales/vi.json
++++ b/src/i18n/locales/vi.json
+@@ -371,6 +371,8 @@
+     "disable_cooling_hint": "Bỏ qua cooldown thất bại và backoff lũy thừa chỉ cho credential này; các credential khác không bị ảnh hưởng.",
+     "use_siwc_label": "Sử dụng SIWC (use_siwc)",
+     "use_siwc_hint": "Sử dụng thông tin xác thực SIWC đã liên kết khi bật. Tắt chỉ vô hiệu hóa SIWC và giữ nguyên dữ liệu liên kết. Hoàn tất liên kết trước khi bật.",
++    "keeper_email_hidden_label": "Ẩn email trong Keeper",
++    "keeper_email_hidden_hint": "Keeper chỉ hiển thị 6 ký tự đầu, rồi **@nhà-cung-cấp. Không thể hiện email đầy đủ. Nhật ký yêu cầu gốc không khả dụng khi có email bị ẩn. Tải lại các trang Keeper sau khi lưu.",
+     "websockets_label": "WebSocket (websockets)",
+     "websockets_hint": "Bật truyền tải websocket của Responses API cho credential này.",
+     "using_api_label": "Dùng API chính thức (using_api)",
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index 0fe5673..c93d528 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -421,6 +421,8 @@
+     "disable_cooling_hint": "开启后，仅当前凭证跳过失败后的冷却与指数退避；其他凭证不受影响。",
+     "use_siwc_label": "使用 SIWC（use_siwc）",
+     "use_siwc_hint": "启用后使用已绑定的 SIWC 凭证。关闭仅停用 SIWC，不会删除绑定数据；启用前请先完成绑定。",
++    "keeper_email_hidden_label": "在 Keeper 中隐藏邮箱",
++    "keeper_email_hidden_hint": "Keeper 仅显示前 6 个字符和 **@邮箱域名，无法显示完整邮箱。隐藏邮箱时无法查看原始请求日志。保存后请刷新已打开的 Keeper 页面。",
+     "websockets_label": "WebSockets（websockets）",
+     "websockets_hint": "为该凭证开启 Responses API 的 websocket 传输。",
+     "using_api_label": "使用官方 API（using_api）",
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index a680343..bd51d9e 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -421,6 +421,8 @@
+     "disable_cooling_hint": "開啟後，僅目前憑證會略過失敗後的冷卻與指數退避；其他憑證不受影響。",
+     "use_siwc_label": "使用 SIWC（use_siwc）",
+     "use_siwc_hint": "啟用後使用已綁定的 SIWC 憑證。關閉僅停用 SIWC，不會刪除綁定資料；啟用前請先完成綁定。",
++    "keeper_email_hidden_label": "在 Keeper 中隱藏電子郵件",
++    "keeper_email_hidden_hint": "Keeper 僅顯示前 6 個字元和 **@電子郵件網域，無法顯示完整電子郵件。隱藏時無法檢視原始請求日誌。儲存後請重新載入已開啟的 Keeper 頁面。",
+     "websockets_label": "WebSockets（websockets）",
+     "websockets_hint": "為該憑證開啟 Responses API 的 websocket 傳輸。",
+     "using_api_label": "使用官方 API（using_api）",
+diff --git a/src/services/api/authFiles.ts b/src/services/api/authFiles.ts
+index 78550e7..52a54b9 100644
+--- a/src/services/api/authFiles.ts
++++ b/src/services/api/authFiles.ts
+@@ -42,6 +42,7 @@ export type AuthFileFieldsPatch = {
+   weight?: number | null;
+   disable_cooling?: boolean;
+   'disable-cooling'?: boolean;
++  hide_email_in_keeper?: boolean;
+   websockets?: boolean;
+   using_api?: boolean;
+   use_siwc?: boolean;
+diff --git a/tests/authFileWeight.test.ts b/tests/authFileWeight.test.ts
+index 56f2c20..bb9d08d 100644
+--- a/tests/authFileWeight.test.ts
++++ b/tests/authFileWeight.test.ts
+@@ -27,6 +27,8 @@ const makeEditor = (json: Record<string, unknown>, weight: string): PrefixProxyE
+   weightError: null,
+   disableCooling: false,
+   disableCoolingTouched: false,
++  hideEmailInKeeper: false,
++  hideEmailInKeeperTouched: false,
+   websockets: false,
+   websocketsTouched: false,
+   useSiwc: false,
+@@ -186,3 +188,15 @@ describe('auth-file excluded models patch', () => {
+     ).toEqual({ excluded_models: [] });
+   });
+ });
++
++describe('Keeper email privacy', () => {
++  test('changes only the explicit per-file flag and supports disabling it', () => {
++    const json = { email: 'example.person@example.com', access_token: 'fixture-token', priority: 9 };
++    const editor = { ...makeEditor(json, ''), priority: '9', hideEmailInKeeper: true, hideEmailInKeeperTouched: true };
++    expect(buildAuthFileFieldsPatch(editor, resolveError)).toEqual({ hide_email_in_keeper: true });
++    expect(buildAuthFileFieldsPatch({ ...editor, hideEmailInKeeperTouched: false }, resolveError)).toEqual({});
++    expect(buildAuthFileFieldsPatch({ ...editor, json: { ...json, hide_email_in_keeper: true }, hideEmailInKeeper: false }, resolveError)).toEqual({ hide_email_in_keeper: false });
++    expect(json.email).toBe('example.person@example.com');
++    expect(json.access_token).toBe('fixture-token');
++  });
++});

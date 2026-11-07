@@ -1,0 +1,307 @@
+diff --git a/internal/api/handlers/management/auth_files.go b/internal/api/handlers/management/auth_files.go
+index 0a3feb14..2de5fcc8 100644
+--- a/internal/api/handlers/management/auth_files.go
++++ b/internal/api/handlers/management/auth_files.go
+@@ -795,6 +795,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
+ 		entry["request_retry"] = requestRetry
+ 	}
+ 	if quota.v8 {
++		entry["hide_email_in_keeper"] = authEmailHiddenInKeeper(auth)
+ 		nowUTC := time.Now().UTC()
+ 		if exp, okExp := auth.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.Unix() > 0 {
+ 			entry["access_token_expires_at"] = exp.UTC().Format(time.RFC3339)
+diff --git a/internal/api/handlers/management/auth_files_fields.go b/internal/api/handlers/management/auth_files_fields.go
+index 47168ba9..2b769415 100644
+--- a/internal/api/handlers/management/auth_files_fields.go
++++ b/internal/api/handlers/management/auth_files_fields.go
+@@ -490,6 +490,11 @@ func normalizeAuthFilePatchFields(fields map[string]json.RawMessage) (map[string
+ 		originalRoot := parts[0]
+ 		parts[0] = coreauth.CanonicalCredentialMetadataKey(originalRoot)
+ 		canonicalPath := strings.Join(parts, ".")
++		if parts[0] == "hide_email_in_keeper" {
++			if len(parts) != 1 || (string(bytes.TrimSpace(value)) != "true" && string(bytes.TrimSpace(value)) != "false") {
++				return nil, fmt.Errorf("hide_email_in_keeper must be a boolean")
++			}
++		}
+ 		if original, exists := originalNames[canonicalPath]; exists {
+ 			currentCanonical := originalRoot == parts[0]
+ 			if canonicalNames[canonicalPath] != currentCanonical {
+diff --git a/internal/api/handlers/management/keeper_email_privacy.go b/internal/api/handlers/management/keeper_email_privacy.go
+new file mode 100644
+index 00000000..dc8e3568
+--- /dev/null
++++ b/internal/api/handlers/management/keeper_email_privacy.go
+@@ -0,0 +1,130 @@
++package management
++
++import (
++	"encoding/json"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++
++	"github.com/gin-gonic/gin"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++)
++
++type keeperPrivacyEntry struct {
++	Name   string `json:"name"`
++	Email  string `json:"email"`
++	Hidden bool   `json:"hidden"`
++}
++
++var keeperPrivacyMu sync.Mutex
++
++// KeeperEmailPrivacy is a trusted management-only policy feed. Credentials and
++// tokens are deliberately excluded; CPAMC remains the sole policy editor.
++func (h *Handler) KeeperEmailPrivacy(c *gin.Context) {
++	if h.authManager == nil {
++		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager unavailable"})
++		return
++	}
++	entries, err := h.keeperPrivacySnapshot()
++	if err != nil {
++		c.JSON(503, gin.H{"error": "email privacy policy unavailable"})
++		return
++	}
++	c.Header("Cache-Control", "no-store")
++	c.JSON(http.StatusOK, gin.H{"version": 1, "entries": entries})
++}
++
++// Keep tombstones before management deletion as well as during reads. A Keeper
++// admin cannot reveal historical addresses by deleting a hidden credential before
++// Keeper has fetched it for the first time. The .policy file is not an auth JSON.
++func (h *Handler) keeperPrivacySnapshot() ([]keeperPrivacyEntry, error) {
++	keeperPrivacyMu.Lock()
++	defer keeperPrivacyMu.Unlock()
++	entries := make([]keeperPrivacyEntry, 0)
++	for _, a := range h.authManager.List() {
++		if a == nil {
++			continue
++		}
++		name := strings.TrimSpace(a.FileName)
++		if name == "" {
++			name = a.ID
++		}
++		entries = append(entries, keeperPrivacyEntry{name, authEmail(a), authEmailHiddenInKeeper(a)})
++	}
++	h.mu.Lock()
++	dir := h.cfg.AuthDir
++	h.mu.Unlock()
++	if dir == "" {
++		return entries, nil
++	}
++	path := filepath.Join(dir, ".keeper-email-privacy.policy")
++	archived := []keeperPrivacyEntry{}
++	data, err := os.ReadFile(path)
++	if err != nil && !os.IsNotExist(err) {
++		return nil, err
++	}
++	if len(data) > 0 {
++		if err = json.Unmarshal(data, &archived); err != nil {
++			return nil, err
++		}
++	}
++	present := map[string]bool{}
++	hidden := map[string]bool{}
++	for _, e := range entries {
++		present[strings.ToLower(e.Email)] = true
++		if e.Hidden {
++			hidden[strings.ToLower(e.Email)] = true
++		}
++	}
++	for _, e := range archived {
++		if !present[strings.ToLower(e.Email)] {
++			entries = append(entries, e)
++		}
++	}
++	retained := make([]keeperPrivacyEntry, 0)
++	for _, e := range entries {
++		if e.Hidden || hidden[strings.ToLower(e.Email)] {
++			e.Hidden = true
++			retained = append(retained, e)
++		}
++	}
++	next, err := json.Marshal(retained)
++	if err != nil {
++		return nil, err
++	}
++	if string(next) != string(data) && (len(retained) > 0 || len(data) > 0) {
++		file, err := os.CreateTemp(dir, ".keeper-email-privacy-*.policy")
++		if err != nil {
++			return nil, err
++		}
++		name := file.Name()
++		defer os.Remove(name)
++		if err = file.Chmod(0600); err == nil {
++			_, err = file.Write(next)
++		}
++		if err == nil {
++			err = file.Sync()
++		}
++		closeErr := file.Close()
++		if err != nil {
++			return nil, err
++		}
++		if closeErr != nil {
++			return nil, closeErr
++		}
++		if err = os.Rename(name, path); err != nil {
++			return nil, err
++		}
++	}
++	return entries, nil
++}
++
++func authEmailHiddenInKeeper(a *coreauth.Auth) bool {
++	if a == nil {
++		return false
++	}
++	value, _ := a.Metadata["hide_email_in_keeper"].(bool)
++	return value
++}
+diff --git a/internal/api/handlers/management/keeper_email_privacy_test.go b/internal/api/handlers/management/keeper_email_privacy_test.go
+new file mode 100644
+index 00000000..96c5c3b8
+--- /dev/null
++++ b/internal/api/handlers/management/keeper_email_privacy_test.go
+@@ -0,0 +1,66 @@
++package management
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++)
++
++func TestKeeperEmailPrivacyPersistsAndValidates(t *testing.T) {
++	dir := t.TempDir()
++	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
++	_, err := manager.Register(context.Background(), &coreauth.Auth{ID: "private.json", FileName: "private.json", Provider: "codex", Attributes: map[string]string{"path": filepath.Join(dir, "private.json")}, Metadata: map[string]any{"email": "example.person@example.com", "access_token": "must-not-be-in-feed"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: dir}, manager)
++	for _, value := range []string{`"true"`, `null`, `1`, `{}`, `[]`} {
++		_, err := normalizeAuthFilePatchFields(map[string]json.RawMessage{"hide_email_in_keeper": json.RawMessage(value)})
++		if err == nil {
++			t.Fatalf("accepted %s", value)
++		}
++	}
++	if _, err = normalizeAuthFilePatchFields(map[string]json.RawMessage{"hide_email_in_keeper.child": json.RawMessage(`true`)}); err == nil {
++		t.Fatal("nested policy accepted")
++	}
++	for _, value := range []string{"true", "false", "true"} {
++		rec := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(rec)
++		c.Request = httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(`{"name":"private.json","hide_email_in_keeper":`+value+`}`))
++		c.Request.Header.Set("Content-Type", "application/json")
++		h.PatchAuthFileFields(c)
++		if rec.Code != 200 {
++			t.Fatal(rec.Body.String())
++		}
++		entry, _ := manager.GetByID("private.json")
++		if authEmailHiddenInKeeper(entry) != (value == "true") {
++			t.Fatal("flag did not persist")
++		}
++	}
++	rec := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(rec)
++	h.KeeperEmailPrivacy(c)
++	if rec.Code != 200 || strings.Contains(rec.Body.String(), "must-not-be-in-feed") || !strings.Contains(rec.Body.String(), `"hidden":true`) {
++		t.Fatal(rec.Body.String())
++	}
++	// Emulate deletion before Keeper's next read, then a process restart.
++	manager.Remove(context.Background(), "private.json")
++	restarted := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: dir}, coreauth.NewManager(&memoryAuthStore{}, nil, nil))
++	entries, err := restarted.keeperPrivacySnapshot()
++	if err != nil || len(entries) != 1 || !entries[0].Hidden {
++		t.Fatalf("lost archived privacy: %v", err)
++	}
++	data, err := os.ReadFile(filepath.Join(dir, ".keeper-email-privacy.policy"))
++	if err != nil || strings.Contains(string(data), "must-not-be-in-feed") {
++		t.Fatal("unsafe archive")
++	}
++}
+diff --git a/internal/api/handlers/management/oauth_siwc_mutations.go b/internal/api/handlers/management/oauth_siwc_mutations.go
+index 71537d28..96c7924b 100644
+--- a/internal/api/handlers/management/oauth_siwc_mutations.go
++++ b/internal/api/handlers/management/oauth_siwc_mutations.go
+@@ -21,6 +21,12 @@ func (h *Handler) UploadAuthFileV8(c *gin.Context) {
+ 
+ // DeleteAuthFileV8 coordinates file removal with explicit SIWC binding.
+ func (h *Handler) DeleteAuthFileV8(c *gin.Context) {
++	if h.authManager != nil && h.cfg != nil {
++		if _, err := h.keeperPrivacySnapshot(); err != nil {
++			c.JSON(503, gin.H{"error": "could not preserve email privacy before deletion"})
++			return
++		}
++	}
+ 	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), siwcFileMutationKey{}, true))
+ 	h.DeleteAuthFile(c)
+ }
+diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
+index 7e575773..1598468b 100644
+--- a/internal/api/server_management_v8.go
++++ b/internal/api/server_management_v8.go
+@@ -59,6 +59,7 @@ func (s *Server) registerManagementV8Routes() {
+ 	v8.GET("/observability/usage/api-keys", s.mgmt.GetAPIKeyUsage)
+ 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
+ 
++	v8.GET("/keeper-email-privacy", s.mgmt.KeeperEmailPrivacy)
+ 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
+ 	v8.POST("/credentials", s.mgmt.UploadAuthFileV8)
+ 	v8.DELETE("/credentials", s.mgmt.DeleteAuthFileV8)
+diff --git a/sdk/cliproxy/auth/keeper_email_privacy_test.go b/sdk/cliproxy/auth/keeper_email_privacy_test.go
+new file mode 100644
+index 00000000..14661587
+--- /dev/null
++++ b/sdk/cliproxy/auth/keeper_email_privacy_test.go
+@@ -0,0 +1,23 @@
++package auth
++
++import "testing"
++
++func TestKeeperEmailPrivacySurvivesRefreshAndRelogin(t *testing.T) {
++	base := &Auth{Metadata: map[string]any{"hide_email_in_keeper": true, "access_token": "old"}}
++	current := base.Clone()
++	updated := base.Clone()
++	delete(updated.Metadata, "hide_email_in_keeper")
++	updated.Metadata["access_token"] = "new"
++	if MergeRefreshedAuth(base, current, updated).Metadata["hide_email_in_keeper"] != true {
++		t.Fatal("refresh erased privacy")
++	}
++	current.Metadata["hide_email_in_keeper"] = false
++	if MergeRefreshedAuth(base, current, updated).Metadata["hide_email_in_keeper"] != false {
++		t.Fatal("refresh undid concurrent setting")
++	}
++	relogin := &Auth{Metadata: map[string]any{"access_token": "relogin"}}
++	MergeExistingAuthMetadata(relogin, base.Metadata)
++	if relogin.Metadata["hide_email_in_keeper"] != true || relogin.Metadata["access_token"] != "relogin" {
++		t.Fatal("relogin lost privacy or new credentials")
++	}
++}
+diff --git a/sdk/cliproxy/auth/metadata_merge.go b/sdk/cliproxy/auth/metadata_merge.go
+index b29b699e..bfcd2e2c 100644
+--- a/sdk/cliproxy/auth/metadata_merge.go
++++ b/sdk/cliproxy/auth/metadata_merge.go
+@@ -287,7 +287,7 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
+ 		if baseMeta != nil {
+ 			for k, baseVal := range baseMeta {
+ 				trimmedKey := strings.ToLower(strings.TrimSpace(k))
+-				if trimmedKey == "proxy_url" || trimmedKey == "siwc" || trimmedKey == "use_siwc" {
++				if trimmedKey == "proxy_url" || trimmedKey == "siwc" || trimmedKey == "use_siwc" || trimmedKey == "hide_email_in_keeper" {
+ 					continue
+ 				}
+ 				if _, inUpdated := updated.Metadata[k]; !inUpdated {

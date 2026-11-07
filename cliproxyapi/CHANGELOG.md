@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.23
+
+- Add a per-auth-file “Hide email in Keeper” switch to CPAMC. Persist the setting across refresh and re-login, publish a management-only privacy policy, and retain protection when credentials are deleted.
+
 ## 0.1.22
 
 - Add private, bounded live routing telemetry for HTTP requests, WebSockets, queued responses, tool waits and safe session drains.

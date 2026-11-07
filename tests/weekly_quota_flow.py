@@ -50,6 +50,22 @@ for table in ('usage_events', 'usage_events_archive'):
 c.commit()
 '''
 
+# Local-only CPA privacy feed: metadata endpoints remain unavailable so this
+# offline-history fixture keeps its seeded identities. Data APIs still require
+# an authoritative visibility decision; a CPA outage is covered by email_privacy.
+POLICY_SERVER = r'''
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        policy = self.path == '/v8/management/keeper-email-privacy'
+        self.send_response(200 if policy else 404)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{"version":1,"entries":[]}' if policy else b'{}')
+    def log_message(self, *args): pass
+HTTPServer(('127.0.0.1', 9001), Handler).serve_forever()
+'''
+
 
 def main():
     image = os.environ.get('KEEPER_WEEKLY_IMAGE', 'ha-keeper-weekly:local')
@@ -58,7 +74,7 @@ def main():
     password, readonly, management = (secrets.token_urlsafe(32) for _ in range(3))
     with tempfile.TemporaryDirectory() as directory:
         options = Path(directory) / 'options.json'
-        options.write_text(json.dumps({'cpa_base_url': 'http://127.0.0.1:9', 'management_key': management,
+        options.write_text(json.dumps({'cpa_base_url': 'http://127.0.0.1:9001', 'management_key': management,
                                       'login_password': password, 'read_only_password': readonly,
                                       'viewer_base_path': '/weekly-test', 'viewer_dashboard_enabled': True, 'timezone': 'UTC'}))
         try:
@@ -75,6 +91,8 @@ def main():
             lan = 'http://' + docker('port', name, '8080/tcp').splitlines()[0]
             gateway = 'http://' + docker('port', name, '8082/tcp').splitlines()[0]
             eventually(lambda: request(lan + '/healthz')[0] == 200)
+            docker('exec', '-d', name, 'python3', '-c', POLICY_SERVER)
+            eventually(lambda: 'version' in docker('exec', name, 'python3', '-c', 'import urllib.request;print(urllib.request.urlopen("http://127.0.0.1:9001/v8/management/keeper-email-privacy").read().decode())'))
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
             prefix = gateway + '/weekly-test/api/v1'
             assert request(prefix + '/auth/read-only-login', {'X-CPA-Usage-Keeper-Request': 'fetch'}, {'password': readonly}, opener)[0] == 204

@@ -16,6 +16,7 @@ import time
 import urllib.request
 
 from smoke import docker, eventually, request
+from weekly_quota_flow import POLICY_SERVER
 
 
 # Published wrapper 0.1.36: multi-platform OCI index, resolved 2026-11-02.
@@ -163,6 +164,12 @@ def endpoints(name):
     return tuple('http://' + docker('port', name, str(port) + '/tcp').splitlines()[0] for port in (8080, 8082))
 
 
+def start_policy(name):
+    docker('exec', '-d', name, 'python3', '-c', POLICY_SERVER)
+    eventually(lambda: 'version' in docker('exec', name, 'python3', '-c',
+        'import urllib.request;print(urllib.request.urlopen("http://127.0.0.1:9001/v8/management/keeper-email-privacy").read().decode())'))
+
+
 def ready(name, migrated=False):
     lan, gateway = endpoints(name)
     deadline = time.monotonic() + 180
@@ -256,7 +263,7 @@ def main():
     sessions = {role: opener() for role in ('viewer', 'direct', 'admin')}
     with tempfile.TemporaryDirectory() as temporary:
         options = Path(temporary) / 'options.json'
-        options.write_text(json.dumps({'cpa_base_url': 'http://127.0.0.1:9', 'management_key': management,
+        options.write_text(json.dumps({'cpa_base_url': 'http://127.0.0.1:9001', 'management_key': management,
                                       'login_password': password, 'read_only_password': readonly,
                                       'viewer_base_path': VIEWER_PATH, 'viewer_dashboard_enabled': True,
                                       'viewer_quota_enabled': True, 'timezone': 'UTC'}), encoding='utf-8')
@@ -322,6 +329,7 @@ print(hashlib.sha256((target/'app.db').read_bytes()).hexdigest())
             create('new', image)
             docker('start', names['new'])
             lan, gateway = ready(names['new'], migrated=True)
+            start_policy(names['new'])
             assert_facts(snapshot(names['new']), before)
             stored = costs(names['new'])
             # Inspect the application's own protected pre-migration backup too.
@@ -361,6 +369,7 @@ print('ok')
             docker('stop', names['new'])
             docker('start', names['new'])
             lan, gateway = ready(names['new'], migrated=True)
+            start_policy(names['new'])
             assert_facts(snapshot(names['new']), before)
             assert costs(names['new']) == stored, 'Reopen changed completed migration or historical prices'
             check_roles(lan, gateway, sessions, hidden, migrated=True)

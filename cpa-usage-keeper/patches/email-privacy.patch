@@ -1,0 +1,844 @@
+diff --git a/internal/api/email_privacy.go b/internal/api/email_privacy.go
+new file mode 100644
+index 00000000..402b9776
+--- /dev/null
++++ b/internal/api/email_privacy.go
+@@ -0,0 +1,207 @@
++package api
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"reflect"
++	"strings"
++	"time"
++
++	"cpa-usage-keeper/internal/emailprivacy"
++	"github.com/gin-gonic/gin"
++)
++
++type EmailPrivacySource interface {
++	KeeperEmailPrivacy(context.Context) ([]emailprivacy.Entry, error)
++}
++
++// EmailPrivacyBoundary is applied to every data API, including download-token
++// routes and viewer APIs. Live SSE carries topic names only and is registered
++// before this boundary. No frontend reveal control can undo these replacements.
++type EmailPrivacyBoundary struct {
++	source EmailPrivacySource
++	path   string
++	gate   chan struct{}
++}
++
++func NewEmailPrivacyBoundary(source EmailPrivacySource, path string) *EmailPrivacyBoundary {
++	return &EmailPrivacyBoundary{source: source, path: path, gate: make(chan struct{}, 1)}
++}
++
++func (b *EmailPrivacyBoundary) policy(ctx context.Context) (emailprivacy.Policy, error) {
++	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
++	defer cancel()
++	select {
++	case b.gate <- struct{}{}:
++		defer func() { <-b.gate }()
++	case <-ctx.Done():
++		return emailprivacy.Policy{}, ctx.Err()
++	}
++	previous, err := emailprivacy.Load(b.path)
++	if err != nil {
++		return emailprivacy.Policy{}, err
++	}
++	current, err := b.source.KeeperEmailPrivacy(ctx)
++	if err != nil {
++		return emailprivacy.Policy{}, err
++	}
++	for _, entry := range current {
++		if entry.Hidden && (entry.Email == "" || emailprivacy.Mask(entry.Email) == "[hidden email]") {
++			return emailprivacy.Policy{}, errors.New("hidden credential has no valid email")
++		}
++	}
++	policy := emailprivacy.Build(previous, current)
++	if !reflect.DeepEqual(previous, policy.Entries) {
++		if err = emailprivacy.Save(b.path, policy.Entries); err != nil {
++			return emailprivacy.Policy{}, err
++		}
++	}
++	return policy, nil
++}
++
++func (b *EmailPrivacyBoundary) Middleware() gin.HandlerFunc {
++	return func(c *gin.Context) {
++		policy, err := b.policy(c.Request.Context())
++		if err != nil {
++			privacyUnavailable(c)
++			return
++		}
++		setNoStoreHeaders(c)
++		// Logs are arbitrary upstream text/binary and can contain encoded tokens.
++		// Blocking the raw surface also covers previously minted download tokens.
++		if strings.Contains(c.FullPath(), "/request-log") {
++			if len(policy.Entries) > 0 {
++				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Raw request logs are unavailable while an email is hidden in Keeper. Manage email visibility in CPAMC."})
++				return
++			}
++			c.Next()
++			return
++		}
++		if err = restorePrivateCredentialNames(c, policy.Names); err != nil {
++			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "Invalid credential request"})
++			return
++		}
++		original := c.Writer
++		buffered := &privacyWriter{ResponseWriter: original, status: http.StatusOK}
++		c.Writer = buffered
++		c.Next()
++		c.Writer = original
++		// Recheck after handlers: a switch enabled while a report was being generated
++		// must protect that report too. Fail closed if CPA or the durable policy fails.
++		policy, err = b.policy(c.Request.Context())
++		if err != nil || buffered.overflow {
++			privacyUnavailable(c)
++			return
++		}
++		body := buffered.body.Bytes()
++		if len(policy.Entries) > 0 && len(body) > 0 {
++			contentType := original.Header().Get("Content-Type")
++			switch {
++			case strings.Contains(contentType, "json"):
++				body, err = policy.JSON(body)
++			case strings.Contains(contentType, "csv"), strings.HasPrefix(contentType, "text/"):
++				body = []byte(policy.Text(string(body)))
++			default:
++				err = errors.New("unsupported private response")
++			}
++			if err != nil {
++				privacyUnavailable(c)
++				return
++			}
++		}
++		for key, values := range original.Header() {
++			for i, value := range values {
++				values[i] = policy.Text(value)
++			}
++			original.Header()[key] = values
++		}
++		original.Header().Del("Content-Length")
++		original.Header().Del("ETag")
++		original.WriteHeader(buffered.status)
++		_, _ = original.Write(body)
++	}
++}
++
++func privacyUnavailable(c *gin.Context) {
++	for key := range c.Writer.Header() {
++		c.Writer.Header().Del(key)
++	}
++	setNoStoreHeaders(c)
++	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "Email visibility could not be verified. Refresh before retrying any change."})
++}
++
++func restorePrivateCredentialNames(c *gin.Context, names map[string]string) error {
++	path := c.FullPath()
++	if (c.Request.Method != http.MethodPatch && c.Request.Method != http.MethodDelete) || (!strings.HasSuffix(path, "/credentials/status") && !strings.HasSuffix(path, "/credentials")) || len(names) == 0 {
++		return nil
++	}
++	data, err := io.ReadAll(io.LimitReader(c.Request.Body, 4*1024*1024+1))
++	if err != nil {
++		return err
++	}
++	if len(data) > 4*1024*1024 {
++		return errors.New("request too large")
++	}
++	var value map[string]json.RawMessage
++	if err = json.Unmarshal(data, &value); err != nil {
++		return err
++	}
++	if raw, ok := value["names"]; ok {
++		var items []string
++		if err = json.Unmarshal(raw, &items); err != nil {
++			return err
++		}
++		for i, name := range items {
++			if original, ok := names[name]; ok {
++				items[i] = original
++			}
++		}
++		value["names"], _ = json.Marshal(items)
++	}
++	data, err = json.Marshal(value)
++	if err != nil {
++		return err
++	}
++	c.Request.Body = io.NopCloser(bytes.NewReader(data))
++	c.Request.ContentLength = int64(len(data))
++	return nil
++}
++
++const maxPrivacyResponseBytes = 32 * 1024 * 1024
++
++type privacyWriter struct {
++	gin.ResponseWriter
++	body     bytes.Buffer
++	status   int
++	written  bool
++	overflow bool
++}
++
++func (w *privacyWriter) WriteHeader(status int) {
++	if !w.written {
++		w.status = status
++	}
++}
++func (w *privacyWriter) WriteHeaderNow() { w.written = true }
++func (w *privacyWriter) Write(data []byte) (int, error) {
++	w.written = true
++	if w.body.Len()+len(data) > maxPrivacyResponseBytes {
++		w.overflow = true
++		return len(data), nil
++	}
++	return w.body.Write(data)
++}
++func (w *privacyWriter) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
++func (w *privacyWriter) Status() int                       { return w.status }
++func (w *privacyWriter) Size() int {
++	if !w.written {
++		return -1
++	}
++	return w.body.Len()
++}
++func (w *privacyWriter) Written() bool { return w.written }
++func (w *privacyWriter) Flush()        { w.WriteHeaderNow() }
+diff --git a/internal/api/email_privacy_test.go b/internal/api/email_privacy_test.go
+new file mode 100644
+index 00000000..9a53429b
+--- /dev/null
++++ b/internal/api/email_privacy_test.go
+@@ -0,0 +1,130 @@
++package api
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++
++	"cpa-usage-keeper/internal/emailprivacy"
++	"github.com/gin-gonic/gin"
++)
++
++type privacySourceStub struct {
++	mu      sync.Mutex
++	entries []emailprivacy.Entry
++	fail    bool
++}
++
++func (s *privacySourceStub) KeeperEmailPrivacy(context.Context) ([]emailprivacy.Entry, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.fail {
++		return nil, errors.New("unavailable")
++	}
++	return append([]emailprivacy.Entry{}, s.entries...), nil
++}
++
++func TestEmailPrivacyBoundaryCoversAllDataSurfaces(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	const email = "example.secret@example.com"
++	source := &privacySourceStub{entries: []emailprivacy.Entry{{Name: "codex-" + email + ".json", Email: email, Hidden: true}}}
++	path := filepath.Join(t.TempDir(), "privacy.json")
++	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "/keeper", OptionalProviders{EmailPrivacy: NewEmailPrivacyBoundary(source, path)})
++	// Use the same boundary as production for synthetic payloads with historical
++	// labels, routing account maps, nested details, filenames and CSV exports.
++	group := router.Group("/fixture", NewEmailPrivacyBoundary(source, path).Middleware())
++	group.GET("/report", func(c *gin.Context) {
++		c.Header("X-Account", email)
++		c.JSON(200, gin.H{"email": email, "history": []string{email}, "accounts": map[string]string{"index": email}, "file_name": "codex-" + email + ".json"})
++	})
++	group.GET("/export", func(c *gin.Context) {
++		c.Header("Content-Disposition", "attachment; filename="+email+".csv")
++		c.Data(200, "text/csv", []byte("account\n"+email+"\n"))
++	})
++	for _, uri := range []string{"/fixture/report", "/fixture/export"} {
++		rec := httptest.NewRecorder()
++		router.ServeHTTP(rec, httptest.NewRequest("GET", uri, nil))
++		if rec.Code != 200 || strings.Contains(rec.Body.String(), email) || strings.Contains(rec.Header().Get("X-Account"), email) || strings.Contains(rec.Header().Get("Content-Disposition"), email) {
++			t.Fatalf("privacy leak at %s: %d", uri, rec.Code)
++		}
++		if !strings.Contains(rec.Body.String(), "exampl**@example.com") {
++			t.Fatal(rec.Body.String())
++		}
++	}
++	for _, uri := range []string{"/keeper/api/v1/usage/events/1/request-log", "/keeper/api/v1/usage/events/1/request-log/download-file?token=old", "/keeper/api/v1/usage/events/1/request-log/download-token"} {
++		method := http.MethodGet
++		if strings.HasSuffix(uri, "download-token") {
++			method = http.MethodPost
++		}
++		rec := httptest.NewRecorder()
++		router.ServeHTTP(rec, httptest.NewRequest(method, uri, nil))
++		if rec.Code != 403 {
++			t.Fatalf("raw log bypass %s: %d", uri, rec.Code)
++		}
++	}
++	source.mu.Lock()
++	source.entries = nil
++	source.mu.Unlock()
++	rec := httptest.NewRecorder()
++	router.ServeHTTP(rec, httptest.NewRequest("GET", "/fixture/report", nil))
++	if strings.Contains(rec.Body.String(), email) {
++		t.Fatal("deletion exposed archived history")
++	}
++	source.mu.Lock()
++	source.fail = true
++	source.mu.Unlock()
++	rec = httptest.NewRecorder()
++	router.ServeHTTP(rec, httptest.NewRequest("GET", "/fixture/report", nil))
++	if rec.Code != 503 || strings.Contains(rec.Body.String(), email) {
++		t.Fatal("policy outage failed open")
++	}
++}
++
++func TestEmailPrivacyRechecksAfterHandlerAndRestoresActions(t *testing.T) {
++	source := &privacySourceStub{entries: []emailprivacy.Entry{}}
++	boundary := NewEmailPrivacyBoundary(source, filepath.Join(t.TempDir(), "privacy.json"))
++	r := gin.New()
++	r.Use(boundary.Middleware())
++	email := "example.secret@example.com"
++	r.GET("/slow", func(c *gin.Context) {
++		source.mu.Lock()
++		source.entries = []emailprivacy.Entry{{Name: email + ".json", Email: email, Hidden: true}}
++		source.mu.Unlock()
++		c.JSON(200, gin.H{"email": email})
++	})
++	rec := httptest.NewRecorder()
++	r.ServeHTTP(rec, httptest.NewRequest("GET", "/slow", nil))
++	if rec.Code != 200 || strings.Contains(rec.Body.String(), email) {
++		t.Fatal("in-flight report bypassed new policy")
++	}
++	policy, err := boundary.policy(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	var alias string
++	for name := range policy.Names {
++		alias = name
++	}
++	r.PATCH("/credentials/status", func(c *gin.Context) {
++		var body map[string][]string
++		if err := c.ShouldBindJSON(&body); err != nil {
++			t.Fatal(err)
++		}
++		if body["names"][0] != email+".json" {
++			t.Fatal("server did not restore private filename")
++		}
++		c.JSON(200, body)
++	})
++	payload, _ := json.Marshal(map[string][]string{"names": {alias}})
++	rec = httptest.NewRecorder()
++	r.ServeHTTP(rec, httptest.NewRequest("PATCH", "/credentials/status", strings.NewReader(string(payload))))
++	if rec.Code != 200 || strings.Contains(rec.Body.String(), email) {
++		t.Fatal("action response leaked filename")
++	}
++}
+diff --git a/internal/api/router.go b/internal/api/router.go
+index 6c1278a0..8012d822 100644
+--- a/internal/api/router.go
++++ b/internal/api/router.go
+@@ -52,6 +52,7 @@ type StatusRouteConfig struct {
+ }
+ 
+ type OptionalProviders struct {
++	EmailPrivacy       *EmailPrivacyBoundary
+ 	QuotaPolicies      QuotaPolicyProvider
+ 	Live               *live.Hub
+ 	Ranking            rankinghttpapi.Provider
+@@ -138,9 +139,13 @@ func NewRouter(
+ 	if len(optionalProviders) > 0 {
+ 		authHandler.registerLiveRoutes(apiV1, optionalProviders[0].Live)
+ 	}
++	privacyMiddleware := func(c *gin.Context) { c.Next() }
++	if len(optionalProviders) > 0 && optionalProviders[0].EmailPrivacy != nil {
++		privacyMiddleware = optionalProviders[0].EmailPrivacy.Middleware()
++	}
+ 	requestLogDownloadTokens := newRequestLogDownloadTokenStore()
+ 
+-	registerUsageEventRequestLogDownloadTokenRoutes(apiV1, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
++	registerUsageEventRequestLogDownloadTokenRoutes(apiV1.Group("", privacyMiddleware), requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
+ 
+ 	versionProtected := apiV1.Group("")
+ 	versionProtected.Use(authHandler.roleMiddleware(auth.RoleAdmin, auth.RoleAPIKeyViewer, auth.RoleReadOnly))
+@@ -148,6 +153,7 @@ func NewRouter(
+ 
+ 	readOnlyProtected := apiV1.Group("")
+ 	readOnlyProtected.Use(authHandler.readOnlyMiddleware())
++	readOnlyProtected.Use(privacyMiddleware)
+ 	readOnlyProtected.Use(costReadMiddleware(costReadGate, basePath))
+ 	registerReadOnlyOverviewRoute(readOnlyProtected, usageProvider, cpaAPIKeyProvider)
+ 	registerReadOnlyDashboardRoutes(readOnlyProtected, usageProvider, cpaAPIKeyProvider, usageIdentityProvider)
+@@ -156,6 +162,7 @@ func NewRouter(
+ 
+ 	adminProtected := apiV1.Group("")
+ 	adminProtected.Use(authHandler.adminMiddleware())
++	adminProtected.Use(privacyMiddleware)
+ 	if len(optionalProviders) > 0 && optionalProviders[0].Live != nil {
+ 		adminProtected.Use(func(c *gin.Context) {
+ 			c.Next()
+@@ -200,6 +207,7 @@ func NewRouter(
+ 	keyViewerProtected := apiV1.Group("")
+ 	keyViewerProtected.Use(authHandler.apiKeyViewerMiddleware())
+ 	keyViewerProtected.Use(authHandler.activeAPIKeyViewerMiddleware())
++	keyViewerProtected.Use(privacyMiddleware)
+ 	keyViewerProtected.Use(costReadMiddleware(costReadGate, basePath))
+ 	if authConfig.APIKeyViewerQuotaEnabled {
+ 		registerKeyQuotaRoute(keyViewerProtected, usageIdentityProvider, quotaProvider)
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 2283b3dd..6cca62b4 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -7,6 +7,7 @@ import (
+ 	"fmt"
+ 	"io"
+ 	"net/url"
++	"path/filepath"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -307,6 +308,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+ 			authHandler,
+ 			cfg.AppBasePath,
+ 			api.OptionalProviders{
++				EmailPrivacy:  api.NewEmailPrivacyBoundary(cpaClient, filepath.Join(cfg.WorkDir, "keeper-email-privacy.json")),
+ 				QuotaPolicies: cpaClient,
+ 				Live:          liveHub,
+ 				UsageIdentity: usageIdentityService,
+diff --git a/internal/app/test/database_file_pool_test.go b/internal/app/test/database_file_pool_test.go
+index 6e906b4a..c9d29cae 100644
+--- a/internal/app/test/database_file_pool_test.go
++++ b/internal/app/test/database_file_pool_test.go
+@@ -169,6 +169,9 @@ func TestUsageEventExportBypassesOccupiedFileWriter(t *testing.T) {
+ func TestAPIKeyAliasUpdateStaysOnWriterWhenReadersAreOccupied(t *testing.T) {
+ 	// 写命令会先 UPDATE 再回读最新 API Key；整个命令必须固定使用 writer。
+ 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if serveVisibleEmailPolicy(w, r) {
++			return
++		}
+ 		if r.Method != http.MethodPatch || r.URL.Path != "/v8/management/access/api-key-names" {
+ 			t.Errorf("unexpected shared name request: %s %s", r.Method, r.URL.Path)
+ 		}
+diff --git a/internal/app/test/email_privacy_fixture_test.go b/internal/app/test/email_privacy_fixture_test.go
+new file mode 100644
+index 00000000..c057b9c3
+--- /dev/null
++++ b/internal/app/test/email_privacy_fixture_test.go
+@@ -0,0 +1,26 @@
++package test
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++func serveVisibleEmailPolicy(w http.ResponseWriter, r *http.Request) bool {
++	if r.URL.Path != "/v8/management/keeper-email-privacy" {
++		return false
++	}
++	w.Header().Set("Content-Type", "application/json")
++	_, _ = w.Write([]byte(`{"version":1,"entries":[]}`))
++	return true
++}
++
++func visibleEmailPolicyServer(t *testing.T) string {
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if !serveVisibleEmailPolicy(w, r) {
++			w.WriteHeader(http.StatusNotFound)
++		}
++	}))
++	t.Cleanup(server.Close)
++	return server.URL
++}
+diff --git a/internal/app/test/pricing_runtime_acceptance_test.go b/internal/app/test/pricing_runtime_acceptance_test.go
+index 9a61a802..394c9fb0 100644
+--- a/internal/app/test/pricing_runtime_acceptance_test.go
++++ b/internal/app/test/pricing_runtime_acceptance_test.go
+@@ -163,7 +163,10 @@ func TestPricingRuntimeFailureKeepsPublicShell(t *testing.T) {
+ 
+ func pricingRuntimeConfig(t *testing.T) config.Config {
+ 	t.Helper()
+-	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++	cpa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if serveVisibleEmailPolicy(w, r) {
++			return
++		}
+ 		w.WriteHeader(http.StatusNotFound)
+ 		_, _ = io.WriteString(w, `{}`)
+ 	}))
+diff --git a/internal/app/test/pricing_startup_pipeline_test.go b/internal/app/test/pricing_startup_pipeline_test.go
+index a86e7683..528b9972 100644
+--- a/internal/app/test/pricing_startup_pipeline_test.go
++++ b/internal/app/test/pricing_startup_pipeline_test.go
+@@ -21,6 +21,9 @@ import (
+ // newInitializedApp 供只需业务 wiring 的测试走与 RunContext 相同的 M0–M8 初始化，不启动网络接收。
+ func newInitializedApp(t *testing.T, cfg config.Config) *keeperapp.App {
+ 	t.Helper()
++	if cfg.CPABaseURL == "https://cpa.example.com" {
++		cfg.CPABaseURL = visibleEmailPolicyServer(t)
++	}
+ 	application, err := keeperapp.NewWithConfig(cfg)
+ 	if err != nil {
+ 		t.Fatal(err)
+diff --git a/internal/app/test/pricing_upgrade_compatibility_test.go b/internal/app/test/pricing_upgrade_compatibility_test.go
+index 98444276..70763987 100644
+--- a/internal/app/test/pricing_upgrade_compatibility_test.go
++++ b/internal/app/test/pricing_upgrade_compatibility_test.go
+@@ -16,8 +16,8 @@ import (
+ 	"cpa-usage-keeper/internal/entities"
+ )
+ 
+-// 无论上游版本或可用性如何，旧库都应完成迁移，并通过业务 HTTP 读取本地历史。
+-func TestPricingLegacyStartupKeepsHistoryAvailableWithoutCPAVersionGate(t *testing.T) {
++// Missing privacy support does not block local migration or readiness, but data reads fail closed.
++func TestPricingLegacyStartupRemainsReadyButProtectsHistoryWithoutPrivacyPolicy(t *testing.T) {
+ 	for _, scenario := range []string{"old_release", "supported", "unknown", "authentication_failure", "unreachable", "slow"} {
+ 		t.Run(scenario, func(t *testing.T) {
+ 			cfg := pricingRuntimeConfig(t)
+@@ -66,8 +66,8 @@ func TestPricingLegacyStartupKeepsHistoryAvailableWithoutCPAVersionGate(t *testi
+ 				t.Fatalf("CPA %s blocked readiness: %d %s", scenario, status, body)
+ 			}
+ 			status, body = pricingRuntimeRequest(t, http.MethodGet, baseURL+"/api/v1/usage/events?range=custom&start=2026-09-23&end=2026-09-24", nil)
+-			if status != http.StatusOK || !strings.Contains(string(body), `"model":"old-model"`) || !strings.Contains(string(body), `"input_tokens":100`) {
+-				t.Fatalf("CPA %s prevented local history reads: %d %s", scenario, status, body)
++			if status != http.StatusServiceUnavailable || !strings.Contains(string(body), "Email visibility could not be verified") {
++				t.Fatalf("CPA %s exposed history without a verified privacy policy: %d %s", scenario, status, body)
+ 			}
+ 			var state entities.PricingMigrationState
+ 			if err := application.DB.Take(&state).Error; err != nil || !state.DataComplete || state.BackupPath == nil {
+diff --git a/internal/cpa/email_privacy.go b/internal/cpa/email_privacy.go
+new file mode 100644
+index 00000000..0e8498ce
+--- /dev/null
++++ b/internal/cpa/email_privacy.go
+@@ -0,0 +1,22 @@
++package cpa
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/emailprivacy"
++	"errors"
++)
++
++func (c *Client) KeeperEmailPrivacy(ctx context.Context) ([]emailprivacy.Entry, error) {
++	var result struct {
++		Version int                  `json:"version"`
++		Entries []emailprivacy.Entry `json:"entries"`
++	}
++	_, _, err := c.doManagementJSONRequest(ctx, "/v8/management/keeper-email-privacy", &result, "email privacy")
++	if err != nil {
++		return nil, err
++	}
++	if result.Version != 1 || result.Entries == nil {
++		return nil, errors.New("email privacy policy unavailable")
++	}
++	return result.Entries, nil
++}
+diff --git a/internal/emailprivacy/name.go b/internal/emailprivacy/name.go
+new file mode 100644
+index 00000000..ca9686ba
+--- /dev/null
++++ b/internal/emailprivacy/name.go
+@@ -0,0 +1,11 @@
++package emailprivacy
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++)
++
++func privateName(name string) string {
++	sum := sha256.Sum256([]byte(name))
++	return "private-credential-" + hex.EncodeToString(sum[:12]) + ".json"
++}
+diff --git a/internal/emailprivacy/policy.go b/internal/emailprivacy/policy.go
+new file mode 100644
+index 00000000..ffb7c937
+--- /dev/null
++++ b/internal/emailprivacy/policy.go
+@@ -0,0 +1,200 @@
++// Package emailprivacy enforces CPAMC's per-credential email visibility policy.
++package emailprivacy
++
++import (
++	"encoding/json"
++	"errors"
++	"net/url"
++	"os"
++	"path/filepath"
++	"regexp"
++	"sort"
++	"strings"
++)
++
++type Entry struct {
++	Name   string `json:"name"`
++	Email  string `json:"email"`
++	Hidden bool   `json:"hidden"`
++}
++
++// Mask counts Unicode characters rather than bytes and always adds the mask.
++func Mask(email string) string {
++	at := strings.LastIndex(email, "@")
++	if at <= 0 || at == len(email)-1 {
++		return "[hidden email]"
++	}
++	local := []rune(email[:at])
++	if len(local) > 6 {
++		local = local[:6]
++	}
++	return string(local) + "**" + email[at:]
++}
++
++type Rule struct {
++	Pattern     *regexp.Regexp
++	Replacement string
++}
++type Policy struct {
++	Entries []Entry
++	Rules   []Rule
++	Names   map[string]string
++}
++
++// Build retains privacy for removed credentials and old addresses, so deleting a
++// file cannot make historical usage public again. A visible current copy of the
++// same email only clears protection if no other copy still hides it.
++func Build(previous, current []Entry) Policy {
++	hidden := map[string]Entry{}
++	for _, e := range previous {
++		if e.Hidden && e.Email != "" {
++			hidden[strings.ToLower(e.Email)] = e
++		}
++	}
++	for _, e := range current {
++		if !e.Hidden && e.Email != "" {
++			delete(hidden, strings.ToLower(e.Email))
++		}
++	}
++	for _, e := range current {
++		if e.Hidden && e.Email != "" {
++			hidden[strings.ToLower(e.Email)] = e
++		}
++	}
++	p := Policy{Names: map[string]string{}}
++	keys := make([]string, 0, len(hidden))
++	for key := range hidden {
++		keys = append(keys, key)
++	}
++	sort.Strings(keys)
++	for _, key := range keys {
++		p.Entries = append(p.Entries, hidden[key])
++	}
++	replacements := map[string]string{}
++	add := func(original, masked string) {
++		if original == "" || original == masked {
++			return
++		}
++		replacements[original] = masked
++		if encoded := url.QueryEscape(original); encoded != original {
++			replacements[encoded] = url.QueryEscape(masked)
++		}
++		if encoded := url.PathEscape(original); encoded != original {
++			replacements[encoded] = url.PathEscape(masked)
++		}
++	}
++	for _, e := range p.Entries {
++		add(e.Email, Mask(e.Email))
++	}
++	// Names may contain addresses not identical to the email metadata. Hide the
++	// whole filename and keep a reversible server-only mapping for batch actions.
++	for _, e := range append(append([]Entry{}, p.Entries...), current...) {
++		if _, ok := hidden[strings.ToLower(e.Email)]; !ok || e.Name == "" {
++			continue
++		}
++		// Stable filename handles avoid collisions between accounts with equal prefixes.
++		alias := privateName(e.Name)
++		p.Names[alias] = e.Name
++		add(e.Name, alias)
++	}
++	originals := make([]string, 0, len(replacements))
++	for key := range replacements {
++		originals = append(originals, key)
++	}
++	sort.Slice(originals, func(i, j int) bool {
++		if len(originals[i]) == len(originals[j]) {
++			return originals[i] < originals[j]
++		}
++		return len(originals[i]) > len(originals[j])
++	})
++	for _, key := range originals {
++		p.Rules = append(p.Rules, Rule{regexp.MustCompile("(?i)" + regexp.QuoteMeta(key)), replacements[key]})
++	}
++	return p
++}
++
++func (p Policy) Text(s string) string {
++	for _, rule := range p.Rules {
++		s = rule.Pattern.ReplaceAllStringFunc(s, func(string) string { return rule.Replacement })
++	}
++	return s
++}
++
++// JSON decodes escaped strings before scrubbing, including object keys. Numbers
++// remain json.Number, preserving identifiers beyond JavaScript's safe range.
++func (p Policy) JSON(body []byte) ([]byte, error) {
++	var value any
++	decoder := json.NewDecoder(strings.NewReader(string(body)))
++	decoder.UseNumber()
++	if err := decoder.Decode(&value); err != nil {
++		return nil, err
++	}
++	var walk func(any) any
++	walk = func(v any) any {
++		switch typed := v.(type) {
++		case string:
++			return p.Text(typed)
++		case []any:
++			for i, item := range typed {
++				typed[i] = walk(item)
++			}
++		case map[string]any:
++			out := make(map[string]any, len(typed))
++			for key, item := range typed {
++				out[p.Text(key)] = walk(item)
++			}
++			return out
++		}
++		return v
++	}
++	return json.Marshal(walk(value))
++}
++
++func Load(path string) ([]Entry, error) {
++	if path == "" {
++		return nil, nil
++	}
++	data, err := os.ReadFile(path)
++	if errors.Is(err, os.ErrNotExist) {
++		return nil, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++	var entries []Entry
++	err = json.Unmarshal(data, &entries)
++	return entries, err
++}
++
++func Save(path string, entries []Entry) error {
++	if path == "" {
++		return nil
++	}
++	data, err := json.Marshal(entries)
++	if err != nil {
++		return err
++	}
++	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
++		return err
++	}
++	file, err := os.CreateTemp(filepath.Dir(path), ".email-privacy-*")
++	if err != nil {
++		return err
++	}
++	name := file.Name()
++	defer os.Remove(name)
++	if err = file.Chmod(0600); err == nil {
++		_, err = file.Write(data)
++	}
++	if err == nil {
++		err = file.Sync()
++	}
++	closeErr := file.Close()
++	if err != nil {
++		return err
++	}
++	if closeErr != nil {
++		return closeErr
++	}
++	return os.Rename(name, path)
++}
+diff --git a/internal/emailprivacy/policy_test.go b/internal/emailprivacy/policy_test.go
+new file mode 100644
+index 00000000..01fcaeb9
+--- /dev/null
++++ b/internal/emailprivacy/policy_test.go
+@@ -0,0 +1,65 @@
++package emailprivacy
++
++import (
++	"encoding/json"
++	"net/url"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestPolicyEscapesHistoryAndAliases(t *testing.T) {
++	email := "example.person+work@example.com"
++	p := Build(nil, []Entry{{"codex-" + email + ".json", email, true}, {"public.json", "visible@example.com", false}})
++	body := `{"example.person+work@example.com":"ex\u0061mple.person+work@example.com","filename":"codex-example.person+work@example.com.json","nested":[{"url":"` + url.QueryEscape(email) + `","text":"EXAMPLE.PERSON+WORK@EXAMPLE.COM","visible":"visible@example.com"}],"large":9223372036854775807}`
++	result, err := p.JSON([]byte(body))
++	if err != nil {
++		t.Fatal(err)
++	}
++	text := string(result)
++	if strings.Contains(strings.ToLower(text), strings.ToLower(email)) || strings.Contains(text, url.QueryEscape(email)) {
++		t.Fatal("private address escaped sanitization")
++	}
++	if !strings.Contains(text, "exampl**@example.com") || !strings.Contains(text, "visible@example.com") || !strings.Contains(text, "9223372036854775807") {
++		t.Fatal(text)
++	}
++	var parsed map[string]any
++	if err = json.Unmarshal(result, &parsed); err != nil {
++		t.Fatal(err)
++	}
++	alias := parsed["filename"].(string)
++	if p.Names[alias] != "codex-"+email+".json" {
++		t.Fatal("batch action handle is not reversible on server")
++	}
++	for _, tc := range []struct{ value, want string }{{"ab@x.com", "ab**@x.com"}, {"abcdef@x.com", "abcdef**@x.com"}, {"你好世界甲乙丙@x.com", "你好世界甲乙**@x.com"}, {"invalid", "[hidden email]"}} {
++		if got := Mask(tc.value); got != tc.want {
++			t.Fatalf("mask %q = %q", tc.value, got)
++		}
++	}
++}
++
++func TestPolicySurvivesDeleteRestartAndDuplicateFiles(t *testing.T) {
++	private := Entry{"one.json", "private.user@example.com", true}
++	p := Build(nil, []Entry{private})
++	path := filepath.Join(t.TempDir(), "privacy.json")
++	if err := Save(path, p.Entries); err != nil {
++		t.Fatal(err)
++	}
++	loaded, err := Load(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	deleted := Build(loaded, nil)
++	if deleted.Text(private.Email) == private.Email {
++		t.Fatal("deleting a file revealed history")
++	}
++	visible := private
++	visible.Hidden = false
++	if len(Build(loaded, []Entry{visible}).Entries) != 0 {
++		t.Fatal("CPAMC cannot turn privacy off")
++	}
++	visible.Name = "other.json"
++	if len(Build(loaded, []Entry{visible, private}).Entries) != 1 {
++		t.Fatal("visible duplicate bypassed a hidden copy")
++	}
++}

@@ -54,6 +54,12 @@ Before connecting a real client, check that missing/incorrect Access credentials
 
 CPA stores generated configuration and OAuth files under `/data`. Keeper stores its database, logs and rolling backups under `/data`. Home Assistant cold backups stop the apps while capturing their data. Treat backups as sensitive: they contain credentials and request metadata. Keeper's one-hour CPA queue retention helps short interruptions; it does not replace continuous collection or persist CPA's in-memory queue across CPA restarts.
 
+## Email privacy in Keeper
+
+In CPAMC, open **Auth Files → Details / Edit**, enable **Hide email in Keeper**, and save. This per-file setting is off by default. Keeper displays the first six email characters followed by `**` and the domain: `example.person@example.com` becomes `exampl**@example.com`. Reload any already-open Keeper pages after saving.
+
+Keeper enforces masking on the server for reports, details, exports, routing information and credential filenames; its UI cannot reveal the original email. CPAMC remains the trusted credential-management interface and retains the original. Raw request logs are unavailable through Keeper while any email is hidden. Hidden historical identities remain protected after deleting an auth file. If Keeper cannot verify the privacy policy with CPA, data APIs return 503 until verification succeeds; health and sign-in remain available. Upgrade CPA before Keeper to provide the required privacy endpoint.
+
 ## Development
 
 ```sh
@@ -66,7 +72,7 @@ python tests/smoke.py
 
 Smoke tests use random disposable credentials, a fake model provider, isolated Docker resources, and no paid model calls. They check API authentication, blocked management paths, a model response, SSE forwarding, Keeper authentication and usage ingestion, persistence across restarts, and graceful shutdown. Resources are removed when the test exits.
 
-To update upstream, freeze each source commit and runtime image digest, reconcile the local patch chain, and verify the packaged applications before bumping app versions and changelogs. Keeper v2 upgrades require a stopped pre-upgrade database backup; rollback restores that backup together with the previous app version. Do not open a migrated v2 database with a v1 binary. Local ranking and restricted reporting remain supported by these wrappers. Actions builds both apps in parallel on native amd64 and arm64 runners. The amd64 images feed six independent integration suites; publication waits for all builds and tests to pass. Published images are copied from the original OCI build artifacts, including provenance, without rebuilding them. Home Assistant uses the exact app version tag. Forks must update `repository.yaml` and the app image names/URLs to their own account.
+To update upstream, freeze each source commit and runtime image digest, reconcile the local patch chain, and verify the packaged applications before bumping app versions and changelogs. Keeper v2 upgrades require a stopped pre-upgrade database backup; rollback restores that backup together with the previous app version. Do not open a migrated v2 database with a v1 binary. Local ranking and restricted reporting remain supported by these wrappers. Actions builds both apps in parallel on native amd64 and arm64 runners. The amd64 images feed seven independent integration suites; publication waits for all builds and tests to pass. Published images are copied from the original OCI build artifacts, including provenance, without rebuilding them. Home Assistant uses the exact app version tag. Forks must update `repository.yaml` and the app image names/URLs to their own account.
 
 Pull requests retain the amd64 build and integration checks without registry write permissions. Build layers use separate app/architecture caches; temporary Go compiler caches stay outside exported layers. OCI artifacts expire after one day, so rerun the full workflow if a later publication retry needs expired artifacts. Concurrent main-branch releases are serialized to keep their tags ordered.
 

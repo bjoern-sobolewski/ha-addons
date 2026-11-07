@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5
+
+- Enforce CPAMC email privacy on all Keeper data APIs, live routing, history, details and CSV exports. Display the first six characters followed by **@provider; preserve private filename actions without exposing original names. Block raw request logs while an email is hidden, retain historical protection across deletion/restarts, and fail closed when policy verification is unavailable.
+
 ## 0.2.4
 
 - Add an administrator Live routing dashboard combining active traffic, account distribution, routing reasons, candidate eligibility and rebalance progress.

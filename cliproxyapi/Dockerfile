@@ -37,6 +37,9 @@ COPY patches/websocket-test-sync.patch /tmp/websocket-test-sync.patch
 RUN git apply --check /tmp/websocket-test-sync.patch && git apply /tmp/websocket-test-sync.patch
 COPY patches/quota-observation-compat.patch /tmp/quota-observation-compat.patch
 RUN git apply --check /tmp/quota-observation-compat.patch && git apply /tmp/quota-observation-compat.patch
+COPY patches/quota-policy.patch /tmp/quota-policy.patch
+RUN git apply --check /tmp/quota-policy.patch && git apply /tmp/quota-policy.patch
+
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./
@@ -46,7 +49,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/live ./in
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/api/handlers/openai
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api -run 'TestManagementV8'
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.3" -o /out/CLIProxyAPI ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.4" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -80,7 +83,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.19
+ARG BUILD_VERSION=0.1.20
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

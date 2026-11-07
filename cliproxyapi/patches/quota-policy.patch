@@ -1,0 +1,1094 @@
+diff --git a/internal/api/handlers/management/quota_policy.go b/internal/api/handlers/management/quota_policy.go
+new file mode 100644
+index 00000000..141712a7
+--- /dev/null
++++ b/internal/api/handlers/management/quota_policy.go
+@@ -0,0 +1,73 @@
++package management
++
++import (
++	"errors"
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"net/http"
++	"time"
++)
++
++func quotaPolicyState(a *coreauth.Auth) quotatraffic.PolicyState {
++	state := quotatraffic.RoutingPolicies.State(a.Index, a.Provider, time.Now())
++	state.ManuallyDisabled = a.Disabled || a.Status == coreauth.StatusDisabled
++	return state
++}
++
++func (h *Handler) GetQuotaPolicies(c *gin.Context) {
++	items := []quotatraffic.PolicyState{}
++	if h.authManager != nil {
++		for _, a := range h.authManager.List() {
++			if a != nil && (a.Provider == "codex" || a.Provider == "claude") {
++				items = append(items, quotaPolicyState(a))
++			}
++		}
++	}
++	c.Header("Cache-Control", "no-store")
++	c.JSON(http.StatusOK, gin.H{"items": items})
++}
++
++func (h *Handler) PutQuotaPolicy(c *gin.Context) {
++	var body struct {
++		AuthIndex  string              `json:"auth_index"`
++		Provider   string              `json:"provider"`
++		Thresholds map[string]*float64 `json:"thresholds"`
++		Expected   *map[string]float64 `json:"expected_thresholds"`
++	}
++	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32768)
++	if c.ShouldBindJSON(&body) != nil || body.AuthIndex == "" || body.Thresholds == nil || body.Expected == nil {
++		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid quota policy"})
++		return
++	}
++	if h.authManager != nil {
++		for _, a := range h.authManager.List() {
++			if a == nil || a.Index != body.AuthIndex || a.Provider != body.Provider {
++				continue
++			}
++			known := map[string]bool{}
++			for _, w := range quotaPolicyState(a).Windows {
++				known[w.ID] = true
++			}
++			values := map[string]float64{}
++			for id, n := range body.Thresholds {
++				if !known[id] || n == nil || !(*n >= 0 && *n <= 100) {
++					c.JSON(http.StatusBadRequest, gin.H{"error": "threshold must be 0–100 for an observed or already configured window"})
++					return
++				}
++				values[id] = *n
++			}
++			if err := quotatraffic.RoutingPolicies.CompareAndSet(a.Index, a.Provider, values, *body.Expected); err != nil {
++				if errors.Is(err, quotatraffic.ErrPolicyChanged) {
++					c.JSON(http.StatusConflict, gin.H{"error": "quota policy changed; reload and retry"})
++					return
++				}
++				c.JSON(http.StatusInternalServerError, gin.H{"error": "quota policy could not be persisted"})
++				return
++			}
++			c.JSON(http.StatusOK, quotaPolicyState(a))
++			return
++		}
++	}
++	c.JSON(http.StatusNotFound, gin.H{"error": "quota policy account not found"})
++}
+diff --git a/internal/api/handlers/management/quota_policy_test.go b/internal/api/handlers/management/quota_policy_test.go
+new file mode 100644
+index 00000000..216e2f56
+--- /dev/null
++++ b/internal/api/handlers/management/quota_policy_test.go
+@@ -0,0 +1,64 @@
++package management
++
++import (
++	"context"
++	"encoding/json"
++	"github.com/gin-gonic/gin"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestQuotaPolicyContractPreservesManualSettingsAndRejectsInvalidEdits(t *testing.T) {
++	old := quotatraffic.RoutingPolicies
++	defer func() { quotatraffic.RoutingPolicies = old }()
++	store := quotatraffic.NewPolicyStore()
++	quotatraffic.RoutingPolicies = store
++	if err := store.Load(filepath.Join(t.TempDir(), "policy.json")); err != nil {
++		t.Fatal(err)
++	}
++	manager := coreauth.NewManager(nil, nil, nil)
++	auth, err := manager.Register(coreauth.WithSkipPersist(context.Background()), &coreauth.Auth{ID: t.Name(), Provider: "codex", Disabled: true, Status: coreauth.StatusDisabled, Attributes: map[string]string{"priority": "7"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	quotatraffic.Capture(auth.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"90"}, "X-Codex-Primary-Window-Minutes": {"300"}}, time.Now(), "api_response_headers")
++	h := &Handler{authManager: manager}
++	put := func(thresholds any, expected any) int {
++		data, _ := json.Marshal(map[string]any{"auth_index": auth.Index, "provider": "codex", "thresholds": thresholds, "expected_thresholds": expected})
++		recorder := httptest.NewRecorder()
++		c, _ := gin.CreateTestContext(recorder)
++		c.Request = httptest.NewRequest("PUT", "/", strings.NewReader(string(data)))
++		c.Request.Header.Set("Content-Type", "application/json")
++		h.PutQuotaPolicy(c)
++		return recorder.Code
++	}
++	for _, v := range []any{nil, map[string]any{"x-codex-primary@300": nil}, map[string]any{"x-codex-primary@300": 101}, map[string]any{"unobserved": 10}} {
++		if got := put(v, map[string]float64{}); got != 400 {
++			t.Fatalf("invalid edit returned %d", got)
++		}
++	}
++	threshold := map[string]float64{"x-codex-primary@300": 10}
++	if got := put(threshold, map[string]float64{}); got != 200 {
++		t.Fatal(got)
++	}
++	if got := put(map[string]float64{}, map[string]float64{}); got != 409 {
++		t.Fatal("stale edit accepted", got)
++	}
++	current, _ := manager.GetByID(auth.ID)
++	if !current.Disabled || current.Attributes["priority"] != "7" {
++		t.Fatal("manual fields changed")
++	}
++	if got := put(map[string]float64{}, threshold); got != 200 {
++		t.Fatal(got)
++	}
++	current, _ = manager.GetByID(auth.ID)
++	if !current.Disabled {
++		t.Fatal("clearing policy enabled manually disabled account")
++	}
++}
+diff --git a/internal/api/server.go b/internal/api/server.go
+index 099b5dda..b1c8e7e2 100644
+--- a/internal/api/server.go
++++ b/internal/api/server.go
+@@ -9,9 +9,11 @@ import (
+ 	"crypto/tls"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
+ 	"net"
+ 	"net/http"
+ 	"os"
++	"path/filepath"
+ 	"strings"
+ 	"sync"
+ 	"sync/atomic"
+@@ -220,6 +222,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+ 	auth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
+ 	applySignatureCacheConfig(nil, cfg)
+ 	applyClaudeToolSearchConfig(cfg)
++	// Persist policies beside the server config, outside credential-watcher input.
++	if configFilePath != "" {
++		if err := quotatraffic.RoutingPolicies.Load(filepath.Join(filepath.Dir(configFilePath), "quota-policies.json")); err != nil {
++			panic("cannot load quota routing policies; refusing to serve")
++		}
++	}
+ 	// Initialize management handler
+ 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+ 	s.mgmt.SetPluginHost(optionState.pluginHost)
+diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
+index a2aa3912..c5139fa2 100644
+--- a/internal/api/server_management_v8.go
++++ b/internal/api/server_management_v8.go
+@@ -27,6 +27,8 @@ func (s *Server) registerManagementV8Routes() {
+ 	v8.GET("/access/api-key-names", s.mgmt.GetAPIKeyNames)
+ 	v8.PATCH("/access/api-key-names", s.mgmt.PatchAPIKeyNames)
+ 	v8.GET("/quota/observations", s.mgmt.GetQuotaObservations)
++	v8.GET("/quota/policies", s.mgmt.GetQuotaPolicies)
++	v8.PUT("/quota/policies", s.mgmt.PutQuotaPolicy)
+ 	v8.GET("/live", s.mgmt.GetLiveStats)
+ 	v8.GET("/config", s.mgmt.ConfigV8)
+ 	v8.PUT("/config", s.mgmt.ConfigV8)
+diff --git a/internal/quotatraffic/policy.go b/internal/quotatraffic/policy.go
+new file mode 100644
+index 00000000..de07ad9a
+--- /dev/null
++++ b/internal/quotatraffic/policy.go
+@@ -0,0 +1,311 @@
++package quotatraffic
++
++import (
++	"encoding/json"
++	"errors"
++	"fmt"
++	"math"
++	"os"
++	"path/filepath"
++	"reflect"
++	"sort"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
++)
++
++const PolicyMaxAge = 15 * time.Minute
++
++type WindowPolicy struct {
++	ID         string    `json:"id"`
++	Label      string    `json:"label"`
++	Minimum    *float64  `json:"minimum_remaining_percent"`
++	Remaining  *float64  `json:"remaining_percent"`
++	ObservedAt time.Time `json:"observed_at"`
++	ResetAt    time.Time `json:"reset_at"`
++	Source     string    `json:"source"`
++	Excluded   bool      `json:"excluded"`
++	Reason     string    `json:"reason"`
++}
++
++type PolicyState struct {
++	AuthIndex        string             `json:"auth_index"`
++	Provider         string             `json:"provider"`
++	ManuallyDisabled bool               `json:"manually_disabled"`
++	Thresholds       map[string]float64 `json:"thresholds"`
++	Windows          []WindowPolicy     `json:"windows"`
++	Excluded         bool               `json:"excluded"`
++	Reason           string             `json:"reason"`
++}
++
++type PolicyStore struct {
++	mu       sync.RWMutex
++	path     string
++	settings map[string]map[string]float64
++}
++
++// Settings belong to CPA so every consumer, retry and pinned transport sees the
++// same policy even when Keeper is offline. No credential or provider body is stored.
++var RoutingPolicies = NewPolicyStore()
++
++func NewPolicyStore() *PolicyStore            { return &PolicyStore{settings: map[string]map[string]float64{}} }
++func policyKey(index, provider string) string { return provider + ":" + index }
++
++func validThresholds(values map[string]float64) bool {
++	if len(values) > 64 {
++		return false
++	}
++	for id, n := range values {
++		if len(id) == 0 || len(id) > 256 || strings.ContainsAny(id, "\r\n\x00") || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || n > 100 {
++			return false
++		}
++	}
++	return true
++}
++
++// Load must succeed before serving requests. Corrupt/unreadable policy files
++// must never silently turn a configured safeguard off.
++func (s *PolicyStore) Load(filename string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	data, err := os.ReadFile(filename)
++	settings := map[string]map[string]float64{}
++	if err != nil && !errors.Is(err, os.ErrNotExist) {
++		return fmt.Errorf("read quota policy file: %w", err)
++	}
++	if err == nil {
++		if json.Unmarshal(data, &settings) != nil || settings == nil || len(settings) > 4096 {
++			return errors.New("invalid quota policy file")
++		}
++		for key, v := range settings {
++			provider, index, ok := strings.Cut(key, ":")
++			if !ok || index == "" || (provider != "codex" && provider != "claude") || v == nil || !validThresholds(v) {
++				return errors.New("invalid quota policy file")
++			}
++		}
++	}
++	s.path = filename
++	s.settings = settings
++	return nil
++}
++
++func (s *PolicyStore) Thresholds(index, provider string) map[string]float64 {
++	s.mu.RLock()
++	defer s.mu.RUnlock()
++	out := map[string]float64{}
++	for id, n := range s.settings[policyKey(index, provider)] {
++		out[id] = n
++	}
++	return out
++}
++
++// Set commits to disk before publishing to readers. Failed persistence keeps the
++// old policy active; replacing one account never overwrites another's settings.
++var ErrPolicyChanged = errors.New("quota policy changed")
++
++func (s *PolicyStore) Set(index, provider string, values map[string]float64) error {
++	return s.set(index, provider, values, nil)
++}
++func (s *PolicyStore) CompareAndSet(index, provider string, values, expected map[string]float64) error {
++	return s.set(index, provider, values, &expected)
++}
++func (s *PolicyStore) set(index, provider string, values map[string]float64, expected *map[string]float64) error {
++	if index == "" || (provider != "codex" && provider != "claude") || !validThresholds(values) {
++		return errors.New("invalid quota policy")
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if expected != nil {
++		current := s.settings[policyKey(index, provider)]
++		if len(current) != 0 || len(*expected) != 0 {
++			if !reflect.DeepEqual(current, *expected) {
++				return ErrPolicyChanged
++			}
++		}
++	}
++	next := make(map[string]map[string]float64, len(s.settings)+1)
++	for k, v := range s.settings {
++		next[k] = v
++	}
++	key := policyKey(index, provider)
++	if len(values) == 0 {
++		delete(next, key)
++	} else {
++		copied := map[string]float64{}
++		for k, v := range values {
++			copied[k] = v
++		}
++		next[key] = copied
++	}
++	if len(next) > 4096 {
++		return errors.New("too many quota policies")
++	}
++	if s.path == "" {
++		return errors.New("quota policy persistence is unavailable")
++	}
++	data, err := json.MarshalIndent(next, "", "  ")
++	if err != nil {
++		return err
++	}
++	file, err := os.CreateTemp(filepath.Dir(s.path), ".quota-policy-*")
++	if err != nil {
++		return err
++	}
++	name := file.Name()
++	defer os.Remove(name)
++	if err = file.Chmod(0600); err == nil {
++		_, err = file.Write(data)
++	}
++	if err == nil {
++		err = file.Sync()
++	}
++	closeErr := file.Close()
++	if err == nil {
++		err = closeErr
++	}
++	if err == nil {
++		err = os.Rename(name, s.path)
++	}
++	if err != nil {
++		return err
++	}
++	s.settings = next
++	live.Default.Publish("quota")
++	return nil
++}
++
++func observationWindow(o Observation) (WindowPolicy, bool) {
++	w := WindowPolicy{ID: o.Window, Label: o.Window, ObservedAt: o.ObservedAt, Source: o.Source}
++	for key, values := range o.Headers {
++		if len(values) == 0 {
++			continue
++		}
++		lower := strings.ToLower(key)
++		if strings.HasSuffix(lower, "-used-percent") || strings.HasSuffix(lower, "-utilization") {
++			used, err := strconv.ParseFloat(values[0], 64)
++			if err != nil {
++				continue
++			}
++			if strings.HasSuffix(lower, "-utilization") {
++				used *= 100
++			}
++			remaining := 100 - used
++			if remaining >= 0 && remaining <= 100 {
++				w.Remaining = &remaining
++			}
++		}
++		if strings.HasSuffix(lower, "-window-minutes") {
++			minutes, err := strconv.ParseInt(values[0], 10, 64)
++			if err == nil && minutes > 0 {
++				w.ID = o.Window + "@" + strconv.FormatInt(minutes, 10)
++				w.Label = fmt.Sprintf("%s (%d min)", o.Window, minutes)
++			}
++		}
++		if strings.HasSuffix(lower, "-reset-at") || strings.HasSuffix(lower, "-reset") {
++			n, err := strconv.ParseInt(values[0], 10, 64)
++			if err == nil && n > 0 {
++				w.ResetAt = time.Unix(n, 0)
++			}
++		}
++	}
++	// Relative reset is anchored to capture time, never to the cache-read clock.
++	if w.ResetAt.IsZero() {
++		for key, values := range o.Headers {
++			if strings.HasSuffix(strings.ToLower(key), "-reset-after-seconds") && len(values) > 0 {
++				n, err := strconv.ParseInt(values[0], 10, 64)
++				if err == nil && n >= 0 && n <= int64((365*24*time.Hour)/time.Second) {
++					w.ResetAt = o.ObservedAt.Add(time.Duration(n) * time.Second)
++				}
++			}
++		}
++	}
++	if w.Remaining != nil {
++		scope := strings.TrimPrefix(o.Window, "x-codex-")
++		scope = strings.TrimSuffix(strings.TrimSuffix(scope, "-primary"), "-secondary")
++		if scope == "primary" || scope == "secondary" {
++			scope = "Codex"
++		}
++		scope = strings.TrimPrefix(scope, "claude-")
++		if at := strings.LastIndex(w.ID, "@"); at >= 0 {
++			minutes, _ := strconv.Atoi(w.ID[at+1:])
++			period := fmt.Sprintf("%d min", minutes)
++			if minutes == 300 {
++				period = "5-hour"
++			}
++			if minutes == 10080 {
++				period = "Weekly"
++			}
++			w.Label = period + " · " + scope
++		} else {
++			w.Label = scope
++		}
++	}
++	return w, w.Remaining != nil
++}
++
++// All configured windows protect the whole account, including additional/model
++// limits: this intentionally needs no guessing about provider model aliases.
++func (s *PolicyStore) State(index, provider string, now time.Time) PolicyState {
++	thresholds := s.Thresholds(index, provider)
++	state := PolicyState{AuthIndex: index, Provider: provider, Thresholds: thresholds, Windows: []WindowPolicy{}}
++	windows := map[string]WindowPolicy{}
++	for _, o := range Read(map[string]bool{index: true}) {
++		if o.Provider == provider {
++			if w, ok := observationWindow(o); ok {
++				windows[w.ID] = w
++			}
++		}
++	}
++	for id, n := range thresholds {
++		w := windows[id]
++		w.ID = id
++		if w.Label == "" {
++			w.Label = id
++		}
++		minimum := n
++		w.Minimum = &minimum
++		windows[id] = w
++	}
++	ids := make([]string, 0, len(windows))
++	for id := range windows {
++		ids = append(ids, id)
++	}
++	sort.Strings(ids)
++	for _, id := range ids {
++		w := windows[id]
++		if w.Minimum != nil {
++			switch {
++			case w.Remaining == nil || w.ObservedAt.IsZero():
++				w.Reason = "quota_unknown"
++			case w.ObservedAt.After(now.Add(time.Minute)):
++				w.Reason = "quota_unknown"
++			case !w.ResetAt.IsZero() && !w.ResetAt.After(now):
++				w.Reason = "awaiting_reset_observation"
++			case now.Sub(w.ObservedAt) > PolicyMaxAge:
++				w.Reason = "quota_stale"
++			case *w.Remaining <= *w.Minimum+1e-9: // tolerate subtraction roundoff at a fractional boundary
++				w.Reason = "minimum_reached"
++			}
++			w.Excluded = w.Reason != ""
++			if w.Excluded {
++				state.Excluded = true
++				if state.Reason == "" {
++					state.Reason = w.Reason
++				}
++			}
++		}
++		state.Windows = append(state.Windows, w)
++	}
++	return state
++}
++
++func (s *PolicyStore) Allows(index, provider string, now time.Time) bool {
++	// Preserve the original hot path completely for unconfigured accounts.
++	s.mu.RLock()
++	configured := len(s.settings[policyKey(index, provider)]) > 0
++	s.mu.RUnlock()
++	return !configured || !s.State(index, provider, now).Excluded
++}
+diff --git a/internal/quotatraffic/policy_fraction_test.go b/internal/quotatraffic/policy_fraction_test.go
+new file mode 100644
+index 00000000..917ce2b6
+--- /dev/null
++++ b/internal/quotatraffic/policy_fraction_test.go
+@@ -0,0 +1,22 @@
++package quotatraffic
++
++import (
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestQuotaPolicyFractionalBoundary(t *testing.T) {
++	s := NewPolicyStore()
++	if err := s.Load(filepath.Join(t.TempDir(), "policy.json")); err != nil {
++		t.Fatal(err)
++	}
++	now := time.Now()
++	policyObservation(t.Name(), "300", "80.1", now)
++	if err := s.Set(t.Name(), "codex", map[string]float64{"x-codex-primary@300": 19.9}); err != nil {
++		t.Fatal(err)
++	}
++	if s.Allows(t.Name(), "codex", now) {
++		t.Fatal("fractional equality bypassed minimum")
++	}
++}
+diff --git a/internal/quotatraffic/policy_test.go b/internal/quotatraffic/policy_test.go
+new file mode 100644
+index 00000000..9bb9af00
+--- /dev/null
++++ b/internal/quotatraffic/policy_test.go
+@@ -0,0 +1,133 @@
++package quotatraffic
++
++import (
++	"errors"
++	"net/http"
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++	"time"
++)
++
++func policyObservation(index, window string, remaining string, at time.Time) {
++	Capture(index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {remaining}, "X-Codex-Primary-Window-Minutes": {window}, "X-Codex-Primary-Reset-After-Seconds": {"3600"}}, at, "websocket_event")
++}
++func TestQuotaPolicyBoundariesRecoveryAndIndependentWindows(t *testing.T) {
++	s := NewPolicyStore()
++	filename := filepath.Join(t.TempDir(), "policies.json")
++	if err := s.Load(filename); err != nil {
++		t.Fatal(err)
++	}
++	now := time.Now()
++	index := t.Name()
++	policyObservation(index, "300", "80", now)
++	state := s.State(index, "codex", now)
++	if len(state.Windows) != 1 || !s.Allows(index, "codex", now.Add(24*time.Hour)) {
++		t.Fatal("unconfigured behavior changed")
++	}
++	id := state.Windows[0].ID
++	if err := s.Set(index, "codex", map[string]float64{id: 20}); err != nil {
++		t.Fatal(err)
++	}
++	if got := s.State(index, "codex", now).Reason; got != "minimum_reached" {
++		t.Fatal(got)
++	}
++	policyObservation(index, "300", "79.9", now.Add(time.Second))
++	if !s.Allows(index, "codex", now.Add(time.Second)) {
++		t.Fatal("fresh recovery did not permit admission")
++	}
++	if got := s.State(index, "codex", now.Add(16*time.Minute)).Reason; got != "quota_stale" {
++		t.Fatal(got)
++	}
++	if got := s.State(index, "codex", now.Add(2*time.Hour)).Reason; got != "awaiting_reset_observation" {
++		t.Fatal(got)
++	}
++	// The provider changed the actual primary duration: do not transfer 5h's setting to weekly.
++	policyObservation(index, "10080", "1", now.Add(2*time.Hour))
++	if got := s.State(index, "codex", now.Add(2*time.Hour)).Reason; got != "quota_unknown" {
++		t.Fatal(got)
++	}
++	if !s.Allows("other", "codex", now) || !s.Allows(index, "claude", now) {
++		t.Fatal("policy leaked to another identity/provider")
++	}
++	reopened := NewPolicyStore()
++	if err := reopened.Load(filename); err != nil {
++		t.Fatal(err)
++	}
++	if reopened.Allows(index, "codex", now.Add(2*time.Hour)) {
++		t.Fatal("restart lost protection")
++	}
++	if err := s.Set(index, "codex", map[string]float64{}); err != nil {
++		t.Fatal(err)
++	}
++	if !s.Allows(index, "codex", now.Add(2*time.Hour)) {
++		t.Fatal("clearing policy did not restore original behavior")
++	}
++}
++
++func TestQuotaPolicyAllLimitsUnknownZeroAndStorageFailure(t *testing.T) {
++	s := NewPolicyStore()
++	dir := t.TempDir()
++	filename := filepath.Join(dir, "policies.json")
++	_ = s.Load(filename)
++	now := time.Now()
++	index := t.Name()
++	Capture(index, "claude", http.Header{"Anthropic-Ratelimit-Unified-7d-Opus-Utilization": {"1"}}, now, "api_response_headers")
++	if err := s.Set(index, "claude", map[string]float64{"claude-7d-opus": 0}); err != nil {
++		t.Fatal(err)
++	}
++	if s.Allows(index, "claude", now) {
++		t.Fatal("zero threshold did not block model-specific exhaustion")
++	}
++	if err := s.Set(index, "claude", map[string]float64{"claude-5h": 10}); err != nil {
++		t.Fatal(err)
++	}
++	if got := s.State(index, "claude", now).Reason; got != "quota_unknown" {
++		t.Fatal(got)
++	}
++	// Other threads can update other accounts without lost settings.
++	var wg sync.WaitGroup
++	for _, id := range []string{"one", "two"} {
++		wg.Add(1)
++		go func(id string) {
++			defer wg.Done()
++			if err := s.Set(id, "codex", map[string]float64{"window": 10}); err != nil {
++				t.Error(err)
++			}
++		}(id)
++	}
++	wg.Wait()
++	if len(s.Thresholds("one", "codex")) != 1 || len(s.Thresholds("two", "codex")) != 1 {
++		t.Fatal("lost concurrent account edit")
++	}
++	if err := s.CompareAndSet(index, "claude", map[string]float64{}, map[string]float64{}); !errors.Is(err, ErrPolicyChanged) {
++		t.Fatalf("expected conflict, got %v", err)
++	}
++	// Replacing a destination directory fails atomically and leaves the old in-memory policy intact.
++	s.path = filepath.Join(dir, "directory")
++	_ = os.Mkdir(s.path, 0700)
++	if err := s.Set(index, "claude", map[string]float64{}); err == nil {
++		t.Fatal("storage failure reported success")
++	}
++	if s.Allows(index, "claude", now) {
++		t.Fatal("storage failure erased active policy")
++	}
++	if err := s.Set(index, "claude", map[string]float64{"x": 101}); err == nil {
++		t.Fatal("invalid minimum accepted")
++	}
++	if err := os.WriteFile(filename, []byte(`{"broken":null`), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := NewPolicyStore().Load(filename); err == nil {
++		t.Fatal("corrupt policy silently ignored")
++	}
++	for _, content := range []string{`{"codex:account":null}`, `{"unknown:account":{"window":10}}`, `{"codex:":{"window":10}}`} {
++		if err := os.WriteFile(filename, []byte(content), 0600); err != nil {
++			t.Fatal(err)
++		}
++		if err := NewPolicyStore().Load(filename); err == nil {
++			t.Fatalf("invalid policy structure accepted: %s", content)
++		}
++	}
++}
+diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
+index 5dd1ac5e..faa656b9 100644
+--- a/internal/runtime/executor/codex_websockets_duplex.go
++++ b/internal/runtime/executor/codex_websockets_duplex.go
+@@ -10,6 +10,7 @@ import (
+ 	"sort"
+ 	"strings"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/gorilla/websocket"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+@@ -294,8 +295,21 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 			}
+ 			return payload, curHeaders, true, true
+ 		}
++		rejectQuotaPolicy := func() bool {
++			payload, _ := json.Marshal(map[string]any{"type": "error", "status": 503, "error": map[string]string{"type": "server_error", "code": "quota_policy_excluded", "message": "Account excluded by quota policy. Reconnect with full context to select an eligible account."}})
++			select {
++			case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
++				consumedPayload = nil
++				return true
++			case <-streamCtx.Done():
++				return false
++			}
++		}
+ 		processCreatePayload := func(payload []byte) bool {
+ 			consumedPayload = payload
++			if !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
++				return rejectQuotaPolicy()
++			}
+ 			if allowed, keepOpen := authorizePayload(payload, false); !allowed {
+ 				return keepOpen
+ 			}
+@@ -455,6 +469,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 				}
+ 				switch gjson.GetBytes(payload, "type").String() {
+ 				case "response.steer":
++					if !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
++						if !rejectQuotaPolicy() {
++							return
++						}
++						continue
++					}
+ 					if allowed, keepOpen := authorizePayload(payload, true); !allowed {
+ 						if !keepOpen {
+ 							return
+@@ -523,6 +543,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 					continue
+ 
+ 				case "response.create", "response.append":
++					if !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
++						if !rejectQuotaPolicy() {
++							return
++						}
++						continue
++					}
+ 					if len(pendingCreates) == 0 && readyForCreate() {
+ 						if !processCreatePayload(payload) {
+ 							return
+diff --git a/internal/runtime/executor/codex_websockets_quota_policy_test.go b/internal/runtime/executor/codex_websockets_quota_policy_test.go
+new file mode 100644
+index 00000000..837f20e2
+--- /dev/null
++++ b/internal/runtime/executor/codex_websockets_quota_policy_test.go
+@@ -0,0 +1,114 @@
++package executor
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
++	authpkg "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++	"github.com/tidwall/gjson"
++)
++
++// A policy change bars new native duplex turns while retaining interrupts.
++func TestCodexDuplexQuotaPolicyChanges(t *testing.T) {
++	old := quotatraffic.RoutingPolicies
++	store := quotatraffic.NewPolicyStore()
++	if err := store.Load(filepath.Join(t.TempDir(), "policies.json")); err != nil {
++		t.Fatal(err)
++	}
++	quotatraffic.RoutingPolicies = store
++	defer func() { quotatraffic.RoutingPolicies = old }()
++	received := make(chan string, 8)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++		for {
++			_, payload, err := conn.ReadMessage()
++			if err != nil {
++				return
++			}
++			kind := gjson.GetBytes(payload, "type").String()
++			received <- kind
++			event := []byte(`{"type":"response.created","response":{"id":"r1","output":[]}}`)
++			if kind == "response.interrupt" {
++				event = []byte(`{"type":"response.incomplete","response":{"id":"r1","output":[],"incomplete_details":{"reason":"interrupted"}}}`)
++			}
++			if err := conn.WriteMessage(websocket.TextMessage, event); err != nil {
++				return
++			}
++		}
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	input := make(chan core.WebsocketInput, 8)
++	ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
++	exec := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ResponseSteering: true}})
++	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
++	auth := &authpkg.Auth{ID: "policy-duplex", Index: "policy-duplex", Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL, "websockets": "true"}}
++	result, err := exec.ExecuteStream(ctx, auth, core.Request{Model: "gpt-6-astra", Payload: []byte(`{"model":"gpt-6-astra","input":[]}`)}, core.Options{SourceFormat: translator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: "policy-duplex"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	next := func() []byte {
++		t.Helper()
++		select {
++		case c, ok := <-result.Chunks:
++			if !ok || c.Err != nil {
++				t.Fatalf("stream closed: %v", c.Err)
++			}
++			return c.Payload
++		case <-ctx.Done():
++			t.Fatal(ctx.Err())
++			return nil
++		}
++	}
++	if got := gjson.GetBytes(next(), "type").String(); got != "response.created" {
++		t.Fatal(got)
++	}
++	if got := <-received; got != "response.create" {
++		t.Fatal(got)
++	}
++	if err := store.Set(auth.Index, "codex", map[string]float64{"x-codex-primary@300": 20}); err != nil {
++		t.Fatal(err)
++	}
++	for _, kind := range []string{"response.create", "response.append", "response.steer"} {
++		input <- core.WebsocketInput{Payload: []byte(`{"type":"` + kind + `","model":"gpt-6-astra","input":[]}`)}
++		if got := gjson.GetBytes(next(), "error.code").String(); got != "quota_policy_excluded" {
++			t.Fatalf("%s: %s", kind, got)
++		}
++	}
++	if err := exec.InterruptExecutionSession(ctx, "policy-duplex", []byte(`{"type":"response.interrupt","response_id":"r1"}`)); err != nil {
++		t.Fatal(err)
++	}
++	if got := gjson.GetBytes(next(), "type").String(); got != "response.incomplete" {
++		t.Fatal(got)
++	}
++	if got := <-received; got != "response.interrupt" {
++		t.Fatalf("excluded traffic reached provider: %s", got)
++	}
++	if err := store.Set(auth.Index, "codex", map[string]float64{}); err != nil {
++		t.Fatal(err)
++	}
++	input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","model":"gpt-6-astra","input":[]}`)}
++	if got := gjson.GetBytes(next(), "type").String(); got != "response.created" {
++		t.Fatal(got)
++	}
++	if got := <-received; got != "response.create" {
++		t.Fatal(got)
++	}
++	cancel()
++	for range result.Chunks {
++	}
++}
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 3cbdd20b..f2fa2a0e 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -511,6 +511,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		pinnedAuthID = ""
+ 	}
+ 
++requestLoop:
+ 	for {
+ 		var msgType int
+ 		var payload []byte
+@@ -607,6 +608,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 		isPluginExecutorRoute := pluginExecutorID != ""
+ 		if pinnedAuthID != "" {
+ 			pinnedAuth, homeRuntime, ok := sessionAuthByIDWithSource(pinnedAuthID)
++			if ok && pinnedAuth != nil && !coreauth.QuotaPolicyAllows(pinnedAuth, time.Now()) {
++				if errWrite := writeResponsesWebsocketQuotaPolicyExcluded(writer, wsTimelineLog, payload); errWrite != nil {
++					wsTerminateErr = errWrite
++					return
++				}
++				continue requestLoop
++			}
+ 			providerKey := ""
+ 			if pinnedAuth != nil {
+ 				providerKey = strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
+@@ -622,6 +630,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 				for providerKey := range providerSet {
+ 					state, ok := pinnedAuthByProvider[providerKey]
+ 					candidateAuth, homeRuntime, okAuth := sessionAuthByIDWithSource(state.authID)
++					if ok && okAuth && candidateAuth != nil && !coreauth.QuotaPolicyAllows(candidateAuth, time.Now()) {
++						if errWrite := writeResponsesWebsocketQuotaPolicyExcluded(writer, wsTimelineLog, payload); errWrite != nil {
++							wsTerminateErr = errWrite
++							return
++						}
++						continue requestLoop
++					}
+ 					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime) {
+ 						pinnedAuthID = state.authID
+ 					} else {
+@@ -1179,3 +1194,9 @@ func writeResponsesWebsocketPreviousResponseNotFound(writer *responsesWebsocketW
+ 	}
+ 	return writeResponsesWebsocketPayload(writer, wsTimelineLog, errorPayload, time.Now())
+ }
++
++// A bound continuation must not migrate its upstream response IDs to another account.
++func writeResponsesWebsocketQuotaPolicyExcluded(writer *responsesWebsocketWriter, timeline websocketTimelineAppender, request []byte) error {
++	payload, _ := json.Marshal(map[string]any{"type": "error", "status": 503, "error": map[string]string{"type": "server_error", "code": "quota_policy_excluded", "message": "Account excluded by quota policy. Reconnect with full context to select an eligible account.", "event_id": gjson.GetBytes(request, "event_id").String()}})
++	return writeResponsesWebsocketPayload(writer, timeline, payload, time.Now())
++}
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_session.go b/sdk/api/handlers/openai/openai_responses_websocket_session.go
+index 9fde5f8d..7a5a0aae 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket_session.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_session.go
+@@ -208,7 +208,7 @@ func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
+ }
+ 
+ func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {
+-	if auth == nil {
++	if auth == nil || !coreauth.QuotaPolicyAllows(auth, now) {
+ 		return false
+ 	}
+ 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+diff --git a/sdk/cliproxy/auth/conductor_selection.go b/sdk/cliproxy/auth/conductor_selection.go
+index bf1bbc57..246f0963 100644
+--- a/sdk/cliproxy/auth/conductor_selection.go
++++ b/sdk/cliproxy/auth/conductor_selection.go
+@@ -115,7 +115,7 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
+ }
+ 
+ func (e authSelectionEligibility) allows(auth *Auth) bool {
+-	if auth == nil {
++	if auth == nil || !QuotaPolicyAllows(auth, time.Now()) {
+ 		return false
+ 	}
+ 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
+@@ -525,6 +525,9 @@ func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Aut
+ 		return nil, "unbound"
+ 	}
+ 	snapshot.EnsureIndex()
++	if !QuotaPolicyAllows(snapshot, time.Now()) {
++		return nil, "unbound"
++	}
+ 	return snapshot, "bound"
+ }
+ 
+@@ -572,6 +575,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
+ 	unauthorizedCount := 0
+ 	var earliest time.Time
+ 	for _, candidate := range auths {
++		if !QuotaPolicyAllows(candidate, now) {
++			continue
++		}
+ 		checkModel := m.selectionModelForAuth(candidate, routeModel)
+ 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
+ 		if !blocked {
+diff --git a/sdk/cliproxy/auth/quota_policy.go b/sdk/cliproxy/auth/quota_policy.go
+new file mode 100644
+index 00000000..b7417778
+--- /dev/null
++++ b/sdk/cliproxy/auth/quota_policy.go
+@@ -0,0 +1,11 @@
++package auth
++
++import (
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
++	"time"
++)
++
++// QuotaPolicyAllows is an admission check, independent of manual disabled and cooldown state.
++func QuotaPolicyAllows(auth *Auth, now time.Time) bool {
++	return auth != nil && quotatraffic.RoutingPolicies.Allows(auth.Index, auth.Provider, now)
++}
+diff --git a/sdk/cliproxy/auth/quota_policy_test.go b/sdk/cliproxy/auth/quota_policy_test.go
+new file mode 100644
+index 00000000..3c751c3e
+--- /dev/null
++++ b/sdk/cliproxy/auth/quota_policy_test.go
+@@ -0,0 +1,97 @@
++package auth
++
++import (
++	"context"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotatraffic"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	"net/http"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestQuotaPolicyAdmissionAcrossSchedulersAffinityPinsAndRetries(t *testing.T) {
++	old := quotatraffic.RoutingPolicies
++	defer func() { quotatraffic.RoutingPolicies = old }()
++	store := quotatraffic.NewPolicyStore()
++	quotatraffic.RoutingPolicies = store
++	if err := store.Load(filepath.Join(t.TempDir(), "policies.json")); err != nil {
++		t.Fatal(err)
++	}
++	for _, kind := range []string{"builtin", "legacy", "plugin", "affinity", "affinity-quota"} {
++		t.Run(kind, func(t *testing.T) {
++			manager := NewManager(nil, &FillFirstSelector{}, nil)
++			switch kind {
++			case "legacy":
++				manager.SetPluginScheduler(&fakePluginScheduler{})
++			case "plugin":
++				manager.SetPluginScheduler(&fakePluginScheduler{handled: true, pick: func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
++					return pluginapi.SchedulerPickResponse{AuthID: req.Candidates[0].ID}, true, nil
++				}})
++			case "affinity", "affinity-quota":
++				mode := SessionAffinityRebindOnAny
++				if kind == "affinity-quota" {
++					mode = SessionAffinityRebindOnQuota
++				}
++				affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}, TTL: time.Hour, RebindOn: mode})
++				defer affinity.Stop()
++				manager.SetSelector(affinity)
++			}
++			manager.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
++			id := t.Name()
++			high, low := id+"-high", id+"-low"
++			model := id + "-model"
++			for _, a := range []*Auth{{ID: high, Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "10", "websockets": "true"}}, {ID: low, Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "0", "websockets": "true"}}} {
++				if _, err := manager.Register(WithSkipPersist(context.Background()), a); err != nil {
++					t.Fatal(err)
++				}
++				registry.GetGlobalRegistry().RegisterClient(a.ID, "codex", []*registry.ModelInfo{{ID: model}})
++				defer registry.GetGlobalRegistry().UnregisterClient(a.ID)
++			}
++			opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "quota-policy-session"}}
++			pick := func(mixed bool, tried map[string]struct{}) (*Auth, error) {
++				if mixed {
++					a, _, _, err := manager.pickNextMixed(context.Background(), []string{"codex"}, model, opts, tried)
++					return a, err
++				}
++				a, _, err := manager.pickNext(context.Background(), "codex", model, opts, tried)
++				return a, err
++			}
++			a, err := pick(false, nil)
++			if err != nil || a.ID != high {
++				t.Fatalf("initial pick %v %v", a, err)
++			}
++			now := time.Now()
++			quotatraffic.Capture(a.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"90"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now, "websocket_event")
++			threshold := map[string]float64{"x-codex-primary@300": 10}
++			if err := store.Set(a.Index, "codex", threshold); err != nil {
++				t.Fatal(err)
++			}
++			for _, mixed := range []bool{false, true} {
++				got, err := pick(mixed, nil)
++				if err != nil || got.ID != low {
++					t.Fatalf("excluded priority/binding bypass: %v %v", got, err)
++				}
++			}
++			// The last eligible account already failed: retry must not revive the protected account.
++			if _, err := pick(false, map[string]struct{}{low: {}}); err == nil {
++				t.Fatal("retry bypassed policy")
++			}
++			pinned := opts
++			pinned.Metadata = map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: high}
++			if got, _, err := manager.pickNext(context.Background(), "codex", model, pinned, nil); err == nil || got != nil {
++				t.Fatal("pin bypassed policy")
++			}
++			quotatraffic.Capture(a.Index, "codex", http.Header{"X-Codex-Primary-Used-Percent": {"89"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now.Add(time.Second), "websocket_event")
++			got, _, err := manager.pickNext(context.Background(), "codex", model, cliproxyexecutor.Options{}, nil)
++			if err != nil || got.ID != high {
++				t.Fatalf("fresh recovery %v %v", got, err)
++			}
++			if a.Disabled || a.Attributes["priority"] != "10" {
++				t.Fatal("policy changed manual settings")
++			}
++		})
++	}
++}
+diff --git a/sdk/cliproxy/auth/selector.go b/sdk/cliproxy/auth/selector.go
+index 1f991e5d..3e28c38a 100644
+--- a/sdk/cliproxy/auth/selector.go
++++ b/sdk/cliproxy/auth/selector.go
+@@ -470,6 +470,9 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
+ 	available = make(map[int][]*Auth)
+ 	for i := 0; i < len(auths); i++ {
+ 		candidate := auths[i]
++		if !QuotaPolicyAllows(candidate, now) {
++			continue
++		}
+ 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
+ 		if !blocked {
+ 			priority := authPriority(candidate)
+@@ -970,7 +973,7 @@ func shouldRebindSessionAffinityOnError(err *Error) bool {
+ }
+ 
+ func isAuthBlockedByQuotaOrAuthForModel(auth *Auth, model string, now time.Time) bool {
+-	if auth == nil {
++	if auth == nil || !QuotaPolicyAllows(auth, now) {
+ 		return true
+ 	}
+ 	if auth.Disabled || auth.Status == StatusDisabled {

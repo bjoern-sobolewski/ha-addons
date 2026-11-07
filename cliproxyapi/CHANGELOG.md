@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.20
+
+- Persist optional per-account, per-observed-window quota minimums and enforce them across selection, retries, affinity and pinned WebSocket turns.
+- Exclude configured unknown/stale/reset windows until fresh existing observations arrive; retain manual status and priorities.
+- Add private policy management with atomic persistence and concurrent edit protection, without provider polling.
+
 ## 0.1.19
 
 - Preserve object-shaped headers on credit-only quota observations for older cached management clients; explicitly cover null-header account rendering.

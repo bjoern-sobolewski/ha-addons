@@ -1,0 +1,462 @@
+diff --git a/internal/api/quota_policy.go b/internal/api/quota_policy.go
+new file mode 100644
+index 00000000..a0c38bff
+--- /dev/null
++++ b/internal/api/quota_policy.go
+@@ -0,0 +1,49 @@
++package api
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/live"
++	"encoding/json"
++	"github.com/gin-gonic/gin"
++	"io"
++	"net/http"
++)
++
++type QuotaPolicyProvider interface {
++	QuotaPolicies(context.Context, string, json.RawMessage) (json.RawMessage, int, error)
++}
++
++func registerQuotaPolicyRoutes(router gin.IRoutes, provider QuotaPolicyProvider, hub *live.Hub) {
++	for _, method := range []string{http.MethodGet, http.MethodPut} {
++		router.Handle(method, "/quota/policies", func(c *gin.Context) {
++			if provider == nil {
++				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "quota policy service unavailable"})
++				return
++			}
++			var body json.RawMessage
++			if c.Request.Method == http.MethodPut {
++				raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 32768))
++				if err != nil || !json.Valid(raw) {
++					c.JSON(400, gin.H{"error": "invalid quota policy"})
++					return
++				}
++				body = raw
++			}
++			result, status, err := provider.QuotaPolicies(c.Request.Context(), c.Request.Method, body)
++			if err != nil || status != http.StatusOK || !json.Valid(result) {
++				switch status {
++				case 400, 404, 409, 412:
++					c.JSON(status, gin.H{"error": "quota policy rejected; reload the account and retry"})
++				default:
++					c.JSON(502, gin.H{"error": "CPA quota policy service unavailable"})
++				}
++				return
++			}
++			if c.Request.Method == http.MethodPut {
++				hub.Publish("quota")
++			}
++			c.Header("Cache-Control", "no-store")
++			c.Data(http.StatusOK, "application/json", result)
++		})
++	}
++}
+diff --git a/internal/api/quota_policy_test.go b/internal/api/quota_policy_test.go
+new file mode 100644
+index 00000000..5cf482d6
+--- /dev/null
++++ b/internal/api/quota_policy_test.go
+@@ -0,0 +1,42 @@
++package api
++
++import (
++	"context"
++	"cpa-usage-keeper/internal/live"
++	"encoding/json"
++	"errors"
++	"github.com/gin-gonic/gin"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++type policyProviderStub struct {
++	status int
++	err    error
++	body   json.RawMessage
++	method string
++}
++
++func (p *policyProviderStub) QuotaPolicies(_ context.Context, method string, body json.RawMessage) (json.RawMessage, int, error) {
++	p.body = body
++	p.method = method
++	return json.RawMessage(`{"items":[]}`), p.status, p.err
++}
++func TestQuotaPolicyBridgeLimitsInputAndSanitizesErrors(t *testing.T) {
++	for _, tc := range []struct {
++		body           string
++		upstream, want int
++		err            error
++	}{{`{"thresholds":{}}`, 200, 200, nil}, {`bad`, 200, 400, nil}, {strings.Repeat("x", 33000), 200, 400, nil}, {`{}`, 409, 409, errors.New("private upstream credential")}, {`{}`, 500, 502, errors.New("private upstream credential")}} {
++		p := &policyProviderStub{status: tc.upstream, err: tc.err}
++		router := gin.New()
++		registerQuotaPolicyRoutes(router, p, live.New())
++		r := httptest.NewRequest("PUT", "/quota/policies", strings.NewReader(tc.body))
++		w := httptest.NewRecorder()
++		router.ServeHTTP(w, r)
++		if w.Code != tc.want || strings.Contains(w.Body.String(), "credential") {
++			t.Fatalf("status %d body %s", w.Code, w.Body.String())
++		}
++	}
++}
+diff --git a/internal/api/router.go b/internal/api/router.go
+index 78f8a103..b1139203 100644
+--- a/internal/api/router.go
++++ b/internal/api/router.go
+@@ -52,6 +52,7 @@ type StatusRouteConfig struct {
+ }
+ 
+ type OptionalProviders struct {
++	QuotaPolicies      QuotaPolicyProvider
+ 	Live               *live.Hub
+ 	Ranking            rankinghttpapi.Provider
+ 	LocalRanking       rankinghttpapi.LocalProvider
+@@ -179,6 +180,9 @@ func NewRouter(
+ 	registerCredentialManagementRoutes(adminProtected, credentialsProvider)
+ 	registerCredentialStatusRoutes(adminProtected, credentialStatusProvider)
+ 	registerCredentialPriorityRoutes(adminProtected, credentialPriorityProvider)
++	if len(optionalProviders) > 0 {
++		registerQuotaPolicyRoutes(adminProtected, optionalProviders[0].QuotaPolicies, optionalProviders[0].Live)
++	}
+ 	registerAuthSessionManagementRoutes(adminProtected, authHandler)
+ 	registerCPAAPIKeyRoutes(adminProtected, cpaAPIKeyProvider, usageProvider)
+ 	registerPricingRoutes(adminProtected, pricingProvider)
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 1d8415fc..2283b3dd 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -307,6 +307,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+ 			authHandler,
+ 			cfg.AppBasePath,
+ 			api.OptionalProviders{
++				QuotaPolicies: cpaClient,
+ 				Live:          liveHub,
+ 				UsageIdentity: usageIdentityService,
+ 				CostReadGate:  costReadGate,
+diff --git a/internal/cpa/quota_policy.go b/internal/cpa/quota_policy.go
+new file mode 100644
+index 00000000..585fb3bb
+--- /dev/null
++++ b/internal/cpa/quota_policy.go
+@@ -0,0 +1,20 @@
++package cpa
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++)
++
++// Forward only the dedicated local-cache policy contract, never a provider API.
++func (c *Client) QuotaPolicies(ctx context.Context, method string, body json.RawMessage) (json.RawMessage, int, error) {
++	var result json.RawMessage
++	var status int
++	var err error
++	if method == http.MethodGet {
++		status, _, err = c.doManagementJSONRequest(ctx, "/v8/management/quota/policies", &result, "quota policy")
++	} else {
++		status, _, err = c.doManagementJSONRequestWithBody(ctx, method, "/v8/management/quota/policies", body, &result, "quota policy")
++	}
++	return result, status, err
++}
+diff --git a/internal/quota/traffic_sync.go b/internal/quota/traffic_sync.go
+index 560479c2..41884984 100644
+--- a/internal/quota/traffic_sync.go
++++ b/internal/quota/traffic_sync.go
+@@ -48,6 +48,7 @@ func (r *TrafficQuotaSyncRunner) Run(ctx context.Context) error {
+ 				_ = stream.WatchLive(streamCtx, func(topics []string) {
+ 					for _, topic := range topics {
+ 						if topic == "quota" || topic == "sync" {
++							r.service.Live.Publish("quota")
+ 							notify()
+ 							break
+ 						}
+diff --git a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
+index 9bbe1ce6..c1a9c904 100644
+--- a/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
++++ b/web/src/components/usage/credentials/AiProviderCredentialsSection.tsx
+@@ -7,6 +7,7 @@ import type { UsageIdentityPageSort } from '@/lib/api'
+ import { CredentialAliasEditor, CredentialEditButton } from './CredentialAliasEditor'
+ import { CredentialHealthPanel } from './CredentialHealthPanel'
+ import { CredentialCardGrid, CredentialCardShell, CredentialSectionShell, CredentialsPagination, MetricPill, RequestMetric, TonePercent, cacheReadRateTone, formatCredentialNumber, successRateTone } from './CredentialSectionShell'
++import { QuotaPolicyPanel } from './QuotaPolicyPanel'
+ import { CredentialPriorityEditor } from './CredentialPriorityEditor'
+ import { CredentialStatusToggle, CredentialStatusUnsupportedIcon, isCredentialStatusToggleSupported } from './CredentialStatusToggle'
+ import { QuestionMarkHelp } from '@/components/ui/QuestionMarkHelp'
+@@ -123,6 +124,7 @@ export function AiProviderCredentialsSection({ reportingOnly = false, rows, tota
+             </>
+           )}
+           health={<CredentialHealthPanel variant="compact" showCompactMeta displayName={row.displayName} health={row.credentialHealth} lastUsedAt={row.lastUsedText} windowCacheReadRate={row.windowCacheReadRate} />}
++          quota={!reportingOnly && !row.identity.is_deleted ? <QuotaPolicyPanel authIndex={row.identity.identity} provider={row.identity.type} /> : undefined}
+           actions={onEdit && <CredentialEditButton identityId={row.identity.id} disabled={row.identity.is_deleted} onEdit={() => onEdit(row)} />}
+         />
+       })}
+diff --git a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+index 4f7cbfba..83200af6 100644
+--- a/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
++++ b/web/src/components/usage/credentials/CredentialDetailDrawer.tsx
+@@ -11,6 +11,7 @@ import type { ErrorEvent, UsageEvent, UsageEventRequestLogResponse } from '@/lib
+ import { CredentialQuotaPanel } from './CredentialsSection'
+ import { CredentialErrorEventsList } from './CredentialErrorEventsList'
+ import { CredentialHealthPanel } from './CredentialHealthPanel'
++import { QuotaPolicyPanel } from './QuotaPolicyPanel'
+ import { CredentialPriorityBadge, cacheReadRateTone, credentialToneClassName, formatCredentialNumber, formatCredentialPercent, successRateTone } from './CredentialSectionShell'
+ import { CredentialSubscriptionBadge } from './CredentialSubscriptionBadge'
+ import { CredentialKimiSiteBadge } from './CredentialKimiSiteBadge'
+@@ -476,6 +477,7 @@ export function CredentialDetailDrawer({
+   return (
+     <>
+       <Modal open={open} title={title} variant="drawer" width={920} className={styles.drawer} onClose={onClose} closeDisabled={resettingStats}>
++        {!readOnly && !identity.is_deleted && <QuotaPolicyPanel authIndex={identity.identity} provider={identity.type} />}
+         <div className={styles.tabBar} data-credential-detail-tab-bar>
+           <div className={styles.tabs} role="tablist" aria-label={t('usage_stats.credentials_detail_tabs')}>
+             <button
+diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
+index e3a2ab97..d29ff7a2 100644
+--- a/web/src/components/usage/credentials/CredentialsSection.tsx
++++ b/web/src/components/usage/credentials/CredentialsSection.tsx
+@@ -22,6 +22,7 @@ import { CredentialHealthPanel } from './CredentialHealthPanel'
+ import { CredentialSubscriptionBadge } from './CredentialSubscriptionBadge'
+ import { CredentialKimiSiteBadge, kimiCredentialSite } from './CredentialKimiSiteBadge'
+ import { CredentialCardGrid, CredentialCardShell, CredentialSectionShell, CredentialsPagination, MetricPill, RequestMetric, TonePercent, cacheReadRateTone, capitalize, credentialToneClassName, formatCredentialNumber, successRateTone } from './CredentialSectionShell'
++import { QuotaPolicyPanel } from './QuotaPolicyPanel'
+ import { CredentialPriorityEditor } from './CredentialPriorityEditor'
+ import { ProviderBrandIcon, providerBrandIconKey } from '@/components/ProviderBrandIcon'
+ import { CredentialStatusToggle } from './CredentialStatusToggle'
+@@ -341,7 +342,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+               </>
+             )}
+             health={<CredentialHealthPanel variant="compact" showCompactMeta displayName={row.displayName} health={row.credentialHealth} lastUsedAt={row.identity.last_used_at} windowCacheReadRate={row.windowCacheReadRate} />}
+-            quota={<CredentialQuotaPanel variant="compact" row={row} quotaUsageMode={quotaUsageMode} timeZone={timeZone} />}
++            quota={<><CredentialQuotaPanel variant="compact" row={row} quotaUsageMode={quotaUsageMode} timeZone={timeZone} />{!reportingOnly && !row.identity.is_deleted && <QuotaPolicyPanel authIndex={row.identity.identity} provider={row.identity.type} />}</>}
+             actions={!reportingOnly && (
+               <>
+                   {onEdit && <CredentialEditButton identityId={row.identity.id} disabled={row.identity.is_deleted} onEdit={() => onEdit(row)} />}
+diff --git a/web/src/components/usage/credentials/QuotaPolicyPanel.module.scss b/web/src/components/usage/credentials/QuotaPolicyPanel.module.scss
+new file mode 100644
+index 00000000..d5fb80ac
+--- /dev/null
++++ b/web/src/components/usage/credentials/QuotaPolicyPanel.module.scss
+@@ -0,0 +1,16 @@
++.panel {
++  padding: 10px 0;
++  font-size: 12px;
++  min-width: 0;
++  overflow-wrap: anywhere;
++  p { margin: 8px 0; color: var(--text-secondary); }
++  ul { padding-left: 16px; margin: 8px 0; }
++  button, input { font: inherit; padding: 5px 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); }
++  button { cursor: pointer; }
++  input { width: 76px; min-width: 0; }
++}
++.heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
++.excluded { color: var(--danger-color, #d44747); }
++.window { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 8px 0; }
++.window small { display: block; color: var(--text-secondary); }
++.actions { display: flex; gap: 8px; margin-top: 10px; }
+diff --git a/web/src/components/usage/credentials/QuotaPolicyPanel.tsx b/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
+new file mode 100644
+index 00000000..a90d583e
+--- /dev/null
++++ b/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
+@@ -0,0 +1,136 @@
++import { useState, useSyncExternalStore } from 'react'
++import { apiFetch, apiPath } from '@/lib/api'
++import { startLiveRefresh } from '@/lib/live'
++import styles from './QuotaPolicyPanel.module.scss'
++
++export interface PolicyWindow {
++  id: string
++  label: string
++  minimum_remaining_percent: number | null
++  remaining_percent: number | null
++  observed_at: string
++  reset_at: string
++  source: string
++  excluded: boolean
++  reason: string
++}
++export interface AccountPolicy {
++  auth_index: string
++  provider: string
++  manually_disabled: boolean
++  thresholds: Record<string, number>
++  windows: PolicyWindow[]
++  excluded: boolean
++  reason: string
++}
++interface Snapshot { items: AccountPolicy[]; error: boolean }
++const emptySnapshot: Snapshot = { items: [], error: false }
++let snapshot: Snapshot = emptySnapshot
++const listeners = new Set<() => void>()
++let stop: (() => void) | undefined
++const emit = () => listeners.forEach(listener => listener())
++async function refresh(signal?: AbortSignal) {
++  try {
++    const response = await apiFetch(apiPath('/quota/policies'), { signal })
++    if (!response.ok) throw new Error('Quota policy unavailable')
++    const result = await response.json() as { items: AccountPolicy[] }
++    if (signal?.aborted) return
++    snapshot = { items: result.items, error: false }
++  } catch {
++    if (signal?.aborted) return
++    snapshot = { ...snapshot, error: true }
++  }
++  emit()
++}
++function subscribe(listener: () => void) {
++  listeners.add(listener)
++  // One coalesced cached-state read for all mounted cards, using the existing SSE.
++  if (listeners.size === 1) stop = startLiveRefresh(refresh, ['quota', 'accounts', 'clock'])
++  return () => {
++    listeners.delete(listener)
++    if (!listeners.size) { stop?.(); stop = undefined; snapshot = { items: [], error: false } }
++  }
++}
++
++export const policyReason = (reason: string) => ({
++  minimum_reached: 'Minimum reached',
++  quota_unknown: 'Quota unknown — awaiting observation',
++  quota_stale: 'Quota older than 15 minutes — awaiting observation',
++  awaiting_reset_observation: 'Reset passed — awaiting fresh observation',
++}[reason] ?? reason)
++
++export function parseMinimum(value: string): number | null | undefined {
++  if (!value.trim()) return null
++  if (!/^\d+(?:\.\d+)?$/.test(value.trim())) return undefined
++  const number = Number(value)
++  return Number.isFinite(number) && number >= 0 && number <= 100 ? number : undefined
++}
++
++// Mounted only in the admin role: reporting viewers never call this endpoint.
++export function QuotaPolicyPanel(props: { authIndex: string; provider: string }) {
++  if (!['codex', 'claude'].includes(props.provider)) return null
++  return <SupportedQuotaPolicyPanel {...props} />
++}
++
++function SupportedQuotaPolicyPanel({ authIndex, provider }: { authIndex: string; provider: string }) {
++  const data = useSyncExternalStore(subscribe, () => snapshot, () => emptySnapshot)
++  const account = data.items.find(item => item.auth_index === authIndex && item.provider === provider)
++  const [editing, setEditing] = useState(false)
++  const [draft, setDraft] = useState<Record<string, string>>({})
++  const [expected, setExpected] = useState<Record<string, number>>({})
++  const [windows, setWindows] = useState<PolicyWindow[]>([])
++  const [pending, setPending] = useState(false)
++  const [error, setError] = useState('')
++  if (!account) return data.error ? <div role="status">Quota policy unavailable</div> : null
++  const configured = Object.keys(account.thresholds).length > 0
++  const begin = () => {
++    setExpected({ ...account.thresholds })
++    setWindows(account.windows)
++    setDraft(Object.fromEntries(account.windows.map(window => [window.id, window.minimum_remaining_percent == null ? '' : String(window.minimum_remaining_percent)])))
++    setError(''); setEditing(true)
++  }
++  const save = async () => {
++    const thresholds: Record<string, number> = {}
++    for (const [id, value] of Object.entries(draft)) {
++      const minimum = parseMinimum(value)
++      if (minimum === undefined) { setError('Enter a percentage from 0 to 100, or leave it blank.'); return }
++      if (minimum !== null) thresholds[id] = minimum
++    }
++    setPending(true); setError('')
++    try {
++      const response = await apiFetch(apiPath('/quota/policies'), {
++        method: 'PUT', headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ auth_index: authIndex, provider, thresholds, expected_thresholds: expected }),
++      })
++      if (!response.ok) throw new Error(response.status === 409 ? 'Policy changed elsewhere. Cancel and reopen to load it.' : 'Could not save quota policy. Reload and retry.')
++      await refresh(); setEditing(false)
++    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Could not save quota policy.') }
++    finally { setPending(false) }
++  }
++  return <section className={styles.panel} data-quota-policy={authIndex} aria-label="Quota routing policy">
++    <div className={styles.heading}>
++      <strong>Quota routing</strong>
++      <span className={account.excluded ? styles.excluded : undefined} role="status">
++        {account.manually_disabled ? 'Manually disabled' : account.excluded ? 'Excluded by quota policy' : configured ? 'Policy permits routing' : 'No minimum configured'}
++      </span>
++      {!editing && <button type="button" onClick={begin}>Edit minimums</button>}
++    </div>
++    {data.error && <p role="alert">Live policy state unavailable. Displayed state may be outdated.</p>}
++    {!editing && configured && <ul>{account.windows.filter(window => window.minimum_remaining_percent !== null).map(window => <li key={window.id}>
++      {window.label}: minimum {window.minimum_remaining_percent}% · {window.remaining_percent === null ? 'Unknown' : `${window.remaining_percent.toFixed(1)}% remaining`}
++      {window.excluded && <strong> · {policyReason(window.reason)}</strong>}
++    </li>)}</ul>}
++    {editing && <form onSubmit={event => { event.preventDefault(); void save() }}>
++      <p>Exclude this whole account from new requests when any configured window is at or below its minimum. Model-specific and reserve limits also apply to the whole account.</p>
++      <p>Blank leaves a window unrestricted. 0% stops at exhaustion. Unknown quota, data older than 15 minutes, and passed resets exclude configured windows until a fresh observation arrives. No provider query is added. Existing scheduled or manual quota refresh can restore availability.</p>
++      <p>Manual enable/disable and priority stay separate. Running requests finish. Bound WebSocket turns are rejected while excluded; reconnect with full context to use another eligible account.</p>
++      {!windows.length && <p>No percentage windows observed for this account yet.</p>}
++      {windows.map(window => <label className={styles.window} key={window.id}>
++        <span>{window.label}<small>{window.remaining_percent === null ? 'Unknown quota' : `${window.remaining_percent.toFixed(1)}% remaining`}{window.reason ? ` · ${policyReason(window.reason)}` : ''}</small></span>
++        <input aria-label={`Minimum remaining percentage: ${window.label}`} inputMode="decimal" type="number" min="0" max="100" step="any" placeholder="Off" value={draft[window.id] ?? ''} disabled={pending} onChange={event => setDraft({ ...draft, [window.id]: event.target.value })} />
++      </label>)}
++      {error && <p role="alert">{error}</p>}
++      <div className={styles.actions}><button type="submit" disabled={pending}>{pending ? 'Saving…' : 'Save minimums'}</button><button type="button" disabled={pending} onClick={() => setEditing(false)}>Cancel</button></div>
++    </form>}
++  </section>
++}
+diff --git a/web/src/components/usage/credentials/test/QuotaPolicyPanel.test.tsx b/web/src/components/usage/credentials/test/QuotaPolicyPanel.test.tsx
+new file mode 100644
+index 00000000..8fa542d6
+--- /dev/null
++++ b/web/src/components/usage/credentials/test/QuotaPolicyPanel.test.tsx
+@@ -0,0 +1,44 @@
++// @vitest-environment happy-dom
++import { act } from 'react'
++import { createRoot } from 'react-dom/client'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { QuotaPolicyPanel, parseMinimum, policyReason } from '../QuotaPolicyPanel'
++import { apiFetch } from '@/lib/api'
++
++globalThis.IS_REACT_ACT_ENVIRONMENT = true
++const live = vi.hoisted(() => ({ refresh: undefined as undefined | (() => Promise<unknown>), stop: vi.fn() }))
++vi.mock('@/lib/live', () => ({ startLiveRefresh: (refresh: () => Promise<unknown>) => { live.refresh = refresh; void refresh(); return live.stop } }))
++vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), apiPath: (value: string) => value }))
++const account = { auth_index: 'a', provider: 'codex', manually_disabled: false, excluded: true, reason: 'minimum_reached', thresholds: { weekly: 10 }, windows: [
++  { id: 'weekly', label: 'Weekly', minimum_remaining_percent: 10, remaining_percent: 10, excluded: true, reason: 'minimum_reached' },
++  { id: '5h', label: '5-hour', minimum_remaining_percent: null, remaining_percent: 90, excluded: false, reason: '' },
++] }
++afterEach(() => vi.clearAllMocks())
++describe('Quota policy controls', () => {
++  it('keeps blank, zero and fractional percentages distinct and rejects malformed values', () => {
++    expect(parseMinimum('')).toBeNull()
++    expect(parseMinimum('0')).toBe(0)
++    expect(parseMinimum('12.5')).toBe(12.5)
++    for (const input of ['101', '-1', 'NaN', 'Infinity', '1e2']) expect(parseMinimum(input)).toBeUndefined()
++    expect(policyReason('awaiting_reset_observation')).toContain('fresh observation')
++  })
++  it('shares the cached read, preserves drafts on live recovery, and saves only explicit windows with conflict protection', async () => {
++    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => ({ items: [account] }) } as Response)
++    const container = document.createElement('div'); document.body.append(container); const root = createRoot(container)
++    try {
++      await act(async () => root.render(<><QuotaPolicyPanel authIndex="a" provider="codex" /><QuotaPolicyPanel authIndex="a" provider="codex" /></>))
++      expect(apiFetch).toHaveBeenCalledTimes(1)
++      expect(container.textContent).toContain('Excluded by quota policy')
++      await act(async () => container.querySelector<HTMLButtonElement>('button')!.click())
++      expect(container.querySelectorAll('input')).toHaveLength(2)
++      expect(container.querySelectorAll<HTMLInputElement>('input')[1].value).toBe('')
++      vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => ({ items: [{ ...account, excluded: false, thresholds: {}, windows: account.windows.map(window => ({ ...window, minimum_remaining_percent: null })) }] }) } as Response)
++      await act(async () => { await live.refresh!() })
++      expect(container.querySelector<HTMLInputElement>('input')!.value).toBe('10')
++      await act(async () => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
++      const put = vi.mocked(apiFetch).mock.calls.find(([, options]) => options?.method === 'PUT')!
++      expect(JSON.parse(put[1]!.body as string)).toEqual({ auth_index: 'a', provider: 'codex', thresholds: { weekly: 10 }, expected_thresholds: { weekly: 10 } })
++    } finally { await act(async () => root.unmount()); container.remove() }
++    expect(live.stop).toHaveBeenCalledTimes(1)
++  })
++})
+diff --git a/web/test-helpers/liveStream.ts b/web/test-helpers/liveStream.ts
+index 3c549aec..d73f8206 100644
+--- a/web/test-helpers/liveStream.ts
++++ b/web/test-helpers/liveStream.ts
+@@ -3,6 +3,7 @@ import { apiFetch } from '../src/lib/api';
+ export function mockLiveStream() {
+  const streams:ReadableStreamDefaultController<Uint8Array>[]=[];
+  vi.mocked(apiFetch).mockImplementation(async (_url,init)=>{
++ if(String(_url).endsWith("/quota/policies")) return new Response(JSON.stringify({items:[]}),{headers:{"Content-Type":"application/json"}});
+   let controller!:ReadableStreamDefaultController<Uint8Array>;
+   const body=new ReadableStream<Uint8Array>({start(value){controller=value;streams.push(value);}});
+   init?.signal?.addEventListener('abort',()=>{try{controller.close();}catch{/* already closed */}});

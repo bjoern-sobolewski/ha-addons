@@ -287,3 +287,11 @@ across accounts before calculating percentiles and workload comparisons.
 Account quotas and resets stay separate because plans can have different
 allowances. Retained archived requests are included. This admin-only view does
 not change the restricted client-key or read-only reporting scope.
+
+## Optional quota routing minimums
+
+In the LAN Keeper administrator dashboard, open an account’s **Quota routing → Edit minimums**. Set an independent minimum remaining percentage for each observed Codex or Claude window. Blank turns that window off; zero stops at exhaustion. Settings apply to the whole account, including model-specific and reserve windows. Any configured window at or below its minimum excludes the account from new requests.
+
+CPA saves settings in `/data/quota-policies.json`, independently of Keeper. Manual disable and priorities retain their existing meaning. Configured unknown windows, observations older than fifteen minutes, or passed resets exclude the account until a fresh observation arrives through existing traffic or scheduled/manual quota refresh. Restart retains settings but clears traffic observations, so configured accounts initially remain excluded. No new provider polling or probes are added.
+
+Running requests may finish and interrupts remain available. New turns on a bound WebSocket return `quota_policy_excluded`; reconnect with full context to select another eligible account. Clearing the minimums restores the original routing behavior. Keeper displays exclusion reasons and updates through its existing live event stream. Concurrent edits are rejected for review instead of silently overwriting another editor. These controls are administrator-only.

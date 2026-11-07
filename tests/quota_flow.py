@@ -130,6 +130,11 @@ def main():
    assert counter()==count,'cache polling invoked the provider'
    assert times==[r['captured_at'] for a in view() for r in a['rows']],'reads refreshed capture time'
    print('PASS: HTTP headers and WebSocket events update separate accounts and windows in CPA and Keeper; capture time, cache reads, sanitization, roles, and routing verified',flush=True)
+   from quota_policy_flow import verify_quota_policy
+   def restart_policy_cpa():
+    docker('restart',names['cpa'])
+    return endpoint('cpa',8080),endpoint('cpa',8317)
+   verify_quota_policy(api,private,keeper,gateway,auth,admin,password,viewer,ro,counter,restart_policy_cpa)
   except Exception:
    # Only counts/type/eligibility flags: never dump credential metadata or keys.
    try:

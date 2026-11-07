@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+- Add administrator quota minimum editors to account cards and details, with independent optional windows and clear exclusion reasons.
+- Synchronize policy state through existing SSE and protect drafts and concurrent edits.
+- Use CPA policy persistence and admission checks; no new provider probes or viewer permissions.
+
 ## 0.2.1
 
 - Use browser locale, hour cycle and time zone for date/time displays across Keeper, including reset expiry, history, charts, events, pricing and provider statistics.

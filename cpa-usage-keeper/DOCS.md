@@ -1,5 +1,18 @@
 # CPA Usage Keeper setup
 
+Administrators can inspect observed response stages, output activity and requested
+tool names in **Live routing**, alongside the first observed and current user
+prompt previews. Each text preview is limited to 240 characters. The start of an
+older chat may not have been observed; tool-only continuations retain the last
+user prompt. Generated answers, reasoning text and tool payloads are excluded.
+
+In **Request Events**, expand the chevron beside a request to load its prompt
+previews in a full-width detail row. Previews are captured for new requests and
+remain only while the event is in hot storage. They are discarded on archival.
+Both features require an administrator session. Read-only and API-key logins
+cannot retrieve them, including by direct API calls; shared lists and CSV/JSON
+exports omit prompt fields.
+
 Request Events shows **Fast requested** when the captured outgoing Codex tier is
 `priority` or `fast`. Its tooltip separates the client tier, upstream requested
 tier, and raw upstream reported tier. Older events without outgoing capture show

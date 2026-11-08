@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.7
+
+- Show observed request activity and first/current user prompt previews in the admin Live routing inspector.
+- Add lazy expandable, full-width prompt details to admin Request Events. Enforce admin access on the server and exclude previews from all shared reports and exports.
+- Limit previews to 240 characters each and discard them when events leave hot storage.
+
 ## 0.2.6
 
 - Remove the always-visible quota refresh icon and age. Show the last update in seconds only in a tooltip on the remaining percentage, with keyboard and touch access.

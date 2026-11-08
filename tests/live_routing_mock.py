@@ -19,7 +19,9 @@ async def responses(request):
   frame=json.loads(message.data);rid='resp_'+uuid.uuid4().hex
   result={'id':rid,'object':'response','status':'in_progress','model':'gpt-5.5','output':[]}
   await ws.send_json({'type':'response.created','response':result})
-  if frame.get('instructions')=='hold': held.append((ws,result));continue
+  if frame.get('instructions')=='hold':
+   await ws.send_json({'type':'response.output_text.delta','delta':'private-generated-answer'})
+   held.append((ws,result));continue
   output=[]
   if frame.get('instructions')=='tool':output=[{'type':'function_call','id':'fc-local','call_id':'private-tool-id','name':'local_probe','arguments':'{}','status':'completed'}]
   await ws.send_json({'type':'response.completed','response':{**result,'status':'completed','output':output,'usage':{'input_tokens':2,'output_tokens':1,'total_tokens':3}}})

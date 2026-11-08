@@ -1,0 +1,790 @@
+diff --git a/internal/promptpreview/preview.go b/internal/promptpreview/preview.go
+new file mode 100644
+index 00000000..7398f020
+--- /dev/null
++++ b/internal/promptpreview/preview.go
+@@ -0,0 +1,181 @@
++// Package promptpreview extracts bounded user-text previews, never full request bodies.
++package promptpreview
++
++import (
++	"context"
++	"crypto/sha256"
++	"strings"
++	"sync"
++	"time"
++	"unicode"
++
++	"github.com/tidwall/gjson"
++)
++
++const CharacterLimit = 240
++const sessionLimit = 4096
++const sessionLifetime = 24 * time.Hour
++
++type Preview struct {
++	Initial string `json:"initial,omitempty"`
++	Current string `json:"current,omitempty"`
++}
++
++type sessionPreview struct {
++	preview Preview
++	updated time.Time
++}
++
++type Store struct {
++	mu       sync.Mutex
++	sessions map[[32]byte]sessionPreview
++}
++
++func New() *Store { return &Store{sessions: make(map[[32]byte]sessionPreview)} }
++
++var Default = New()
++
++// Text normalizes whitespace and bounds Unicode characters before any persistence.
++func Text(value string) string {
++	var result strings.Builder
++	count := 0
++	space := false
++	for _, character := range value {
++		if unicode.IsSpace(character) {
++			space = result.Len() > 0
++			continue
++		}
++		if unicode.IsControl(character) || unicode.Is(unicode.Cf, character) {
++			continue
++		}
++		if count >= CharacterLimit {
++			break
++		}
++		if space {
++			result.WriteByte(' ')
++			count++
++			space = false
++			if count >= CharacterLimit {
++				break
++			}
++		}
++		result.WriteRune(character)
++		count++
++	}
++	return result.String()
++}
++
++func userText(content gjson.Result) string {
++	if content.Type == gjson.String {
++		return Text(content.String())
++	}
++	if !content.IsArray() {
++		return ""
++	}
++	var parts []string
++	content.ForEach(func(_, part gjson.Result) bool {
++		kind := part.Get("type").String()
++		if kind == "input_text" || kind == "text" || kind == "" {
++			if text := Text(part.Get("text").String()); text != "" {
++				parts = append(parts, text)
++			}
++		}
++		return len(parts) < CharacterLimit
++	})
++	return Text(strings.Join(parts, " "))
++}
++
++func isClientContext(text string) bool {
++	for _, prefix := range []string{"# AGENTS.md instructions", "<environment_context>", "<user_instructions>", "<permissions instructions>", "<external_", "<turn_aborted>"} {
++		if strings.HasPrefix(text, prefix) {
++			return true
++		}
++	}
++	return false
++}
++
++// Extract accepts explicit user messages only. Assistant text, system/developer
++// instructions, tool arguments/results and non-text parts are never previews.
++func Extract(payload []byte) Preview {
++	root := gjson.ParseBytes(payload)
++	input := root.Get("input")
++	if input.Type == gjson.String {
++		text := Text(input.String())
++		if !isClientContext(text) {
++			return Preview{Initial: text, Current: text}
++		}
++		return Preview{}
++	}
++	if !input.IsArray() {
++		input = root.Get("messages")
++	}
++	var preview Preview
++	input.ForEach(func(_, message gjson.Result) bool {
++		if message.Get("role").String() != "user" {
++			return true
++		}
++		text := userText(message.Get("content"))
++		if text == "" || isClientContext(text) {
++			return true
++		}
++		if preview.Initial == "" {
++			preview.Initial = text
++		}
++		preview.Current = text
++		return true
++	})
++	return preview
++}
++
++// Observe scopes continuity by both client and explicit session identity. Without
++// a session, no cross-request state is retained. Idle entries expire in memory.
++func (s *Store) Observe(client, session string, payload []byte) Preview {
++	preview := Extract(payload)
++	if session == "" {
++		return preview
++	}
++	key := sha256.Sum256([]byte(client + "\x00" + session))
++	now := time.Now()
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	previous, exists := s.sessions[key]
++	if exists && now.Sub(previous.updated) < sessionLifetime {
++		if previous.preview.Initial != "" {
++			preview.Initial = previous.preview.Initial
++		}
++		if preview.Current == "" {
++			preview.Current = previous.preview.Current
++		}
++	}
++	if preview.Initial == "" && preview.Current == "" {
++		return preview
++	}
++	if !exists && len(s.sessions) >= sessionLimit {
++		var oldestKey [32]byte
++		var oldest time.Time
++		for entryKey, entry := range s.sessions {
++			if oldest.IsZero() || entry.updated.Before(oldest) {
++				oldest, oldestKey = entry.updated, entryKey
++			}
++		}
++		delete(s.sessions, oldestKey)
++	}
++	s.sessions[key] = sessionPreview{preview: preview, updated: now}
++	return preview
++}
++
++type contextKey struct{}
++
++func WithContext(ctx context.Context, preview Preview) context.Context {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	return context.WithValue(ctx, contextKey{}, preview)
++}
++func FromContext(ctx context.Context) Preview {
++	if ctx == nil {
++		return Preview{}
++	}
++	preview, _ := ctx.Value(contextKey{}).(Preview)
++	return preview
++}
+diff --git a/internal/promptpreview/preview_test.go b/internal/promptpreview/preview_test.go
+new file mode 100644
+index 00000000..db847d42
+--- /dev/null
++++ b/internal/promptpreview/preview_test.go
+@@ -0,0 +1,60 @@
++package promptpreview
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++	"time"
++	"unicode/utf8"
++)
++
++func TestExtractOnlyUserText(t *testing.T) {
++	payload := []byte(`{"instructions":"private system","input":[{"role":"system","content":"secret system"},{"role":"developer","content":"secret developer"},{"role":"user","content":"<environment_context>metadata</environment_context>"},{"role":"user","content":[{"type":"input_text","text":"First\n actual prompt"},{"type":"input_image","image_url":"secret image"}]},{"role":"assistant","content":"secret answer"},{"type":"function_call_output","output":"secret tool result"},{"role":"user","content":"Current user question"}]}`)
++	preview := Extract(payload)
++	if preview.Initial != "First actual prompt" || preview.Current != "Current user question" {
++		t.Fatalf("unexpected preview: %+v", preview)
++	}
++	encoded, _ := json.Marshal(preview)
++	if strings.Contains(string(encoded), "secret") {
++		t.Fatal("non-user content was captured")
++	}
++	if Extract([]byte(`{"input":[{"type":"function_call_output","output":"not a prompt"}]}`)) != (Preview{}) {
++		t.Fatal("tool result captured")
++	}
++	if Extract([]byte(`{"input":"Simple prompt"}`)).Current != "Simple prompt" {
++		t.Fatal("string input missing")
++	}
++}
++
++func TestPreviewCharacterBoundAndSessionIsolation(t *testing.T) {
++	long := strings.Repeat("🙂", 300)
++	if text := Text(" \n" + long); utf8.RuneCountInString(text) != CharacterLimit || !utf8.ValidString(text) {
++		t.Fatal("Unicode limit broken")
++	}
++	store := New()
++	observe := func(client, session, prompt string) Preview {
++		payload, _ := json.Marshal(map[string]any{"input": prompt})
++		return store.Observe(client, session, payload)
++	}
++	observe("a", "session", "First")
++	preview := observe("a", "session", "Next")
++	if preview.Initial != "First" || preview.Current != "Next" {
++		t.Fatal(preview)
++	}
++	if observe("b", "session", "Other client").Initial != "Other client" {
++		t.Fatal("client scope leaked")
++	}
++	if observe("a", "", "Stateless").Initial != "Stateless" {
++		t.Fatal("stateless preview leaked")
++	}
++	if preview := store.Observe("a", "session", []byte(`{"input":[{"type":"function_call_output","output":"secret"}]}`)); preview.Current != "Next" {
++		t.Fatal("tool continuation lost user prompt")
++	}
++	for key, entry := range store.sessions {
++		entry.updated = time.Now().Add(-sessionLifetime - time.Minute)
++		store.sessions[key] = entry
++	}
++	if observe("a", "session", "After expiry").Initial != "After expiry" {
++		t.Fatal("expired initial retained")
++	}
++}
+diff --git a/internal/redisqueue/plugin.go b/internal/redisqueue/plugin.go
+index 704808ca..039bd498 100644
+--- a/internal/redisqueue/plugin.go
++++ b/internal/redisqueue/plugin.go
+@@ -3,6 +3,7 @@ package redisqueue
+ import (
+ 	"context"
+ 	"encoding/json"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/promptpreview"
+ 	"net/http"
+ 	"strings"
+ 	"time"
+@@ -182,6 +183,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
+ 		TraceID:               traceID,
+ 		SessionID:             sessionID,
+ 		ParentSessionID:       parentSessionID,
++		PromptPreview:         record.PromptPreview,
+ 		NodeKind:              strings.TrimSpace(clientRequestMetadata.NodeKind),
+ 		IsFork:                clientRequestMetadata.IsFork,
+ 		IsCompaction:          clientRequestMetadata.IsCompaction,
+@@ -210,6 +212,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
+ }
+ 
+ type queuedUsageDetail struct {
++	PromptPreview promptpreview.Preview `json:"prompt_preview,omitempty"`
+ 	requestDetail
+ 	AccountingVersion     int                         `json:"accounting_version"`
+ 	TokenBreakdown        coreusage.TokenBreakdown    `json:"token_breakdown"`
+diff --git a/internal/routinglive/activity.go b/internal/routinglive/activity.go
+new file mode 100644
+index 00000000..a5f6efa0
+--- /dev/null
++++ b/internal/routinglive/activity.go
+@@ -0,0 +1,162 @@
++package routinglive
++
++import (
++	"bytes"
++	"strings"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/promptpreview"
++	"github.com/tidwall/gjson"
++)
++
++type Activity struct {
++	Phase        string     `json:"phase"`
++	Since        time.Time  `json:"since"`
++	LastOutput   *time.Time `json:"last_output_at,omitempty"`
++	OutputEvents uint64     `json:"output_events"`
++	ToolNames    []string   `json:"tool_names,omitempty"`
++}
++
++func (r *Registry) ObserveInput(id string, payload []byte) {
++	r.mu.Lock()
++	row, exists := r.rows[id]
++	r.mu.Unlock()
++	if !exists {
++		return
++	}
++	session := row.Session
++	if session == "" {
++		session = row.ID
++	}
++	preview := promptpreview.Default.Observe(row.Client, session, payload)
++	phase := "waiting_upstream"
++	gjson.GetBytes(payload, "input").ForEach(func(_, item gjson.Result) bool {
++		if kind := item.Get("type").String(); kind == "function_call_output" || kind == "custom_tool_call_output" {
++			phase = "continuing_tools"
++		}
++		return true
++	})
++	r.Change(id, func(row *Row) {
++		row.PromptPreview = preview
++		row.Activity = Activity{Phase: phase, Since: time.Now()}
++	})
++}
++
++func (r *Registry) SetPromptPreview(id string, preview promptpreview.Preview) {
++	r.Change(id, func(row *Row) {
++		row.PromptPreview = preview
++		if row.Activity.Phase == "" {
++			row.Activity = Activity{Phase: "waiting_upstream", Since: time.Now()}
++		}
++	})
++}
++
++// ObserveOutput stores event kinds and bounded tool names, never output text or
++// arguments. Repeated deltas publish at most once a second per connection.
++func (r *Registry) ObserveOutput(id string, payload []byte) {
++	for _, line := range bytes.Split(payload, []byte{'\n'}) {
++		line = bytes.TrimSpace(bytes.TrimPrefix(bytes.TrimSpace(line), []byte("data:")))
++		if len(line) == 0 || line[0] != '{' {
++			continue
++		}
++		r.observeEvent(id, gjson.ParseBytes(line))
++	}
++}
++
++func (r *Registry) observeEvent(id string, event gjson.Result) {
++	kind := event.Get("type").String()
++	phase := ""
++	item := event.Get("item")
++	switch kind {
++	case "response.created", "response.in_progress":
++		phase = "waiting_output"
++	case "response.output_text.delta", "response.audio.delta", "response.output_audio.delta":
++		phase = "generating"
++	case "response.reasoning.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
++		phase = "reasoning"
++	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
++		phase = "requesting_tool"
++	case "response.output_item.added", "response.output_item.done":
++		switch item.Get("type").String() {
++		case "function_call", "custom_tool_call":
++			phase = "requesting_tool"
++		case "reasoning":
++			phase = "reasoning"
++		case "message":
++			phase = "generating"
++		}
++	case "response.completed", "response.done":
++		phase = "response_finished"
++	case "response.failed", "response.incomplete", "error":
++		phase = "response_failed"
++	default:
++		if event.Get("choices.0.delta.content").Exists() {
++			phase = "generating"
++		}
++		if event.Get("choices.0.delta.tool_calls").Exists() {
++			phase = "requesting_tool"
++		}
++	}
++	if phase == "" {
++		return
++	}
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	row, exists := r.rows[id]
++	if !exists {
++		return
++	}
++	now := time.Now()
++	previousPhase := row.Activity.Phase
++	if previousPhase != phase {
++		row.Activity.Phase, row.Activity.Since = phase, now
++	}
++	row.Activity.LastOutput = &now
++	if strings.HasSuffix(kind, ".delta") || event.Get("choices").IsArray() {
++		row.Activity.OutputEvents++
++	}
++	row.Activity.ToolNames = appendToolName(row.Activity.ToolNames, item)
++	if kind == "response.completed" || kind == "response.done" {
++		event.Get("response.output").ForEach(func(_, output gjson.Result) bool {
++			row.Activity.ToolNames = appendToolName(row.Activity.ToolNames, output)
++			return len(row.Activity.ToolNames) < 8
++		})
++	}
++	shouldPublish := previousPhase != phase || now.Sub(row.Updated) >= time.Second
++	if shouldPublish {
++		row.Updated = now
++	}
++	r.rows[id] = row
++	if shouldPublish {
++		live.Default.Publish("routing")
++	}
++}
++
++func appendToolName(names []string, item gjson.Result) []string {
++	if kind := item.Get("type").String(); kind != "function_call" && kind != "custom_tool_call" {
++		return names
++	}
++	name := safeToolName(item.Get("name").String())
++	if name == "" || len(names) >= 8 {
++		return names
++	}
++	for _, existing := range names {
++		if existing == name {
++			return names
++		}
++	}
++	return append(names, name)
++}
++
++func safeToolName(name string) string {
++	if len(name) > 80 {
++		return ""
++	}
++	for _, character := range name {
++		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-", character) {
++			return ""
++		}
++	}
++	return name
++}
+diff --git a/internal/routinglive/activity_test.go b/internal/routinglive/activity_test.go
+new file mode 100644
+index 00000000..a0551bc9
+--- /dev/null
++++ b/internal/routinglive/activity_test.go
+@@ -0,0 +1,35 @@
++package routinglive
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++)
++
++func TestObservedActivityWithoutOutputBodies(t *testing.T) {
++	registry := New()
++	id := registry.Begin("websocket", "client", "session")
++	registry.ObserveInput(id, []byte(`{"type":"response.create","input":"User question"}`))
++	registry.ObserveOutput(id, []byte(`{"type":"response.created","response":{"id":"private-response-id"}}`))
++	registry.ObserveOutput(id, []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"private answer\"}\n\n"))
++	row := registry.Snapshot().Rows[0]
++	if row.Activity.Phase != "generating" || row.Activity.OutputEvents != 1 || row.Activity.LastOutput == nil || row.PromptPreview.Current != "User question" {
++		t.Fatalf("missing observed activity: %+v", row)
++	}
++	registry.ObserveOutput(id, []byte(`{"type":"response.output_item.added","item":{"type":"function_call","name":"exec_command","arguments":"private argument"}}`))
++	row = registry.Snapshot().Rows[0]
++	if row.Activity.Phase != "requesting_tool" || len(row.Activity.ToolNames) != 1 || row.Activity.ToolNames[0] != "exec_command" {
++		t.Fatal(row.Activity)
++	}
++	encoded, _ := json.Marshal(registry.Snapshot())
++	for _, secret := range []string{"private answer", "private argument", "private-response-id"} {
++		if strings.Contains(string(encoded), secret) {
++			t.Fatalf("captured output body: %s", secret)
++		}
++	}
++	registry.End(id, 200)
++	registry.ObserveOutput(id, []byte(`{"type":"response.output_text.delta","delta":"late"}`))
++	if len(registry.Snapshot().Rows) != 0 {
++		t.Fatal("late output resurrected completed activity")
++	}
++}
+diff --git a/internal/routinglive/registry.go b/internal/routinglive/registry.go
+index f11a8ebf..e757902e 100644
+--- a/internal/routinglive/registry.go
++++ b/internal/routinglive/registry.go
+@@ -1,4 +1,4 @@
+-// Package routinglive holds bounded, ephemeral administration telemetry. No bodies or credentials.
++// Package routinglive holds bounded, ephemeral administration telemetry and user-text previews.
+ package routinglive
+ 
+ import (
+@@ -8,6 +8,7 @@ import (
+ 	"crypto/sha256"
+ 	"encoding/hex"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/promptpreview"
+ 	"sort"
+ 	"strconv"
+ 	"sync"
+@@ -22,26 +23,28 @@ type Candidate struct {
+ 	Status    string `json:"status"`
+ }
+ type Row struct {
+-	ID         string      `json:"id"`
+-	Kind       string      `json:"kind"`
+-	Session    string      `json:"session,omitempty"`
+-	Client     string      `json:"client,omitempty"`
+-	Model      string      `json:"model,omitempty"`
+-	Account    string      `json:"account,omitempty"`
+-	Pool       string      `json:"pool,omitempty"`
+-	Transport  string      `json:"transport"`
+-	State      string      `json:"state"`
+-	Reason     string      `json:"reason,omitempty"`
+-	Priority   int         `json:"priority"`
+-	Active     int         `json:"active"`
+-	Tools      int         `json:"tools"`
+-	Draining   bool        `json:"draining"`
+-	Uncertain  bool        `json:"uncertain"`
+-	Attempts   int         `json:"attempts"`
+-	Started    time.Time   `json:"started_at"`
+-	Updated    time.Time   `json:"updated_at"`
+-	Candidates []Candidate `json:"candidates"`
+-	Work       []Work      `json:"work"`
++	PromptPreview promptpreview.Preview `json:"prompt_preview"`
++	Activity      Activity              `json:"activity"`
++	ID            string                `json:"id"`
++	Kind          string                `json:"kind"`
++	Session       string                `json:"session,omitempty"`
++	Client        string                `json:"client,omitempty"`
++	Model         string                `json:"model,omitempty"`
++	Account       string                `json:"account,omitempty"`
++	Pool          string                `json:"pool,omitempty"`
++	Transport     string                `json:"transport"`
++	State         string                `json:"state"`
++	Reason        string                `json:"reason,omitempty"`
++	Priority      int                   `json:"priority"`
++	Active        int                   `json:"active"`
++	Tools         int                   `json:"tools"`
++	Draining      bool                  `json:"draining"`
++	Uncertain     bool                  `json:"uncertain"`
++	Attempts      int                   `json:"attempts"`
++	Started       time.Time             `json:"started_at"`
++	Updated       time.Time             `json:"updated_at"`
++	Candidates    []Candidate           `json:"candidates"`
++	Work          []Work                `json:"work"`
+ }
+ type Work struct {
+ 	ID      string    `json:"id"`
+@@ -192,6 +195,7 @@ func (r *Registry) Snapshot() Snapshot {
+ 	for _, v := range r.rows {
+ 		v.Candidates = append([]Candidate{}, v.Candidates...)
+ 		v.Work = append([]Work{}, v.Work...)
++		v.Activity.ToolNames = append([]string{}, v.Activity.ToolNames...)
+ 		out.Rows = append(out.Rows, v)
+ 	}
+ 	sort.Slice(out.Rows, func(i, j int) bool { return out.Rows[i].Started.Before(out.Rows[j].Started) })
+diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
+index 27d06287..63283e7f 100644
+--- a/internal/runtime/executor/codex_websockets_duplex.go
++++ b/internal/runtime/executor/codex_websockets_duplex.go
+@@ -739,6 +739,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 				wakeWriter()
+ 				if !firstResponse {
+ 					reporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
++					reporter.SetPromptPreview(current.promptPreview)
+ 					reporter.SetTranslatedReasoningEffort(current.clientBody, current.to.String())
+ 					reporter.SetUpstreamServiceTier(current.clientBody)
+ 					reporter.StartResponseTTFT()
+@@ -825,6 +826,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 				if len(pending) > 0 && !currentFailure && !ambiguous {
+ 					eventPrepared, pending = pending[0], pending[1:]
+ 					eventReporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
++					eventReporter.SetPromptPreview(eventPrepared.promptPreview)
+ 					eventReporter.SetTranslatedReasoningEffort(eventPrepared.clientBody, eventPrepared.to.String())
+ 					eventReporter.SetUpstreamServiceTier(eventPrepared.clientBody)
+ 				} else if !ambiguous {
+diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
+index 1d66e2c3..7eff22ad 100644
+--- a/internal/runtime/executor/codex_websockets_stream.go
++++ b/internal/runtime/executor/codex_websockets_stream.go
+@@ -4,6 +4,8 @@ import (
+ 	"bytes"
+ 	"context"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/promptpreview"
+ 	"net/http"
+ 	"strings"
+ 	"time"
+@@ -14,6 +16,7 @@ import (
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+ 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+ 	log "github.com/sirupsen/logrus"
+ 	"github.com/tidwall/gjson"
+@@ -38,6 +41,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	reporter.SetPromptPreview(prepared.promptPreview)
+ 	from := prepared.from
+ 	responseFormat := prepared.responseFormat
+ 	to := prepared.to
+@@ -840,6 +844,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
+ // codexWebsocketPrepared contains the request pipeline output shared by the
+ // ordinary per-response stream and subsequent creates on a duplex connection.
+ type codexWebsocketPrepared struct {
++	promptPreview        promptpreview.Preview
+ 	from                 sdktranslator.Format
+ 	responseFormat       sdktranslator.Format
+ 	to                   sdktranslator.Format
+@@ -935,6 +940,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
+ 	applyModelHeaderOverrides(wsHeaders, baseModel)
+ 
+ 	return &codexWebsocketPrepared{
++		promptPreview:        promptpreview.Default.Observe(usage.APIKeyFromContext(ctx), logging.GetClientRequestMetadata(ctx).SessionID, req.Payload),
+ 		from:                 from,
+ 		responseFormat:       responseFormat,
+ 		to:                   to,
+diff --git a/internal/runtime/executor/helps/usage_helpers.go b/internal/runtime/executor/helps/usage_helpers.go
+index 8b4c3320..f63c2153 100644
+--- a/internal/runtime/executor/helps/usage_helpers.go
++++ b/internal/runtime/executor/helps/usage_helpers.go
+@@ -5,6 +5,7 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/promptpreview"
+ 	"io"
+ 	"mime"
+ 	"mime/multipart"
+@@ -30,6 +31,7 @@ import (
+ )
+ 
+ type UsageReporter struct {
++	promptPreview        promptpreview.Preview
+ 	requestID            string
+ 	traceID              string
+ 	selectionID          string
+@@ -92,6 +94,8 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
+ 	return reporter
+ }
+ 
++func (r *UsageReporter) SetPromptPreview(preview promptpreview.Preview) { r.promptPreview = preview }
++
+ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
+ 	apiKey := APIKeyFromContext(ctx)
+ 	accessProvider := AccessProviderFromContext(ctx)
+@@ -131,6 +135,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
+ 		traceID = internallogging.GetRequestID(ctx)
+ 	}
+ 	reporter := &UsageReporter{
++		promptPreview:   promptpreview.FromContext(ctx),
+ 		requestID:       uuid.NewString(),
+ 		traceID:         traceID,
+ 		selectionID:     usage.SelectionIDFromContext(ctx),
+@@ -680,6 +685,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
+ 		responseModel = r.ResponseModel()
+ 	}
+ 	return usage.Record{
++		PromptPreview:        r.promptPreview,
+ 		RequestID:            r.requestID,
+ 		TraceID:              r.traceID,
+ 		SelectionID:          r.selectionID,
+diff --git a/internal/sessionrebalance/rebalance.go b/internal/sessionrebalance/rebalance.go
+index a833f8d2..9ec8e024 100644
+--- a/internal/sessionrebalance/rebalance.go
++++ b/internal/sessionrebalance/rebalance.go
+@@ -204,6 +204,7 @@ func (s *Session) Input(payload []byte) bool {
+ 		s.uncertain = true
+ 		return true
+ 	}
++	routinglive.Default.ObserveInput(s.telemetryID, payload)
+ 	defer s.telemetryLocked()
+ 	s.ops = append(s.ops, &operation{started: time.Now(), event: gjson.GetBytes(payload, "event_id").String(), kind: kind, parent: gjson.GetBytes(payload, "previous_response_id").String()})
+ 	gjson.GetBytes(payload, "input").ForEach(func(_, item gjson.Result) bool {
+@@ -223,6 +224,7 @@ func (s *Session) Output(payload []byte) {
+ 	c := s.owner
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
++	routinglive.Default.ObserveOutput(s.telemetryID, payload)
+ 	kind := gjson.GetBytes(payload, "type").String()
+ 	switch kind {
+ 	case "response.created", "response.steer.accepted", "response.steer.failed", "response.output_item.done", "response.completed", "response.done", "response.incomplete", "response.failed", "error":
+@@ -366,6 +368,19 @@ func (s *Session) telemetryLocked() {
+ 			state = "reconnecting"
+ 		}
+ 		r.State = state
++		phase := ""
++		if state == "waiting_tools" {
++			phase = "waiting_tools"
++		}
++		if state == "idle" {
++			phase = "idle"
++		}
++		if state == "reconnecting" {
++			phase = "reconnecting"
++		}
++		if phase != "" && r.Activity.Phase != phase {
++			r.Activity.Phase, r.Activity.Since = phase, time.Now()
++		}
+ 		r.Active = len(s.ops)
+ 		r.Tools = len(s.tools)
+ 		r.Draining = s.draining
+diff --git a/sdk/api/handlers/handlers.go b/sdk/api/handlers/handlers.go
+index b9c0366c..3c89b81f 100644
+--- a/sdk/api/handlers/handlers.go
++++ b/sdk/api/handlers/handlers.go
+@@ -7,6 +7,7 @@ import (
+ 	"bytes"
+ 	"encoding/json"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/promptpreview"
+ 	"net"
+ 	"net/http"
+ 	"reflect"
+@@ -344,7 +345,11 @@ func EnrichContextWithSessionHierarchy(ctx context.Context, headers http.Header,
+ }
+ 
+ func enrichContextWithSessionHierarchy(ctx context.Context, headers http.Header, payload []byte, metadata map[string]any) context.Context {
+-	return EnrichContextWithSessionHierarchy(ctx, headers, payload, metadata)
++	ctx = EnrichContextWithSessionHierarchy(ctx, headers, payload, metadata)
++	preview := promptpreview.Default.Observe(coreusage.APIKeyFromContext(ctx), logging.GetClientRequestMetadata(ctx).SessionID, payload)
++	ctx = promptpreview.WithContext(ctx, preview)
++	routinglive.Default.SetPromptPreview(routinglive.ID(ctx), preview)
++	return ctx
+ }
+ 
+ func requestCallerScope(ginCtx *gin.Context) string {
+diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
+index 86a30602..0b43d41c 100644
+--- a/sdk/api/handlers/handlers_stream.go
++++ b/sdk/api/handlers/handlers_stream.go
+@@ -5,6 +5,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/routinglive"
+ 	"net/http"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+@@ -438,6 +439,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
+ 	}
+ 
+ 	transformStreamPayload := func(payload []byte, chunkIndex *int, historyChunks [][]byte) ([]byte, bool, *interfaces.ErrorMessage) {
++		routinglive.Default.ObserveOutput(routinglive.ID(ctx), payload)
+ 		applyStreamHeaderInit()
+ 		payload = cloneBytes(payload)
+ 		if streamInterceptorsActive {
+diff --git a/sdk/cliproxy/usage/manager.go b/sdk/cliproxy/usage/manager.go
+index 85c247eb..7601c76e 100644
+--- a/sdk/cliproxy/usage/manager.go
++++ b/sdk/cliproxy/usage/manager.go
+@@ -3,6 +3,7 @@ package usage
+ import (
+ 	"context"
+ 	"fmt"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/promptpreview"
+ 	"net/http"
+ 	"reflect"
+ 	"strings"
+@@ -24,6 +25,7 @@ const AutoServiceTier = "auto"
+ 
+ // Record contains the usage statistics captured for a single provider request.
+ type Record struct {
++	PromptPreview promptpreview.Preview
+ 	// RequestID uniquely identifies this specific model execution instance (UUID v4).
+ 	RequestID string
+ 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
+@@ -755,6 +757,9 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
+ 			record.IsNativeKey = IsNativeAccessProvider(record.AccessProvider)
+ 		}
+ 	}
++	if record.PromptPreview == (promptpreview.Preview{}) {
++		record.PromptPreview = promptpreview.FromContext(ctx)
++	}
+ 	ctx = WithCapturedIdentity(ctx, record.APIKey, record.AccessProvider, record.IsNativeKey)
+ 	// ensure worker is running even if Start was not called explicitly
+ 	m.Start(context.Background())

@@ -147,14 +147,14 @@ diff --git a/web/src/lib/usageNavigation.ts b/web/src/lib/usageNavigation.ts
 index 6c170837..18e50651 100644
 --- a/web/src/lib/usageNavigation.ts
 +++ b/web/src/lib/usageNavigation.ts
-@@ -1,6 +1,7 @@
- export const USAGE_TAB_OPTIONS = [
-   'overview',
-   'realtime',
-+ 'routing',
+@@ -4,6 +4,7 @@
    'analysis',
    'ranking',
    'events',
++  'routing',
+   'credentials',
+   'ai-provider',
+   'settings',
 @@ -15,6 +16,7 @@ export const DEFAULT_USAGE_TAB: UsageTab = 'overview';
  const USAGE_TAB_PATHS: Record<UsageTab, string> = {
    overview: '/overview',
@@ -481,11 +481,33 @@ diff --git a/web/src/pages/test/UsagePage.logic.test.ts b/web/src/pages/test/Usa
 index 22453e44..9b3e30f7 100644
 --- a/web/src/pages/test/UsagePage.logic.test.ts
 +++ b/web/src/pages/test/UsagePage.logic.test.ts
-@@ -822,6 +822,7 @@ describe('UsagePage tab labels', () => {
+@@ -822,9 +822,10 @@ describe('UsagePage tab labels', () => {
      expect(labels).toEqual([
        'translated:usage_stats.tab_overview',
        'translated:usage_stats.tab_realtime',
-+      'translated:usage_stats.tab_routing',
        'translated:usage_stats.tab_analysis',
        'translated:usage_stats.tab_ranking',
        'translated:usage_stats.tab_events',
++      'translated:usage_stats.tab_routing',
+       'translated:usage_stats.tab_credentials',
+       'translated:usage_stats.tab_ai_provider',
+       'translated:usage_stats.tab_settings',
+diff --git a/web/src/test/AppUsageNavigation.test.ts b/web/src/test/AppUsageNavigation.test.ts
+--- a/web/src/test/AppUsageNavigation.test.ts
++++ b/web/src/test/AppUsageNavigation.test.ts
+@@ -2,6 +2,15 @@
+ import { getRoleHomePath, getRoleTargetPath, shouldNormalizeRolePath } from '../App';
+ 
+ describe('App usage-page route authorization', () => {
++  it('allows live routing only for administrators, including direct links', () => {
++    expect(getRoleTargetPath('admin', '/live-routing')).toBe('/live-routing');
++    expect(shouldNormalizeRolePath('admin', '/live-routing')).toBe(false);
++    expect(getRoleTargetPath('read_only', '/live-routing')).toBe('/read-only');
++    expect(shouldNormalizeRolePath('read_only', '/live-routing')).toBe(true);
++    expect(getRoleTargetPath('api_key_viewer', '/live-routing')).toBe('/key-overview');
++    expect(shouldNormalizeRolePath('api_key_viewer', '/live-routing')).toBe(true);
++  });
++
+   it('normalizes restored admin sessions away from the API Key viewer route', () => {
+     expect(getRoleHomePath('admin')).toBe('/');
+     expect(shouldNormalizeRolePath('admin', '/key-overview')).toBe(true);

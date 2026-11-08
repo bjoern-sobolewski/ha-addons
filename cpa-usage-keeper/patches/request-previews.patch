@@ -1,0 +1,816 @@
+diff --git a/internal/api/prompt_preview.go b/internal/api/prompt_preview.go
+new file mode 100644
+index 00000000..79c4b0d5
+--- /dev/null
++++ b/internal/api/prompt_preview.go
+@@ -0,0 +1,43 @@
++package api
++
++import (
++	"context"
++	"errors"
++	"strconv"
++
++	"cpa-usage-keeper/internal/service"
++	"github.com/gin-gonic/gin"
++	"gorm.io/gorm"
++)
++
++type promptPreviewReader interface {
++	GetUsageEventPromptPreview(context.Context, int64) (service.PromptPreview, error)
++}
++
++// Register only on adminProtected. Previews never enter shared event DTOs,
++// exports, read-only reports or API-key reports.
++func registerPromptPreviewRoute(router gin.IRoutes, provider service.UsageProvider) {
++	router.GET("/usage/events/:id/prompts", func(c *gin.Context) {
++		setNoStoreHeaders(c)
++		eventID, err := strconv.ParseInt(c.Param("id"), 10, 64)
++		if err != nil || eventID <= 0 {
++			c.JSON(400, gin.H{"error": "Invalid event"})
++			return
++		}
++		reader, ok := provider.(promptPreviewReader)
++		if !ok {
++			c.JSON(503, gin.H{"error": "Prompt previews unavailable"})
++			return
++		}
++		preview, err := reader.GetUsageEventPromptPreview(c.Request.Context(), eventID)
++		if errors.Is(err, gorm.ErrRecordNotFound) {
++			c.JSON(404, gin.H{"error": "Event not found"})
++			return
++		}
++		if err != nil {
++			c.JSON(503, gin.H{"error": "Prompt previews unavailable"})
++			return
++		}
++		c.JSON(200, preview)
++	})
++}
+diff --git a/internal/api/router.go b/internal/api/router.go
+index 8012d822..08ddf316 100644
+--- a/internal/api/router.go
++++ b/internal/api/router.go
+@@ -182,6 +182,7 @@ func NewRouter(
+ 	registerUsageActivityRoute(adminProtected, usageProvider)
+ 	registerUsageAnalysisRoute(adminProtected, usageProvider, cpaAPIKeyProvider)
+ 	registerUsageEventsRoute(adminProtected, usageProvider, usageIdentityProvider, cpaAPIKeyProvider, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
++	registerPromptPreviewRoute(adminProtected, usageProvider)
+ 	registerUsageIdentityRoutes(adminProtected, usageIdentityProvider)
+ 	registerErrorEventRoutes(adminProtected, errorEventProvider)
+ 	registerCredentialManagementRoutes(adminProtected, credentialsProvider)
+diff --git a/internal/api/test/prompt_preview_test.go b/internal/api/test/prompt_preview_test.go
+new file mode 100644
+index 00000000..5ea28cf5
+--- /dev/null
++++ b/internal/api/test/prompt_preview_test.go
+@@ -0,0 +1,67 @@
++package test
++
++import (
++	"context"
++	"net/http"
++	"strings"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/auth"
++	"cpa-usage-keeper/internal/service"
++)
++
++type promptPreviewUsageStub struct {
++	reportingUsageStub
++	calls int
++}
++
++func (s *promptPreviewUsageStub) GetUsageEventPromptPreview(context.Context, int64) (service.PromptPreview, error) {
++	s.calls++
++	return service.PromptPreview{Initial: "private initial marker", Current: "private current marker", CharacterLimit: 240}, nil
++}
++
++func TestPromptPreviewsAreAdminOnly(t *testing.T) {
++	sessions := auth.NewSessionManager(time.Hour)
++	config := AuthConfig{Enabled: true, LoginPassword: "admin-password-long", ReadOnlyPassword: "read-password-long"}
++	usage := &promptPreviewUsageStub{}
++	router := NewRouter(nil, nil, usage, nil, config, NewAuthHandler(config, sessions), "", OptionalProviders{CPAAPIKeys: &reportingKeysStub{}})
++	login := serveCredentialMutation(router, "POST", "/api/v1/auth/login", `{"password":"admin-password-long"}`)
++	if login.Code != 204 {
++		t.Fatal(login.Code)
++	}
++	adminCookie := login.Result().Cookies()[0]
++	path := "/api/v1/usage/events/7/prompts"
++	response := serveAPIGet(router, path, adminCookie)
++	if response.Code != 200 || !strings.Contains(response.Body.String(), "private initial marker") || !strings.Contains(response.Header().Get("Cache-Control"), "no-store") {
++		t.Fatal(response.Code, response.Body.String())
++	}
++	readLogin := serveCredentialMutation(router, "POST", "/api/v1/auth/read-only-login", `{"password":"read-password-long"}`)
++	if readLogin.Code != 204 {
++		t.Fatal(readLogin.Code)
++	}
++	viewer, _, _ := sessions.CreateAPIKeyViewer(1)
++	if serveAPIGet(router, path).Code != 401 {
++		t.Fatal("anonymous preview route exposed")
++	}
++	for _, cookie := range []*http.Cookie{readLogin.Result().Cookies()[0], {Name: adminCookie.Name, Value: viewer}} {
++		response := serveAPIGet(router, path, cookie)
++		if response.Code != 401 && response.Code != 403 {
++			t.Fatalf("non-admin allowed: %d", response.Code)
++		}
++		if strings.Contains(response.Body.String(), "private") {
++			t.Fatal("preview leaked on denied request")
++		}
++	}
++	if usage.calls != 1 {
++		t.Fatal("unauthorized request reached preview reader")
++	}
++	if serveAPIGet(router, "/api/v1/read-only/events/7/prompts", readLogin.Result().Cookies()[0]).Code != 404 {
++		t.Fatal("read-only preview route exposed")
++	}
++	response = serveAPIGet(router, "/api/v1/read-only/events?range=today", readLogin.Result().Cookies()[0])
++	if response.Code != 200 || strings.Contains(response.Body.String(), "prompt") {
++		t.Fatal("preview fields entered viewer DTO")
++	}
++}
+diff --git a/internal/entities/usage_event.go b/internal/entities/usage_event.go
+index fee7f80e..32cb705d 100644
+--- a/internal/entities/usage_event.go
++++ b/internal/entities/usage_event.go
+@@ -7,7 +7,9 @@ import (
+ 
+ // UsageEvent 是落库后的单条 usage 请求事件实体。
+ type UsageEvent struct {
+-	ID                   int64 `gorm:"primaryKey;index:idx_usage_events_timestamp_id,sort:desc,priority:2;index:idx_usage_events_auth_type_auth_index_id,priority:3;index:idx_usage_events_auth_index_timestamp_id,priority:3"`
++	InitialPromptPreview string `gorm:"column:initial_prompt_preview;not null;default:''" json:"-"`
++	CurrentPromptPreview string `gorm:"column:current_prompt_preview;not null;default:''" json:"-"`
++	ID                   int64  `gorm:"primaryKey;index:idx_usage_events_timestamp_id,sort:desc,priority:2;index:idx_usage_events_auth_type_auth_index_id,priority:3;index:idx_usage_events_auth_index_timestamp_id,priority:3"`
+ 	EventKey             string
+ 	APIGroupKey          string    `gorm:"index:idx_usage_events_api_group_key_timestamp,priority:1"`
+ 	IsNativeKey          *bool     `gorm:"column:is_native_key"`
+diff --git a/internal/entities/usage_event_archive.go b/internal/entities/usage_event_archive.go
+index fef243cf..28ec12ca 100644
+--- a/internal/entities/usage_event_archive.go
++++ b/internal/entities/usage_event_archive.go
+@@ -2,11 +2,12 @@ package entities
+ 
+ import "time"
+ 
+-// UsageEventStorageColumns 是 hot/archive 原始事件复制使用的完整持久化列契约。
++// UsageEventStorageColumns is the shared hot/archive copy contract. Sensitive
++// prompt previews remain only in the hot table and expire when events archive.
+ const UsageEventStorageColumns = "id, event_key, api_group_key, is_native_key, access_provider, provider, endpoint, auth_type, request_id, execution_id, trace_id, session_id, parent_session_id, node_kind, is_fork, is_compaction, client_ip, x_forwarded_for, user_agent, model, model_alias, response_model, reasoning_effort, service_tier, effective_service_tier, upstream_service_tier, response_service_tier, executor_type, timestamp, source, auth_index, failed, status_code, generate, stream, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, cache_creation_tokens, total_tokens, cost_usd, cost_available, created_at"
+ 
+ // UsageEventArchive 保存已经离开 hot usage_events 的原始事件，默认永久保留，可配置清理期限。
+-// 字段必须与 UsageEvent 的持久化列保持一致，但 archive 不承担在线查询，因此不复制二级索引。
++// Shared fields match UsageEvent; prompt previews and online indexes are excluded.
+ type UsageEventArchive struct {
+ 	ID                   int64 `gorm:"primaryKey;autoIncrement:false"`
+ 	EventKey             string
+diff --git a/internal/repository/migration/20261108_prompt_previews.go b/internal/repository/migration/20261108_prompt_previews.go
+new file mode 100644
+index 00000000..32be7f01
+--- /dev/null
++++ b/internal/repository/migration/20261108_prompt_previews.go
+@@ -0,0 +1,21 @@
++package migration
++
++import (
++	"cpa-usage-keeper/internal/entities"
++	"fmt"
++	"gorm.io/gorm"
++)
++
++func addPromptPreviewsMigration(tx *gorm.DB) error {
++	if !tx.Migrator().HasTable(&entities.UsageEvent{}) {
++		return nil
++	}
++	for _, field := range []string{"InitialPromptPreview", "CurrentPromptPreview"} {
++		if !tx.Migrator().HasColumn(&entities.UsageEvent{}, field) {
++			if err := tx.Migrator().AddColumn(&entities.UsageEvent{}, field); err != nil {
++				return fmt.Errorf("add prompt preview %s: %w", field, err)
++			}
++		}
++	}
++	return nil
++}
+diff --git a/internal/repository/migration/migration.go b/internal/repository/migration/migration.go
+index aa972192..4e897f31 100644
+--- a/internal/repository/migration/migration.go
++++ b/internal/repository/migration/migration.go
+@@ -105,6 +105,7 @@ const (
+ 	migrationRecoverExecutionUsageEvents       = "20261018_recover_execution_usage_events"
+ 	migrationAddUsageEventEffectiveServiceTier = "20261023_usage_event_effective_service_tier"
+ 	migrationAddPluginAPIKeySources            = "20261028_plugin_api_key_sources"
++	migrationAddPromptPreviews                 = "20261108_prompt_previews"
+ )
+ 
+ type schemaMigration struct {
+@@ -326,6 +327,7 @@ func orderedMigrations() []databaseMigration {
+ 		{version: "20261020_add_auth_session_oidc_identity", run: addAuthSessionOIDCIdentityMigration},
+ 		{version: migrationAddUsageEventEffectiveServiceTier, run: addUsageEventEffectiveServiceTierMigration},
+ 		{version: migrationAddPluginAPIKeySources, run: addPluginAPIKeySourcesMigration},
++		{version: migrationAddPromptPreviews, run: addPromptPreviewsMigration},
+ 	}
+ }
+ 
+diff --git a/internal/repository/migration/test/migration_test.go b/internal/repository/migration/test/migration_test.go
+index 0a572c57..9c1468c4 100644
+--- a/internal/repository/migration/test/migration_test.go
++++ b/internal/repository/migration/test/migration_test.go
+@@ -103,6 +103,7 @@ func TestOrderedMigrationsPreservesExecutionOrder(t *testing.T) {
+ 		"20261020_add_auth_session_oidc_identity",
+ 		"20261023_usage_event_effective_service_tier",
+ 		"20261028_plugin_api_key_sources",
++		"20261108_prompt_previews",
+ 	}
+ 	assertStringSlicesEqual(t, want, got)
+ }
+diff --git a/internal/repository/test/usage_event_archive_test.go b/internal/repository/test/usage_event_archive_test.go
+index b9f43231..741c3e6e 100644
+--- a/internal/repository/test/usage_event_archive_test.go
++++ b/internal/repository/test/usage_event_archive_test.go
+@@ -28,6 +28,9 @@ func TestUsageEventArchiveSchemaMatchesHotColumnsWithQuotaIndex(t *testing.T) {
+ 	db := openTestDatabase(t)
+ 
+ 	hotColumns := loadSQLiteTableColumns(t, db, "usage_events")
++	hotColumns = slices.DeleteFunc(hotColumns, func(column sqliteTableColumn) bool {
++		return column.Name == "initial_prompt_preview" || column.Name == "current_prompt_preview"
++	})
+ 	archiveColumns := loadSQLiteTableColumns(t, db, "usage_events_archive")
+ 	if !slices.Equal(hotColumns, archiveColumns) {
+ 		t.Fatalf("usage event archive schema mismatch:\n hot=%+v\n archive=%+v", hotColumns, archiveColumns)
+@@ -78,6 +81,7 @@ func TestArchiveExpiredUsageEventsPreservesOriginalRowAndHotSequence(t *testing.
+ 	events := []entities.UsageEvent{
+ 		{
+ 			EventKey: "archive-me", APIGroupKey: "group-a", Provider: "openai", Endpoint: "/v1/responses",
++			InitialPromptPreview: "private initial prompt", CurrentPromptPreview: "private current prompt",
+ 			AuthType: "oauth", RequestID: "request-a", SessionID: "session-child", ParentSessionID: &parentSessionID, ClientIP: &clientIP, Model: "gpt-5", ResponseModel: "gpt-5.6-luna", ReasoningEffort: "high",
+ 			ServiceTier: "auto", EffectiveServiceTier: "priority", ResponseServiceTier: "default", ExecutorType: "codex", Timestamp: now.AddDate(0, 0, -91),
+ 			Source: "auth-a", AuthIndex: "auth-a", Failed: true, StatusCode: &statusCode, Generate: &generate, Stream: &stream, LatencyMS: 999, TTFTMS: &ttft,
+@@ -111,6 +115,10 @@ func TestArchiveExpiredUsageEventsPreservesOriginalRowAndHotSequence(t *testing.
+ 	if err := db.Table("usage_events_archive").Where("id = ?", original.ID).Take(&archived).Error; err != nil {
+ 		t.Fatalf("load archived usage event: %v", err)
+ 	}
++	if archived.InitialPromptPreview != "" || archived.CurrentPromptPreview != "" {
++		t.Fatal("sensitive prompt previews were archived")
++	}
++	original.InitialPromptPreview, original.CurrentPromptPreview = "", ""
+ 	if !reflect.DeepEqual(archived, original) {
+ 		t.Fatalf("archive row did not preserve original values: original=%+v archive=%+v", original, archived)
+ 	}
+diff --git a/internal/service/prompt_preview.go b/internal/service/prompt_preview.go
+new file mode 100644
+index 00000000..bee647de
+--- /dev/null
++++ b/internal/service/prompt_preview.go
+@@ -0,0 +1,53 @@
++package service
++
++import (
++	"context"
++	"strings"
++	"unicode"
++
++	"cpa-usage-keeper/internal/entities"
++)
++
++const PromptPreviewCharacterLimit = 240
++
++type PromptPreview struct {
++	Initial        string `json:"initial,omitempty"`
++	Current        string `json:"current,omitempty"`
++	CharacterLimit int    `json:"character_limit"`
++}
++
++// Bound ingress independently of CPA, including messages from older/custom peers.
++func normalizePromptPreview(value string) string {
++	var result strings.Builder
++	count := 0
++	space := false
++	for _, character := range value {
++		if unicode.IsSpace(character) {
++			space = result.Len() > 0
++			continue
++		}
++		if unicode.IsControl(character) || unicode.Is(unicode.Cf, character) {
++			continue
++		}
++		if count >= PromptPreviewCharacterLimit {
++			break
++		}
++		if space {
++			result.WriteByte(' ')
++			count++
++			space = false
++			if count >= PromptPreviewCharacterLimit {
++				break
++			}
++		}
++		result.WriteRune(character)
++		count++
++	}
++	return result.String()
++}
++
++func (s *usageService) GetUsageEventPromptPreview(ctx context.Context, eventID int64) (PromptPreview, error) {
++	var event entities.UsageEvent
++	err := s.db.WithContext(usageServiceContext(ctx)).Select("initial_prompt_preview", "current_prompt_preview").First(&event, eventID).Error
++	return PromptPreview{Initial: event.InitialPromptPreview, Current: event.CurrentPromptPreview, CharacterLimit: PromptPreviewCharacterLimit}, err
++}
+diff --git a/internal/service/redis_usage.go b/internal/service/redis_usage.go
+index 8f903bf8..ca75a1f7 100644
+--- a/internal/service/redis_usage.go
++++ b/internal/service/redis_usage.go
+@@ -38,6 +38,7 @@ func DecodeRedisUsageMessageWithHeaders(message string, fetchedAt time.Time) (en
+ 
+ // queuedUsageDetail 对应 CPA Redis 队列中的单条 usage JSON payload。
+ type queuedUsageDetail struct {
++	PromptPreview        PromptPreview   `json:"prompt_preview"`
+ 	Timestamp            time.Time       `json:"timestamp"`
+ 	LatencyMS            int64           `json:"latency_ms"`
+ 	TTFTMS               *int64          `json:"ttft_ms"`
+@@ -169,6 +170,8 @@ func (d queuedUsageDetail) toUsageEvent(fetchedAt time.Time) entities.UsageEvent
+ 		ExecutionID:          d.ExecutionID,
+ 		TraceID:              d.TraceID,
+ 		SessionID:            strings.TrimSpace(d.SessionID),
++		InitialPromptPreview: normalizePromptPreview(d.PromptPreview.Initial),
++		CurrentPromptPreview: normalizePromptPreview(d.PromptPreview.Current),
+ 		ParentSessionID:      trimRedisOptionalString(&d.ParentSessionID),
+ 		NodeKind:             d.NodeKind,
+ 		IsFork:               d.IsFork,
+diff --git a/internal/service/test/prompt_preview_test.go b/internal/service/test/prompt_preview_test.go
+new file mode 100644
+index 00000000..43d7e147
+--- /dev/null
++++ b/internal/service/test/prompt_preview_test.go
+@@ -0,0 +1,54 @@
++package test
++
++import (
++	"context"
++	"encoding/json"
++	"strings"
++	"testing"
++	"time"
++	"unicode/utf8"
++
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/pricing"
++	"cpa-usage-keeper/internal/repository"
++	"cpa-usage-keeper/internal/service"
++)
++
++func TestPromptPreviewPersistsWithEventAndStaysOutOfSharedEntityJSON(t *testing.T) {
++	db := openUsageServiceTestDatabase(t)
++	payload, _ := json.Marshal(map[string]any{
++		"execution_id": "preview-execution", "request_id": "preview-request", "model": "model-a", "timestamp": time.Now(),
++		"prompt_preview": map[string]string{"initial": "First observed prompt", "current": strings.Repeat("🙂", 300)},
++	})
++	event, _, err := service.DecodeRedisUsageMessage(string(payload), time.Now())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if utf8.RuneCountInString(event.CurrentPromptPreview) != service.PromptPreviewCharacterLimit {
++		t.Fatal("ingress preview not bounded")
++	}
++	if _, _, err := repository.InsertUsageEvents(db, []entities.UsageEvent{event}); err != nil {
++		t.Fatal(err)
++	}
++	var saved entities.UsageEvent
++	if err := db.Where("request_id = ?", "preview-request").First(&saved).Error; err != nil {
++		t.Fatal(err)
++	}
++	reader := service.NewUsageService(db, pricing.NewCatalog(pricing.EmptySnapshot())).(interface {
++		GetUsageEventPromptPreview(context.Context, int64) (service.PromptPreview, error)
++	})
++	preview, err := reader.GetUsageEventPromptPreview(context.Background(), saved.ID)
++	if err != nil || preview.Initial != "First observed prompt" || preview.Current != event.CurrentPromptPreview {
++		t.Fatal(preview, err)
++	}
++	encoded, _ := json.Marshal(saved)
++	if strings.Contains(string(encoded), "First observed prompt") || strings.Contains(string(encoded), "🙂") {
++		t.Fatal("entity JSON disclosed prompt previews")
++	}
++	if err := db.Delete(&saved).Error; err != nil {
++		t.Fatal(err)
++	}
++	if _, err := reader.GetUsageEventPromptPreview(context.Background(), saved.ID); err == nil {
++		t.Fatal("deleted event retained readable preview")
++	}
++}
+diff --git a/web/src/components/usage/PromptPreviewPanel.module.scss b/web/src/components/usage/PromptPreviewPanel.module.scss
+new file mode 100644
+index 00000000..8768aed1
+--- /dev/null
++++ b/web/src/components/usage/PromptPreviewPanel.module.scss
+@@ -0,0 +1,26 @@
++.content {
++  padding: 16px 20px;
++  text-align: left;
++  background: var(--bg-secondary, #202020);
++  border-left: 3px solid var(--accent, #40b9a0);
++  white-space: normal;
++  color: var(--text-primary);
++  dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 16px; margin: 0; }
++  dt { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-secondary); margin-bottom: 7px; }
++  dd { margin: 0; line-height: 1.6; font-size: 13px; overflow-wrap: anywhere; unicode-bidi: plaintext; }
++  p { margin: 12px 0 0; font-size: 11px; color: var(--text-secondary); }
++  @media (max-width: 700px) { dl { grid-template-columns: 1fr; } }
++}
++.toggleCell { width: 36px; min-width: 36px; padding: 8px !important; text-align: center; }
++.toggle {
++  display: inline-flex; align-items: center; justify-content: center;
++  width: 28px; height: 28px; padding: 0; border: 1px solid var(--border-color);
++  border-radius: 7px; background: transparent; color: var(--text-secondary); cursor: pointer;
++  &[aria-expanded='true'] { color: var(--text-primary); background: var(--bg-secondary); }
++  svg { transition: transform .15s ease; }
++  &[aria-expanded='true'] svg { transform: rotate(180deg); }
++  &:focus-visible { outline: 2px solid var(--accent, #40b9a0); outline-offset: 2px; }
++}
++.expandedCell { padding: 0 !important; }
++.tableViewport { container-type: inline-size; }
++.expandedCell .content { box-sizing: border-box; width: 100cqw; max-width: 100%; position: sticky; left: 0; }
+diff --git a/web/src/components/usage/PromptPreviewPanel.tsx b/web/src/components/usage/PromptPreviewPanel.tsx
+new file mode 100644
+index 00000000..a0db5b34
+--- /dev/null
++++ b/web/src/components/usage/PromptPreviewPanel.tsx
+@@ -0,0 +1,39 @@
++import { useEffect, useState } from 'react'
++import { apiFetch, apiPath } from '@/lib/api'
++import styles from './PromptPreviewPanel.module.scss'
++
++export interface PromptPreview { initial?: string; current?: string; character_limit?: number }
++
++export function PromptPreviewContent({ preview }: { preview: PromptPreview }) {
++  return <div className={styles.content}>
++    <dl>
++      <div><dt>First observed prompt</dt><dd>{preview.initial || 'Not captured'}</dd></div>
++      <div><dt>Current user prompt</dt><dd>{preview.current || 'Not captured'}</dd></div>
++    </dl>
++    <p>Text previews · up to {preview.character_limit ?? 240} characters each. The start of an older chat may not have been observed.</p>
++  </div>
++}
++
++export function RequestEventPromptPreview({ eventId }: { eventId: string }) {
++  const [preview, setPreview] = useState<PromptPreview>()
++  const [error, setError] = useState('')
++  const [revision, setRevision] = useState(0)
++  useEffect(() => {
++    const controller = new AbortController()
++    async function load() {
++      try {
++        const response = await apiFetch(apiPath(`/usage/events/${encodeURIComponent(eventId)}/prompts`), { signal: controller.signal })
++        if (!response.ok) throw new Error(response.status === 403 ? 'Administrator login required.' : 'Prompt previews could not be loaded.')
++        const next = await response.json() as PromptPreview
++        if (!controller.signal.aborted) { setPreview(next); setError('') }
++      } catch (failure) {
++        if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : 'Prompt previews could not be loaded.')
++      }
++    }
++    void load()
++    return () => controller.abort()
++  }, [eventId, revision])
++  if (error) return <div className={styles.content} role="alert">{error} <button type="button" onClick={() => setRevision(value => value + 1)}>Retry</button></div>
++  if (!preview) return <div className={styles.content} role="status">Loading prompt previews…</div>
++  return <PromptPreviewContent preview={preview} />
++}
+diff --git a/web/src/components/usage/RequestEventsDetailsCard.tsx b/web/src/components/usage/RequestEventsDetailsCard.tsx
+index 89479848..1d2558d1 100644
+--- a/web/src/components/usage/RequestEventsDetailsCard.tsx
++++ b/web/src/components/usage/RequestEventsDetailsCard.tsx
+@@ -60,6 +60,8 @@ import { RequestEventsColumnSettingsModal } from './RequestEventsColumnSettingsM
+ import { RequestEventLogModal } from './RequestEventLogModal';
+ import { RequestEventResultBadge } from './RequestEventResultBadge';
+ import { RequestEventRequestCell, RequestEventRequestType } from './RequestEventRequestCell';
++import { RequestEventPromptPreview } from './PromptPreviewPanel';
++import promptStyles from './PromptPreviewPanel.module.scss';
+ 
+ export { splitRequestLogVirtualChunks } from './RequestEventLogModal';
+ 
+@@ -231,7 +233,8 @@ type RequestEventTableRowProps = {
+   row: RequestEventRow;
+   columns: readonly RequestEventColumnDefinition[];
+   virtualIndex?: number;
+-  measureElement?: (node: HTMLTableRowElement | null) => void;
++  measureElement?: (node: HTMLTableSectionElement | null) => void;
++  showPromptPreviews?: boolean;
+ };
+ 
+ type RequestEventsModelTooltipActions = Pick<ReturnType<typeof usePortalTooltip>,
+@@ -369,17 +372,24 @@ const RequestEventTableRow = React.memo(function RequestEventTableRow({
+   columns,
+   virtualIndex,
+   measureElement,
++  showPromptPreviews = false,
+ }: RequestEventTableRowProps) {
++  const [expanded, setExpanded] = useState(false);
++  const detailsId = `request-prompts-${row.id}`;
+   return (
+-    <tr
+-      ref={measureElement}
+-      data-index={virtualIndex}
+-      aria-rowindex={virtualIndex === undefined ? undefined : virtualIndex + 2}
+-    >
+-      {columns.map((column) => (
+-        <React.Fragment key={column.id}>{column.renderCell(row)}</React.Fragment>
+-      ))}
+-    </tr>
++    <tbody ref={measureElement} data-index={virtualIndex}>
++      <tr data-index={virtualIndex} aria-rowindex={virtualIndex === undefined ? undefined : virtualIndex + 2}>
++        {showPromptPreviews && <td className={promptStyles.toggleCell}>
++          <button type="button" className={promptStyles.toggle} aria-label={`Prompt previews for request ${row.id}`} aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded(value => !value)}>
++            <IconChevronDown width="14" height="14" />
++          </button>
++        </td>}
++        {columns.map((column) => (
++          <React.Fragment key={column.id}>{column.renderCell(row)}</React.Fragment>
++        ))}
++      </tr>
++      {showPromptPreviews && expanded && <tr id={detailsId}><td colSpan={columns.length + 1} className={promptStyles.expandedCell}><RequestEventPromptPreview eventId={row.id} /></td></tr>}
++    </tbody>
+   );
+ });
+ 
+@@ -407,6 +417,7 @@ export interface RequestEventsDetailsCardProps {
+   onExport?: (format: RequestEventExportFormat) => void;
+   onVisibleColumnIdsChange?: (columnIds: RequestEventColumnId[]) => void;
+   onColumnOrderChange?: (columnIds: RequestEventColumnId[]) => void;
++  showPromptPreviews?: boolean;
+   requestLogAccessEnabled?: boolean;
+   onRequestLogOpen?: (event: UsageEvent) => void;
+   requestLogLoadingEventId?: string | null;
+@@ -635,6 +646,7 @@ export function RequestEventsDetailsCard({
+   onExport,
+   onVisibleColumnIdsChange,
+   onColumnOrderChange,
++  showPromptPreviews = false,
+   requestLogAccessEnabled = false,
+   onRequestLogOpen,
+   requestLogLoadingEventId = null,
+@@ -1362,26 +1374,26 @@ export function RequestEventsDetailsCard({
+           />
+         ) : (
+           <>
+-            <div ref={requestEventsTableWrapperRef} className={styles.requestEventsTableWrapper} data-virtualized={virtualizeRows} data-loaded-row-count={rows.length} onScroll={handleTableScroll}>
++            <div ref={requestEventsTableWrapperRef} className={`${styles.requestEventsTableWrapper} ${promptStyles.tableViewport}`} data-virtualized={virtualizeRows} data-loaded-row-count={rows.length} onScroll={handleTableScroll}>
+               <table className={styles.table} aria-rowcount={totalCount + 1}>
+                 <thead>
+                   <tr>
++                    {showPromptPreviews && <th className={promptStyles.toggleCell} aria-label="Prompt previews" />}
+                     {visibleColumns.map((column) => (
+                       <React.Fragment key={column.id}>{column.header}</React.Fragment>
+                     ))}
+                   </tr>
+                 </thead>
+-                <tbody>
+                   {virtualizeRows ? (
+                     <>
+                       {virtualPaddingTop > 0 && (
+-                        <tr
++                        <tbody><tr
+                           className={styles.requestEventsVirtualSpacerRow}
+                           style={{ height: `${virtualPaddingTop}px` }}
+                           aria-hidden="true"
+                         >
+-                          <td colSpan={visibleColumns.length} />
+-                        </tr>
++                          <td colSpan={visibleColumns.length + Number(showPromptPreviews)} />
++                        </tr></tbody>
+                       )}
+                       {virtualRows.map((virtualRow) => {
+                         const row = rows[virtualRow.index];
+@@ -1389,6 +1401,7 @@ export function RequestEventsDetailsCard({
+                           <RequestEventTableRow
+                             key={virtualRow.key}
+                             row={row}
++                            showPromptPreviews={showPromptPreviews}
+                             columns={visibleColumns}
+                             virtualIndex={virtualRow.index}
+                             measureElement={eventRowVirtualizer.measureElement}
+@@ -1396,19 +1409,18 @@ export function RequestEventsDetailsCard({
+                         );
+                       })}
+                       {virtualPaddingBottom > 0 && (
+-                        <tr
++                        <tbody><tr
+                           className={styles.requestEventsVirtualSpacerRow}
+                           style={{ height: `${virtualPaddingBottom}px` }}
+                           aria-hidden="true"
+                         >
+-                          <td colSpan={visibleColumns.length} />
+-                        </tr>
++                          <td colSpan={visibleColumns.length + Number(showPromptPreviews)} />
++                        </tr></tbody>
+                       )}
+                     </>
+                   ) : rows.map((row) => (
+-                    <RequestEventTableRow key={row.id} row={row} columns={visibleColumns} />
++                    <RequestEventTableRow key={row.id} row={row} columns={visibleColumns} showPromptPreviews={showPromptPreviews} />
+                   ))}
+-                </tbody>
+               </table>
+             </div>
+ 
+diff --git a/web/src/components/usage/test/PromptPreviews.test.tsx b/web/src/components/usage/test/PromptPreviews.test.tsx
+new file mode 100644
+index 00000000..218d4deb
+--- /dev/null
++++ b/web/src/components/usage/test/PromptPreviews.test.tsx
+@@ -0,0 +1,52 @@
++// @vitest-environment happy-dom
++import { act } from 'react';
++import { createRoot } from 'react-dom/client';
++import { afterEach, expect, it, vi } from 'vitest';
++import { apiFetch } from '@/lib/api';
++import { RequestEventsTestCard } from './requestEventsFixtures';
++import type { UsageEvent } from '@/lib/types';
++
++vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), apiPath: (path: string) => path }));
++globalThis.IS_REACT_ACT_ENVIRONMENT = true;
++const event = { id: '7', timestamp: '2026-11-08T10:00:00Z', model: 'example', tokens: {} } as UsageEvent;
++const container = document.createElement('div');
++document.body.append(container);
++let root = createRoot(container);
++afterEach(async () => {
++  await act(async () => root.unmount());
++  root = createRoot(container);
++  vi.clearAllMocks();
++});
++
++it('loads previews only on expansion and renders escaped text below all columns', async () => {
++  vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => ({ initial: '<script>private initial</script>', current: 'private current', character_limit: 240 }) } as Response);
++  await act(async () => root.render(<RequestEventsTestCard events={[event]} showPromptPreviews initialVisibleColumnIds={['timestamp', 'model']} />));
++  expect(apiFetch).not.toHaveBeenCalled();
++  const toggle = container.querySelector<HTMLButtonElement>('button[aria-controls="request-prompts-7"]')!;
++  expect(toggle.getAttribute('aria-expanded')).toBe('false');
++  await act(async () => toggle.click());
++  expect(apiFetch).toHaveBeenCalledWith('/usage/events/7/prompts', expect.objectContaining({ signal: expect.any(AbortSignal) }));
++  const details = container.querySelector('#request-prompts-7')!;
++  expect(details.querySelector('td')?.colSpan).toBe(3);
++  expect(details.textContent).toContain('private initial');
++  expect(details.textContent).toContain('private current');
++  expect(details.querySelector('script')).toBeNull();
++  expect(toggle.getAttribute('aria-expanded')).toBe('true');
++  await act(async () => toggle.click());
++  expect(container.querySelector('#request-prompts-7')).toBeNull();
++});
++
++it('omits all preview controls and requests for shared viewer tables', async () => {
++  await act(async () => root.render(<RequestEventsTestCard events={[event]} />));
++  expect(container.querySelector('button[aria-controls="request-prompts-7"]')).toBeNull();
++  expect(container.textContent).not.toContain('First observed prompt');
++  expect(apiFetch).not.toHaveBeenCalled();
++});
++
++it('shows a denied request without rendering prompt content', async () => {
++  vi.mocked(apiFetch).mockResolvedValue({ ok: false, status: 403 } as Response);
++  await act(async () => root.render(<RequestEventsTestCard events={[event]} showPromptPreviews />));
++  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-controls="request-prompts-7"]')!.click());
++  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Administrator login required');
++  expect(container.textContent).not.toContain('private initial');
++});
+diff --git a/web/src/components/usage/test/RequestEventsDetailsCardVirtualization.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCardVirtualization.test.tsx
+index 18e0877f..b318375d 100644
+--- a/web/src/components/usage/test/RequestEventsDetailsCardVirtualization.test.tsx
++++ b/web/src/components/usage/test/RequestEventsDetailsCardVirtualization.test.tsx
+@@ -50,6 +50,9 @@ describe('RequestEventsDetailsCard event table virtualization', () => {
+     });
+     vi.stubGlobal('cancelAnimationFrame', () => undefined);
+     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function getBoundingClientRect() {
++      if (this instanceof HTMLTableSectionElement) {
++        return new DOMRect(0, 0, 1200, this.querySelectorAll('tr').length * 44);
++      }
+       if (this instanceof HTMLTableRowElement) {
+         const spacerHeight = Number.parseFloat(this.style.height);
+         return new DOMRect(0, 0, 1200, Number.isFinite(spacerHeight) ? spacerHeight : 44);
+diff --git a/web/src/pages/LiveRoutingPage.module.scss b/web/src/pages/LiveRoutingPage.module.scss
+index eebe29e2..a4e0a00a 100644
+--- a/web/src/pages/LiveRoutingPage.module.scss
++++ b/web/src/pages/LiveRoutingPage.module.scss
+@@ -60,9 +60,9 @@
+ .flow {display:flex;flex-direction:column;align-items:center;gap:6px;padding:20px 6px;font-size:12px;text-align:center;overflow-wrap:anywhere}
+ .flow b {color:var(--text-secondary);font-weight:400}
+ .flow strong {padding:9px 12px;border:1px solid var(--border-color);border-radius:8px;font-weight:600;max-width:100%}
+-.detail dl {display:grid;grid-template-columns:1fr 1.2fr;gap:12px 8px;border-top:1px solid var(--border-color);padding-top:16px;font-size:11px}
+-.detail dt {color:var(--text-secondary)}
+-.detail dd {margin:0;text-align:right;overflow-wrap:anywhere}
++.detail > dl {display:grid;grid-template-columns:1fr 1.2fr;gap:12px 8px;border-top:1px solid var(--border-color);padding-top:16px;font-size:11px}
++.detail > dl dt {color:var(--text-secondary)}
++.detail > dl dd {margin:0;text-align:right;overflow-wrap:anywhere}
+ .detail h3 {font-size:12px;margin:22px 0 8px}
+ .hint {font-size:11px;line-height:1.6;color:var(--text-secondary)}
+ .candidates {list-style:none;padding:0;margin:12px 0 0}
+@@ -96,3 +96,7 @@
+ @media(max-width:1050px) {.workspace{grid-template-columns:minmax(0,1.5fr) minmax(270px,1fr)}.tableWrap td,.tableWrap th{padding:12px 10px}.metrics{gap:9px}.metric{padding:15px}}
+ @media(max-width:800px) {.workspace{grid-template-columns:1fr}.heading{align-items:flex-start}.heading h1{font-size:25px}.heading p{max-width:250px}.liveControls{max-width:200px}.metric strong{font-size:28px}.lower{grid-template-columns:1fr}.tableWrap{max-height:500px}.inspector .empty{padding:26px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+ @media(max-width:480px) {.page{gap:14px}.heading{flex-direction:column;gap:14px}.liveControls{max-width:none;justify-content:flex-start}.liveControls small{width:auto;text-align:left}.heading p{max-width:none}.panelHead{padding:16px}.filters{padding:12px}.filters input{flex-basis:100%}.filters select{flex:1}.tableWrap table{min-width:540px}.allocations{grid-template-columns:1fr}.bindingToggle{padding:16px}.metric{padding:14px}.metric>span{font-size:11px}.metric small{font-size:10px}}
++
++.promptSnippet { max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.6; margin-top: 6px; color: var(--text-secondary); unicode-bidi: plaintext; }
++.activityDetail { display: flex; flex-direction: column; gap: 6px; margin: 16px 0; padding: 12px; border: 1px solid var(--border-color); border-radius: 10px; }
++.activityDetail span { font-size: 12px; color: var(--text-secondary); }
+diff --git a/web/src/pages/LiveRoutingPage.tsx b/web/src/pages/LiveRoutingPage.tsx
+index 1e2eb36e..4b7c6677 100644
+--- a/web/src/pages/LiveRoutingPage.tsx
++++ b/web/src/pages/LiveRoutingPage.tsx
+@@ -2,14 +2,19 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+ import { apiFetch, apiPath } from '@/lib/api'
+ import { getLiveStatus, startLiveRefresh, subscribeLiveStatus } from '@/lib/live'
+ import styles from './LiveRoutingPage.module.scss'
++import { PromptPreviewContent, type PromptPreview } from '@/components/usage/PromptPreviewPanel'
+ 
+ interface Candidate { account: string; pool: string; priority: number; websocket: boolean; status: string }
+-export interface RoutingRow { id: string; kind: string; session?: string; client?: string; model?: string; account?: string; pool?: string; transport: string; state: string; reason?: string; priority: number; active: number; tools: number; draining: boolean; uncertain: boolean; attempts: number; started_at: string; updated_at: string; candidates: Candidate[]; work?: Array<{ id: string; kind: string; state: string; started_at: string }> }
++interface RequestActivity { phase: string; since: string; last_output_at?: string; output_events: number; tool_names?: string[] }
++export interface RoutingRow { prompt_preview?: PromptPreview; activity?: RequestActivity; id: string; kind: string; session?: string; client?: string; model?: string; account?: string; pool?: string; transport: string; state: string; reason?: string; priority: number; active: number; tools: number; draining: boolean; uncertain: boolean; attempts: number; started_at: string; updated_at: string; candidates: Candidate[]; work?: Array<{ id: string; kind: string; state: string; started_at: string }> }
+ interface RoutingEvent { id: number; at: string; row: string; account?: string; pool?: string; reason: string }
+ interface Binding { session: string; account: string; pool: string; source: string; expires_at: string }
+ interface Rebalance { id: number; pool: string; reason: string; reconnect_websockets: boolean; sessions_rebalanced: number; waiting: number; waiting_for_responses: number; waiting_for_tools: number; waiting_for_protocol: number; requested_at: string }
+ export interface RoutingSnapshot { activity: { at: string; since: string; rows: RoutingRow[]; events: RoutingEvent[]; dropped: number }; bindings: Binding[]; rebalances: Rebalance[]; accounts: Record<string, string>; clients: Record<string, string> }
+ const EMPTY_ROWS: RoutingRow[] = []
++const activityLabels: Record<string, string> = { waiting_upstream: 'Waiting for upstream', continuing_tools: 'Continuing after tool result', waiting_output: 'Waiting for output', generating: 'Generating response', reasoning: 'Reasoning event received', requesting_tool: 'Requesting a tool', waiting_tools: 'Waiting for tool result', idle: 'Idle', reconnecting: 'Reconnecting', response_finished: 'Response delivered', response_failed: 'Response failed' }
++const activityLabel = (row: RoutingRow) => activityLabels[row.activity?.phase ?? ''] || routingLabel(row.state)
++
+ const labels: Record<string, string> = {
+  websocket_preference: 'WebSocket preference, then priority', outside_pin: 'Outside connection pin', http_deprioritized: 'WebSocket preferred', lower_priority: 'Lower priority', scheduler: 'Scheduler selection', pinned: 'Connection pinned', sticky: 'Sticky session', prefix_affinity: 'Matching conversation prefix',
+  compaction_affinity: 'Compaction continuity', parent_affinity: 'Parent session affinity', new_binding: 'New session binding',
+@@ -56,7 +61,7 @@ export function LiveRoutingPage() {
+  const account = (id?: string) => id ? data?.accounts?.[id] || 'Account ' + short(id) : 'Awaiting selection'
+  const client = (id?: string) => id ? data?.clients?.[id] || 'Client ' + short(id) : 'Unidentified client'
+  const pools = [...new Set([...rows.map(r => r.pool ?? ''), ...(data?.bindings ?? []).map(b => b.pool)].filter(Boolean))].sort()
+- const filtered = rows.filter(r => (!pool || r.pool === pool) && (!state || (state === 'draining' ? r.draining : r.state === state)) && [r.id, r.session, r.model, r.pool, account(r.account), client(r.client)].join(' ').toLowerCase().includes(query.toLowerCase()))
++ const filtered = rows.filter(r => (!pool || r.pool === pool) && (!state || (state === 'draining' ? r.draining : r.state === state)) && [r.id, r.session, r.model, r.pool, account(r.account), client(r.client), r.prompt_preview?.initial, r.prompt_preview?.current].join(' ').toLowerCase().includes(query.toLowerCase()))
+  const focus = rows.find(r => r.id === selected)
+  const active = rows.reduce((sum, row) => sum + row.active, 0)
+  const sockets = rows.filter(row => row.kind === 'websocket').length
+@@ -84,7 +89,7 @@ export function LiveRoutingPage() {
+    <div className={styles.panel}>
+     <div className={styles.panelHead}><div><h2>Active traffic <span>{filtered.length}</span></h2><p>Select a row to inspect its route.</p></div>{selected && <button type="button" onClick={() => setSelected('')}>Clear selection</button>}</div>
+     <div className={styles.filters}><input aria-label="Search live traffic" placeholder="Search session, model, account or client…" value={query} onChange={event => setQuery(event.target.value)} /><select aria-label="Provider pool" value={pool} onChange={event => setPool(event.target.value)}><option value="">All pools</option>{pools.map(value => <option key={value}>{value}</option>)}</select><select aria-label="Traffic state" value={state} onChange={event => setState(event.target.value)}><option value="">All states</option>{['running', 'waiting_tools', 'idle', 'draining', 'selecting', 'protocol_wait'].map(value => <option key={value} value={value}>{value === 'draining' ? 'Draining' : routingLabel(value)}</option>)}</select></div>
+-    <div className={styles.tableWrap}><table><thead><tr><th>Session / client</th><th>Route</th><th>State</th><th>Age</th></tr></thead><tbody>{filtered.slice(0, 200).map(row => <tr key={row.id} data-selected={selected === row.id}><td><button className={styles.rowButton} type="button" onClick={() => setSelected(row.id)} aria-pressed={selected === row.id}>{row.session ? 'Session ' + short(row.session) : 'Request ' + short(row.id)}</button><small>{client(row.client)} · {row.kind === 'websocket' ? 'WebSocket' : 'HTTP'}</small></td><td><strong>{account(row.account)}</strong><small>{row.model || 'Waiting for request'}{row.pool && ' · ' + row.pool}</small></td><td><span className={styles.badge} data-state={row.state}>{routingLabel(row.state)}</span>{row.draining && <span className={styles.drain}>Draining safely</span>}<small>{row.active > 0 && row.active + ' active / queued'}{row.tools > 0 && (row.active > 0 ? ' · ' : '') + row.tools + ' tool outputs'}</small></td><td className={styles.age}>{age(row.started_at, now)}</td></tr>)}</tbody></table></div>
++    <div className={styles.tableWrap}><table><thead><tr><th>Session / client</th><th>Route</th><th>Activity</th><th>Age</th></tr></thead><tbody>{filtered.slice(0, 200).map(row => <tr key={row.id} data-selected={selected === row.id}><td><button className={styles.rowButton} type="button" onClick={() => setSelected(row.id)} aria-pressed={selected === row.id}>{row.session ? 'Session ' + short(row.session) : 'Request ' + short(row.id)}</button><small>{client(row.client)} · {row.kind === 'websocket' ? 'WebSocket' : 'HTTP'}</small></td><td><strong>{account(row.account)}</strong><small>{row.model || 'Waiting for request'}{row.pool && ' · ' + row.pool}</small></td><td><span className={styles.badge} data-state={row.state}>{activityLabel(row)}</span>{row.draining && <span className={styles.drain}>Draining safely</span>}{row.prompt_preview?.current && <div className={styles.promptSnippet} title={row.prompt_preview.current}>{row.prompt_preview.current}</div>}<small>{row.activity?.since && age(row.activity.since, now) + ' in stage · '}{row.active > 0 && row.active + ' active / queued'}{row.tools > 0 && (row.active > 0 ? ' · ' : '') + row.tools + ' tool outputs'}</small></td><td className={styles.age}>{age(row.started_at, now)}</td></tr>)}</tbody></table></div>
+     {!filtered.length && <div className={styles.empty}><span>↔</span><h3>{data ? rows.length ? 'No matching traffic' : 'No active traffic' : 'Loading live activity…'}</h3><p>{rows.length ? 'Adjust the filters to see more connections.' : 'New requests and open WebSockets will appear here automatically.'}</p>{(query || pool || state) && <button type="button" onClick={() => { setQuery(''); setPool(''); setState('') }}>Clear filters</button>}</div>}
+     {filtered.length > 200 && <p className={styles.footnote}>Showing the first 200 of {filtered.length} matching connections. Narrow the filters.</p>}
+    </div>
+@@ -94,6 +99,13 @@ export function LiveRoutingPage() {
+      <div className={styles.reason}>{routingLabel(focus.reason) || 'Selection pending'}</div>
+      <div className={styles.flow}><span>{client(focus.client)}</span><b>↓</b><span>{focus.model || 'Waiting for model'}</span><b>↓</b><strong>{account(focus.account)}</strong></div>
+      <dl><dt>Connection</dt><dd>{focus.kind === 'websocket' ? 'WebSocket' : 'HTTP'} · {short(focus.id)}</dd><dt>Priority</dt><dd>P{focus.priority}</dd><dt>Account selections</dt><dd>{focus.attempts}</dd><dt>Current work</dt><dd>{focus.active} active / queued · {focus.tools} tools</dd></dl>
++     <div className={styles.activityDetail}>
++      <strong>{activityLabel(focus)}</strong>
++      {focus.activity && <span>{age(focus.activity.since, now)} in this stage{focus.activity.last_output_at && ' · last output ' + age(focus.activity.last_output_at, now) + ' ago'}</span>}
++      {!!focus.activity?.output_events && <span>{focus.activity.output_events} output events received</span>}
++      {!!focus.activity?.tool_names?.length && <span>Tools requested: {focus.activity.tool_names.join(', ')}</span>}
++     </div>
++     <PromptPreviewContent preview={focus.prompt_preview ?? {}} />
+      {focus.draining && <div className={styles.warning}>Rebalance pending · {focus.uncertain ? 'waiting for protocol state to resolve or disconnect' : focus.active > 0 ? 'waiting for response work to finish' : focus.tools > 0 ? 'waiting for tool output' : 'reconnecting at the safe boundary'}.</div>}
+      {(focus.work?.length ?? 0) > 0 && <><h3>Requests on this connection</h3><ul className={styles.candidates}>{focus.work?.map(work => <li key={work.id}><div><strong>Request {short(work.id)}</strong><small>{work.kind} · {age(work.started_at, now)}</small></div><span>{routingLabel(work.state)}</span></li>)}</ul></>}
+      <h3>Accounts at selection</h3><p className={styles.hint}>Eligibility snapshot when this route was selected. Priority, affinity and WebSocket capability can affect the result.</p>
+@@ -106,6 +118,6 @@ export function LiveRoutingPage() {
+    <section className={styles.panel} aria-label="Routing timeline"><div className={styles.panelHead}><div><h2>Routing timeline</h2><p>{selected ? 'Selected connection' : 'Recent decisions'} · last 10 minutes</p></div></div><ol className={styles.timeline}>{recent.length ? recent.map(event => <li key={event.id}><time>{time(event.at)}</time><div><strong>{routingLabel(event.reason)}</strong><small>{account(event.account)} · {event.pool || 'unassigned'} · <button type="button" onClick={() => setSelected(event.row)}>{short(event.row)}</button></small></div></li>) : <li className={styles.quiet}>No recent routing events.</li>}</ol></section>
+   </div>
+   <section className={styles.panel}><button type="button" className={styles.bindingToggle} aria-expanded={showBindings} onClick={() => setShowBindings(v => !v)}><strong>Cached session affinity</strong><span>{data?.bindings.length ?? 0} bindings · {showBindings ? 'Hide' : 'Show'}</span></button>{showBindings && <><p className={styles.footnote}>A cached binding can outlive its connection. It does not mean a request is running.</p><div className={styles.tableWrap}><table><thead><tr><th>Session</th><th>Account / pool</th><th>Affinity</th><th>Expires</th></tr></thead><tbody>{(data?.bindings ?? []).filter(b => !pool || b.pool === pool).slice(0, 200).map(binding => <tr key={binding.session}><td>{short(binding.session)}</td><td>{account(binding.account)}<small>{binding.pool}</small></td><td>{binding.source === 'prefix' ? 'Conversation prefix' : 'Explicit session'}</td><td>{time(binding.expires_at)}</td></tr>)}</tbody></table></div></>}</section>
+-  <p className={styles.footnote}>Local runtime activity since {data ? time(data.activity.since) : '…'} · resets on CPA restart · session and client IDs are opaque references.</p>
++  <p className={styles.footnote}>Prompts and request activity are visible only to administrators. Local runtime activity since {data ? time(data.activity.since) : '…'} · resets on CPA restart · session and client IDs are opaque references.</p>
+  </section>
+ }
+diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
+index 69b78ca1..f4b0169d 100644
+--- a/web/src/pages/UsagePage.tsx
++++ b/web/src/pages/UsagePage.tsx
+@@ -2298,6 +2298,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+               <>
+                 {eventsError && <div className={styles.errorBox}>{eventsError === 'COSTS_BUSY' ? t('usage_stats.costs_busy') : eventsError}</div>}
+                 <RequestEventsDetailsCard
++                  showPromptPreviews
+                   events={visibleEvents}
+                   loading={eventsLoading || (eventsError === 'COSTS_BUSY' && visibleEvents.length === 0)}
+                   totalCount={eventsScopeMatches ? eventsTotalCount : 0}
+diff --git a/web/src/pages/test/LiveRoutingPage.test.tsx b/web/src/pages/test/LiveRoutingPage.test.tsx
+index 2834d543..c757e759 100644
+--- a/web/src/pages/test/LiveRoutingPage.test.tsx
++++ b/web/src/pages/test/LiveRoutingPage.test.tsx
+@@ -11,7 +11,7 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), apiPath: (value: string) => val
+ it('distinguishes live work from cached affinity and preserves the last snapshot on failure', async () => {
+  const date = new Date().toISOString()
+  const payload: RoutingSnapshot = { activity: { at: date, since: date, dropped: 0, events: [], rows: [{ id: 'socket-one', kind: 'websocket', session: 'session-one', client: 'client-one', model: 'example-model', account: 'account-one', pool: 'codex', transport: 'websocket', state: 'waiting_tools', reason: 'pinned', priority: 2, active: 0, tools: 1, draining: true, uncertain: false, attempts: 1, started_at: date, updated_at: date, candidates: [{ account: 'account-one', pool: 'codex', priority: 2, websocket: true, status: 'selected' }] }] }, bindings: [{ session: 'cached-only', account: 'account-one', pool: 'codex', source: 'prefix', expires_at: date }], rebalances: [], accounts: { 'account-one': 'Example account' }, clients: { 'client-one': 'Example client' } }
+- vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => payload } as Response)
++  vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => structuredClone(payload) } as Response)
+  const container = document.createElement('div'); document.body.append(container); const root = createRoot(container)
+  try {
+   await act(async () => root.render(<LiveRoutingPage />))
+@@ -23,6 +23,14 @@ it('distinguishes live work from cached affinity and preserves the last snapshot
+   expect(container.textContent).toContain('Connection pinned')
+   expect(container.textContent).toContain('waiting for tool output')
+   expect(container.textContent).toContain('Accounts at selection')
++  payload.activity.rows[0].activity = { phase: 'waiting_tools', since: date, last_output_at: date, output_events: 4, tool_names: ['local_probe'] }
++  payload.activity.rows[0].prompt_preview = { initial: 'First synthetic prompt', current: 'Current synthetic prompt' }
++  await act(async () => live.refresh!(new AbortController().signal))
++  expect(container.textContent).toContain('First synthetic prompt')
++  expect(container.textContent).toContain('Current synthetic prompt')
++  expect(container.textContent).toContain('Waiting for tool result')
++  expect(container.textContent).toContain('Tools requested: local_probe')
++  expect(container.textContent).toContain('4 output events received')
+   vi.mocked(apiFetch).mockRejectedValue(new Error('Connection lost'))
+   await act(async () => live.refresh!(new AbortController().signal))
+   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Last successful snapshot')

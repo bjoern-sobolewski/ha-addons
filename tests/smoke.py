@@ -75,8 +75,13 @@ def main():
                 docker('start', name)
 
             def endpoint(name, port):
-                mapped = docker('port', name, f'{port}/tcp').splitlines()[0]
-                return 'http://' + mapped
+                mappings = []
+                def published():
+                    mappings[:] = docker('port', name, f'{port}/tcp').splitlines()
+                    return bool(mappings)
+                # Docker Desktop can publish replacement ports after restart returns.
+                eventually(published)
+                return 'http://' + mappings[0]
 
             api = endpoint(names['cpa'], 8080)
             private = endpoint(names['cpa'], 8317)

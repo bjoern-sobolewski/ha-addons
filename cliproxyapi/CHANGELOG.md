@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.25
+
+- Add bounded first/current user prompt previews and observed response stages, output activity and tool names to private live routing.
+- Attach per-request previews to usage delivery, preserving user prompts through tool-only continuations without capturing generated answers or tool payloads.
+
 ## 0.1.24
 
 - Remove the always-visible quota refresh icon and age. Show the last update in seconds only in a tooltip on the remaining percentage, with keyboard and touch access.

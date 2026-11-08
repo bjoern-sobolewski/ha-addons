@@ -739,22 +739,28 @@ index b9c0366c..3c89b81f 100644
  
  func requestCallerScope(ginCtx *gin.Context) string {
 diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
-index 86a30602..0b43d41c 100644
+index 86a30602..ae538d7d 100644
 --- a/sdk/api/handlers/handlers_stream.go
 +++ b/sdk/api/handlers/handlers_stream.go
-@@ -5,6 +5,7 @@ import (
- 	"encoding/json"
- 	"errors"
- 	"fmt"
-+	"github.com/router-for-me/CLIProxyAPI/v8/internal/routinglive"
+@@ -8,7 +8,9 @@ import (
  	"net/http"
  
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
-@@ -438,6 +439,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/routinglive"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/sessionrebalance"
+ 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+@@ -438,6 +440,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
  	}
  
  	transformStreamPayload := func(payload []byte, chunkIndex *int, historyChunks [][]byte) ([]byte, bool, *interfaces.ErrorMessage) {
-+		routinglive.Default.ObserveOutput(routinglive.ID(ctx), payload)
++		// WebSocket activity is observed once at the downstream writer, after
++		// translation and interception; HTTP streams have no socket observer.
++		if sessionrebalance.FromContext(ctx) == nil {
++			routinglive.Default.ObserveOutput(routinglive.ID(ctx), payload)
++		}
  		applyStreamHeaderInit()
  		payload = cloneBytes(payload)
  		if streamInterceptorsActive {

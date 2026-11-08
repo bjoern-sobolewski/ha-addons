@@ -80,7 +80,7 @@ def main():
    tool_row=next(r for r in rows if r['state']=='waiting_tools')
    assert tool_row['activity']['phase']=='waiting_tools',tool_row
    assert tool_row['activity']['tool_names']==['local_probe'],tool_row
-   assert next(r for r in rows if r['state']=='running' and r['kind']=='websocket')['activity']['output_events']>=1
+   assert next(r for r in rows if r['state']=='running' and r['kind']=='websocket')['activity']['output_events']==1
    for secret in [key,management,'private-fixture-session','private-tool-id','private-generated-answer','private-tool-output']:
     assert secret not in json.dumps(data),'private request data in telemetry'
    print('PASS: live HTTP/WS requests, idle sockets, pending tools, routing candidates, private SSE and opaque references',flush=True)

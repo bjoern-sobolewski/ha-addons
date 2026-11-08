@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.26
+
+- Count each WebSocket output event once at the downstream writer, preserving accurate activity counters through the shared HTTP execution path.
+
 ## 0.1.25
 
 - Add bounded first/current user prompt previews and observed response stages, output activity and tool names to private live routing.

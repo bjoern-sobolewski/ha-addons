@@ -1,0 +1,209 @@
+diff --git a/web/src/pages/LiveRoutingPage.module.scss b/web/src/pages/LiveRoutingPage.module.scss
+index a4e0a00a..a3089fd2 100644
+--- a/web/src/pages/LiveRoutingPage.module.scss
++++ b/web/src/pages/LiveRoutingPage.module.scss
+@@ -26,8 +26,7 @@
+ .allocations em {font-style:normal;margin:0 5px}
+ .bar {margin-top:12px;height:3px;background:var(--bg-secondary);border-radius:3px;overflow:hidden}
+ .bar i {display:block;height:100%;background:#6888dc;border-radius:3px}
+-.workspace {display:grid;grid-template-columns:minmax(0,1.9fr) minmax(290px,1fr);align-items:start;gap:16px}
+-.panel,.inspector {border:1px solid var(--border-color);background:var(--bg-primary);border-radius:14px;min-width:0;overflow:hidden}
++.panel {border:1px solid var(--border-color);background:var(--bg-primary);border-radius:14px;min-width:0;overflow:hidden}
+ .panelHead {display:flex;justify-content:space-between;gap:12px;align-items:center;padding:18px 20px;border-bottom:1px solid var(--border-color)}
+ .panelHead h2 {font-size:15px;margin:0 0 5px;font-weight:650}
+ .panelHead h2>span {font-size:11px;color:var(--text-secondary);font-weight:500;margin-left:5px}
+@@ -55,11 +54,8 @@
+ .empty h3 {font-size:14px;color:var(--text-primary);font-weight:600;margin:0 0 8px}
+ .empty p {font-size:12px;line-height:1.7;margin:0 auto;max-width:310px}
+ .empty button {margin-top:16px}
+-.detail {padding:18px}
++.detail {min-width:0}
+ .reason {font-size:13px;font-weight:600;color:color-mix(in srgb,var(--text-primary) 32%,#6389e4);background:#6a87d412;padding:11px 12px;border-radius:8px}
+-.flow {display:flex;flex-direction:column;align-items:center;gap:6px;padding:20px 6px;font-size:12px;text-align:center;overflow-wrap:anywhere}
+-.flow b {color:var(--text-secondary);font-weight:400}
+-.flow strong {padding:9px 12px;border:1px solid var(--border-color);border-radius:8px;font-weight:600;max-width:100%}
+ .detail > dl {display:grid;grid-template-columns:1fr 1.2fr;gap:12px 8px;border-top:1px solid var(--border-color);padding-top:16px;font-size:11px}
+ .detail > dl dt {color:var(--text-secondary)}
+ .detail > dl dd {margin:0;text-align:right;overflow-wrap:anywhere}
+@@ -93,10 +89,39 @@
+ .bindingToggle span {color:var(--text-secondary);font-size:11px}
+ .footnote {font-size:10px;line-height:1.7;color:var(--text-secondary);margin:0 2px}
+ .panel>.footnote {padding:0 20px 14px}
+-@media(max-width:1050px) {.workspace{grid-template-columns:minmax(0,1.5fr) minmax(270px,1fr)}.tableWrap td,.tableWrap th{padding:12px 10px}.metrics{gap:9px}.metric{padding:15px}}
+-@media(max-width:800px) {.workspace{grid-template-columns:1fr}.heading{align-items:flex-start}.heading h1{font-size:25px}.heading p{max-width:250px}.liveControls{max-width:200px}.metric strong{font-size:28px}.lower{grid-template-columns:1fr}.tableWrap{max-height:500px}.inspector .empty{padding:26px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
++@media(max-width:1050px) {.tableWrap td,.tableWrap th{padding:12px 10px}.metrics{gap:9px}.metric{padding:15px}}
++@media(max-width:800px) {.heading{align-items:flex-start}.heading h1{font-size:25px}.heading p{max-width:250px}.liveControls{max-width:200px}.metric strong{font-size:28px}.lower{grid-template-columns:1fr}.tableWrap{max-height:500px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+ @media(max-width:480px) {.page{gap:14px}.heading{flex-direction:column;gap:14px}.liveControls{max-width:none;justify-content:flex-start}.liveControls small{width:auto;text-align:left}.heading p{max-width:none}.panelHead{padding:16px}.filters{padding:12px}.filters input{flex-basis:100%}.filters select{flex:1}.tableWrap table{min-width:540px}.allocations{grid-template-columns:1fr}.bindingToggle{padding:16px}.metric{padding:14px}.metric>span{font-size:11px}.metric small{font-size:10px}}
+ 
+-.promptSnippet { max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.6; margin-top: 6px; color: var(--text-secondary); unicode-bidi: plaintext; }
+-.activityDetail { display: flex; flex-direction: column; gap: 6px; margin: 16px 0; padding: 12px; border: 1px solid var(--border-color); border-radius: 10px; }
++.promptSnippet { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; white-space: normal; overflow-wrap: anywhere; font-size: 12px; line-height: 1.65; margin-top: 9px; color: var(--text-primary); unicode-bidi: plaintext; }
++.activityDetail { display: flex; flex-direction: column; gap: 6px; margin: 16px 0; padding: 14px; border: 1px solid var(--border-color); border-radius: 10px; }
+ .activityDetail span { font-size: 12px; color: var(--text-secondary); }
++.activeViewport { container-type: inline-size; max-height: 780px; }
++.activeTable { table-layout: fixed; }
++.activeTable td { max-width: none; }
++.activeTable th { z-index: 1; }
++.sessionColumn { width: 21%; }
++.ageColumn { width: 8%; }
++.routeColumn { width: 24%; }
++.activityColumn { width: 47%; }
++.activityHeading { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
++.activityHeading .drain { margin-top: 0; }
++.activityFooter { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 8px; }
++.activityFooter small { margin-top: 0; }
++.detailsToggle { display: inline-flex; align-items: center; gap: 7px; border: 0; padding: 2px 0; background: none; color: var(--text-secondary); font-size: 11px !important; white-space: nowrap; }
++.detailsToggle:hover { color: var(--text-primary); }
++.detailsToggle span { font-size: 15px; line-height: 1; }
++.activeTable .expandedRow > td { padding: 0; max-width: none; }
++.expandedDetails { box-sizing: border-box; width: 100cqw; max-width: 100%; position: sticky; left: 0; background: var(--bg-secondary); white-space: normal; border-left: 3px solid #36ad83; }
++.detailsHead { padding: 15px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border-color); }
++.detailsHead h3 { font-size: 13px; margin: 0 0 4px; font-weight: 650; }
++.detailsHead span { font-size: 10px; color: var(--text-secondary); }
++.detailsHead button { border: 1px solid var(--border-color); border-radius: 8px; padding: 7px 10px; background: var(--bg-primary); color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
++.detailColumns { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 24px; padding: 20px; }
++.detailColumns h3 { font-size: 12px; margin: 0 0 12px; font-weight: 650; }
++.detailColumns .activityDetail + h3,.detailColumns .warning + h3 { margin-top: 20px; }
++.detail h3:not(:first-child) { margin-top: 22px; }
++.promptDetails { min-width: 0; }
++.promptDetails > div:first-of-type { border-left: 0; padding: 0; background: transparent; }
++.finished { margin: 0; padding: 15px 20px; font-size: 12px; color: var(--text-secondary); border-top: 1px solid var(--border-color); }
++@media(max-width:800px) { .activeTable { min-width: 700px; } .detailColumns { grid-template-columns: 1fr; gap: 22px; padding: 16px; } .detail { border-top: 1px solid var(--border-color); padding-top: 18px; } .detailsHead { padding: 14px 16px; } }
+diff --git a/web/src/pages/LiveRoutingPage.tsx b/web/src/pages/LiveRoutingPage.tsx
+index 4b7c6677..a94ce37a 100644
+--- a/web/src/pages/LiveRoutingPage.tsx
++++ b/web/src/pages/LiveRoutingPage.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
++import { Fragment, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+ import { apiFetch, apiPath } from '@/lib/api'
+ import { getLiveStatus, startLiveRefresh, subscribeLiveStatus } from '@/lib/live'
+ import styles from './LiveRoutingPage.module.scss'
+@@ -85,34 +85,61 @@ export function LiveRoutingPage() {
+    {[['Running requests', active, 'Queued and generating'], ['Open WebSockets', sockets, rows.filter(r => r.kind === 'websocket' && r.state === 'idle').length + ' idle'], ['Known sessions', sessions, (data?.bindings.length ?? 0) + ' cached bindings'], ['Draining connections', waiting, rows.reduce((sum, r) => sum + r.tools, 0) + ' pending tool outputs']].map(([label, value, note]) => <div key={label} className={styles.metric}><span>{label}</span><strong>{value}</strong><small>{note}</small></div>)}
+   </div>
+   {allocations.length > 0 && <div className={styles.allocations} aria-label="Account distribution">{allocations.map(item => <button type="button" key={item.pool + item.account} onClick={() => { setQuery(account(item.account)); setPool(item.pool) }}><span>{item.pool}</span><strong>{account(item.account)}</strong><div><b>{item.active}</b> running <em>·</em> {item.count} connections{item.draining > 0 && ' · ' + item.draining + ' draining'}</div><div className={styles.bar}><i style={{ width: Math.max(3, item.active / Math.max(1, active) * 100) + '%' }} /></div></button>)}</div>}
+-  <div className={styles.workspace}>
+-   <div className={styles.panel}>
+-    <div className={styles.panelHead}><div><h2>Active traffic <span>{filtered.length}</span></h2><p>Select a row to inspect its route.</p></div>{selected && <button type="button" onClick={() => setSelected('')}>Clear selection</button>}</div>
+-    <div className={styles.filters}><input aria-label="Search live traffic" placeholder="Search session, model, account or client…" value={query} onChange={event => setQuery(event.target.value)} /><select aria-label="Provider pool" value={pool} onChange={event => setPool(event.target.value)}><option value="">All pools</option>{pools.map(value => <option key={value}>{value}</option>)}</select><select aria-label="Traffic state" value={state} onChange={event => setState(event.target.value)}><option value="">All states</option>{['running', 'waiting_tools', 'idle', 'draining', 'selecting', 'protocol_wait'].map(value => <option key={value} value={value}>{value === 'draining' ? 'Draining' : routingLabel(value)}</option>)}</select></div>
+-    <div className={styles.tableWrap}><table><thead><tr><th>Session / client</th><th>Route</th><th>Activity</th><th>Age</th></tr></thead><tbody>{filtered.slice(0, 200).map(row => <tr key={row.id} data-selected={selected === row.id}><td><button className={styles.rowButton} type="button" onClick={() => setSelected(row.id)} aria-pressed={selected === row.id}>{row.session ? 'Session ' + short(row.session) : 'Request ' + short(row.id)}</button><small>{client(row.client)} · {row.kind === 'websocket' ? 'WebSocket' : 'HTTP'}</small></td><td><strong>{account(row.account)}</strong><small>{row.model || 'Waiting for request'}{row.pool && ' · ' + row.pool}</small></td><td><span className={styles.badge} data-state={row.state}>{activityLabel(row)}</span>{row.draining && <span className={styles.drain}>Draining safely</span>}{row.prompt_preview?.current && <div className={styles.promptSnippet} title={row.prompt_preview.current}>{row.prompt_preview.current}</div>}<small>{row.activity?.since && age(row.activity.since, now) + ' in stage · '}{row.active > 0 && row.active + ' active / queued'}{row.tools > 0 && (row.active > 0 ? ' · ' : '') + row.tools + ' tool outputs'}</small></td><td className={styles.age}>{age(row.started_at, now)}</td></tr>)}</tbody></table></div>
++   <section className={styles.panel} aria-label="Active traffic">
++    <div className={styles.panelHead}><div><h2>Active traffic <span>{filtered.length}</span></h2><p>Expand a request for prompt previews, work and routing details.</p></div>{selected && <button type="button" onClick={() => setSelected('')}>Clear selection</button>}</div>
++    <div className={styles.filters}><input aria-label="Search live traffic" placeholder="Search prompt, session, model, account or client…" value={query} onChange={event => setQuery(event.target.value)} /><select aria-label="Provider pool" value={pool} onChange={event => setPool(event.target.value)}><option value="">All pools</option>{pools.map(value => <option key={value}>{value}</option>)}</select><select aria-label="Traffic state" value={state} onChange={event => setState(event.target.value)}><option value="">All states</option>{['running', 'waiting_tools', 'idle', 'draining', 'selecting', 'protocol_wait'].map(value => <option key={value} value={value}>{value === 'draining' ? 'Draining' : routingLabel(value)}</option>)}</select></div>
++    <div className={`${styles.tableWrap} ${styles.activeViewport}`}>
++     <table className={styles.activeTable}>
++      <colgroup><col className={styles.sessionColumn} /><col className={styles.ageColumn} /><col className={styles.routeColumn} /><col className={styles.activityColumn} /></colgroup>
++      <thead><tr><th>Session / client</th><th>Age</th><th>Route</th><th>Activity</th></tr></thead>
++      <tbody>{filtered.slice(0, 200).map(row => {
++       const isExpanded = selected === row.id
++       const detailsId = `routing-details-${row.id}`
++       const sessionLabel = row.session ? 'Session ' + short(row.session) : 'Request ' + short(row.id)
++       const toggleDetails = () => setSelected(current => current === row.id ? '' : row.id)
++       return <Fragment key={row.id}>
++        <tr data-selected={isExpanded}>
++         <td><button className={styles.rowButton} type="button" onClick={toggleDetails} aria-expanded={isExpanded} aria-controls={detailsId}>{sessionLabel}</button><small>{client(row.client)} · {row.kind === 'websocket' ? 'WebSocket' : 'HTTP'}</small></td>
++         <td className={styles.age} title={'Connected ' + new Date(row.started_at).toLocaleString()}>{age(row.started_at, now)}</td>
++         <td><strong>{account(row.account)}</strong><small>{row.model || 'Waiting for request'}{row.pool && ' · ' + row.pool}</small></td>
++         <td>
++          <div className={styles.activityHeading}><span className={styles.badge} data-state={row.state}>{activityLabel(row)}</span>{row.draining && <span className={styles.drain}>Draining safely</span>}</div>
++          {row.prompt_preview?.current && <div className={styles.promptSnippet}>{row.prompt_preview.current}</div>}
++          <div className={styles.activityFooter}><small>{[row.activity?.since && age(row.activity.since, now) + ' in stage', row.active > 0 && row.active + ' active / queued', row.tools > 0 && row.tools + ' tool outputs'].filter(Boolean).join(' · ')}</small><button className={styles.detailsToggle} type="button" aria-label={`Details for ${sessionLabel}`} aria-expanded={isExpanded} aria-controls={detailsId} onClick={toggleDetails}>{isExpanded ? 'Hide details' : 'Show details'}<span aria-hidden="true">{isExpanded ? '⌃' : '⌄'}</span></button></div>
++         </td>
++        </tr>
++        {isExpanded && <tr className={styles.expandedRow}><td colSpan={4}>
++         <section id={detailsId} className={styles.expandedDetails} aria-label={`Details for ${sessionLabel}`}>
++          <header className={styles.detailsHead}><div><h3>{sessionLabel} details</h3><span>Observed at {time(row.updated_at)}</span></div><button type="button" onClick={toggleDetails}>Close details</button></header>
++          <div className={styles.detailColumns}>
++           <div className={styles.promptDetails}>
++            <h3>Prompt previews</h3><PromptPreviewContent preview={row.prompt_preview ?? {}} />
++            <div className={styles.activityDetail}>
++             <strong>{activityLabel(row)}</strong>
++             {row.activity && <span>{age(row.activity.since, now)} in this stage{row.activity.last_output_at && ' · last output ' + age(row.activity.last_output_at, now) + ' ago'}</span>}
++             {!!row.activity?.output_events && <span>{row.activity.output_events} output events received</span>}
++             {!!row.activity?.tool_names?.length && <span>Tools requested: {row.activity.tool_names.join(', ')}</span>}
++            </div>
++            {row.draining && <div className={styles.warning}>Rebalance pending · {row.uncertain ? 'waiting for protocol state to resolve or disconnect' : row.active > 0 ? 'waiting for response work to finish' : row.tools > 0 ? 'waiting for tool output' : 'reconnecting at the safe boundary'}.</div>}
++            {(row.work?.length ?? 0) > 0 && <><h3>Requests on this connection</h3><ul className={styles.candidates}>{row.work?.map(work => <li key={work.id}><div><strong>Request {short(work.id)}</strong><small>{work.kind} · {age(work.started_at, now)}</small></div><span>{routingLabel(work.state)}</span></li>)}</ul></>}
++           </div>
++           <div className={styles.detail}>
++            <h3>Routing decision</h3><div className={styles.reason}>{routingLabel(row.reason) || 'Selection pending'}</div>
++            <dl><dt>Connection</dt><dd>{row.kind === 'websocket' ? 'WebSocket' : 'HTTP'} · {short(row.id)}</dd><dt>Priority</dt><dd>P{row.priority}</dd><dt>Account selections</dt><dd>{row.attempts}</dd><dt>Current work</dt><dd>{row.active} active / queued · {row.tools} tools</dd></dl>
++            <h3>Accounts at selection</h3><p className={styles.hint}>Eligibility snapshot when this route was selected. Priority, affinity and WebSocket capability can affect the result.</p>
++            <ul className={styles.candidates}>{row.candidates.map(candidate => <li key={candidate.account}><div><strong>{account(candidate.account)}</strong><small>P{candidate.priority} · {candidate.websocket ? 'WebSocket capable' : 'HTTP only'}</small></div><span data-selected={candidate.status === 'selected'}>{routingLabel(candidate.status)}</span></li>)}</ul>
++           </div>
++          </div>
++         </section>
++        </td></tr>}
++       </Fragment>
++      })}</tbody>
++     </table>
++    </div>
++    {selected && !focus && <p className={styles.finished} role="status">Connection finished. Its recent routing events remain below.</p>}
+     {!filtered.length && <div className={styles.empty}><span>↔</span><h3>{data ? rows.length ? 'No matching traffic' : 'No active traffic' : 'Loading live activity…'}</h3><p>{rows.length ? 'Adjust the filters to see more connections.' : 'New requests and open WebSockets will appear here automatically.'}</p>{(query || pool || state) && <button type="button" onClick={() => { setQuery(''); setPool(''); setState('') }}>Clear filters</button>}</div>}
+     {filtered.length > 200 && <p className={styles.footnote}>Showing the first 200 of {filtered.length} matching connections. Narrow the filters.</p>}
+-   </div>
+-   <aside className={styles.inspector} aria-label="Routing inspector">
+-    <div className={styles.panelHead}><div><h2>Routing inspector</h2><p>{focus ? 'Observed at ' + time(focus.updated_at) : 'Understand why an account was chosen.'}</p></div></div>
+-    {focus ? <div className={styles.detail}>
+-     <div className={styles.reason}>{routingLabel(focus.reason) || 'Selection pending'}</div>
+-     <div className={styles.flow}><span>{client(focus.client)}</span><b>↓</b><span>{focus.model || 'Waiting for model'}</span><b>↓</b><strong>{account(focus.account)}</strong></div>
+-     <dl><dt>Connection</dt><dd>{focus.kind === 'websocket' ? 'WebSocket' : 'HTTP'} · {short(focus.id)}</dd><dt>Priority</dt><dd>P{focus.priority}</dd><dt>Account selections</dt><dd>{focus.attempts}</dd><dt>Current work</dt><dd>{focus.active} active / queued · {focus.tools} tools</dd></dl>
+-     <div className={styles.activityDetail}>
+-      <strong>{activityLabel(focus)}</strong>
+-      {focus.activity && <span>{age(focus.activity.since, now)} in this stage{focus.activity.last_output_at && ' · last output ' + age(focus.activity.last_output_at, now) + ' ago'}</span>}
+-      {!!focus.activity?.output_events && <span>{focus.activity.output_events} output events received</span>}
+-      {!!focus.activity?.tool_names?.length && <span>Tools requested: {focus.activity.tool_names.join(', ')}</span>}
+-     </div>
+-     <PromptPreviewContent preview={focus.prompt_preview ?? {}} />
+-     {focus.draining && <div className={styles.warning}>Rebalance pending · {focus.uncertain ? 'waiting for protocol state to resolve or disconnect' : focus.active > 0 ? 'waiting for response work to finish' : focus.tools > 0 ? 'waiting for tool output' : 'reconnecting at the safe boundary'}.</div>}
+-     {(focus.work?.length ?? 0) > 0 && <><h3>Requests on this connection</h3><ul className={styles.candidates}>{focus.work?.map(work => <li key={work.id}><div><strong>Request {short(work.id)}</strong><small>{work.kind} · {age(work.started_at, now)}</small></div><span>{routingLabel(work.state)}</span></li>)}</ul></>}
+-     <h3>Accounts at selection</h3><p className={styles.hint}>Eligibility snapshot when this route was selected. Priority, affinity and WebSocket capability can affect the result.</p>
+-     <ul className={styles.candidates}>{focus.candidates.map(candidate => <li key={candidate.account}><div><strong>{account(candidate.account)}</strong><small>P{candidate.priority} · {candidate.websocket ? 'WebSocket capable' : 'HTTP only'}</small></div><span data-selected={candidate.status === 'selected'}>{routingLabel(candidate.status)}</span></li>)}</ul>
+-    </div> : <div className={styles.empty}><span>⌖</span><h3>{selected ? 'Connection finished' : 'Follow a request'}</h3><p>{selected ? 'Its recent routing events remain below.' : 'Select a session to see its account, routing reason and eligibility snapshot.'}</p></div>}
+-   </aside>
+-  </div>
++   </section>
+   <div className={styles.lower}>
+    <section className={styles.panel} aria-label="Rebalance activity"><div className={styles.panelHead}><div><h2>Rebalance activity</h2><p>Latest changes and safe drain progress.</p></div></div><div className={styles.jobs}>{balances.length ? balances.map(job => <div key={job.id} className={styles.job}><div><span className={styles.badge} data-state={job.waiting ? 'waiting_tools' : 'idle'}>{job.waiting ? 'Draining' : 'Applied'}</span><time>{time(job.requested_at)}</time></div><strong>{routingLabel(job.reason)} · {job.pool}</strong><p>Affinity cleared{job.reconnect_websockets ? ' · ' + job.sessions_rebalanced + ' rebalanced · ' + job.waiting + ' waiting' : ' · existing sockets retained'}</p>{job.waiting > 0 && <small>{job.waiting_for_responses} response · {job.waiting_for_tools} tool · {job.waiting_for_protocol} protocol waits</small>}</div>) : <div className={styles.quiet}>No recent rebalances. Active drains remain visible until they finish.</div>}</div></section>
+    <section className={styles.panel} aria-label="Routing timeline"><div className={styles.panelHead}><div><h2>Routing timeline</h2><p>{selected ? 'Selected connection' : 'Recent decisions'} · last 10 minutes</p></div></div><ol className={styles.timeline}>{recent.length ? recent.map(event => <li key={event.id}><time>{time(event.at)}</time><div><strong>{routingLabel(event.reason)}</strong><small>{account(event.account)} · {event.pool || 'unassigned'} · <button type="button" onClick={() => setSelected(event.row)}>{short(event.row)}</button></small></div></li>) : <li className={styles.quiet}>No recent routing events.</li>}</ol></section>
+diff --git a/web/src/pages/test/LiveRoutingPage.test.tsx b/web/src/pages/test/LiveRoutingPage.test.tsx
+index c757e759..defd391d 100644
+--- a/web/src/pages/test/LiveRoutingPage.test.tsx
++++ b/web/src/pages/test/LiveRoutingPage.test.tsx
+@@ -18,8 +18,14 @@ it('distinguishes live work from cached affinity and preserves the last snapshot
+   expect(container.textContent).toContain('Waiting for tool output')
+   expect(container.textContent).toContain('Example client')
+   expect(container.textContent).not.toContain('Session cached-o')
++   expect([...container.querySelectorAll('thead th')].slice(0,4).map(cell => cell.textContent)).toEqual(['Session / client', 'Age', 'Route', 'Activity'])
++   const detailsToggle = container.querySelector<HTMLButtonElement>('button[aria-label="Details for Session session-"]')!
++   expect(detailsToggle.getAttribute('aria-expanded')).toBe('false')
++   expect(container.querySelector('#routing-details-socket-one')).toBeNull()
+   const button = [...container.querySelectorAll('button')].find(b => b.textContent === 'Session session-')!
+   await act(async () => button.click())
++   expect(detailsToggle.getAttribute('aria-expanded')).toBe('true')
++   expect(container.querySelector('#routing-details-socket-one')?.closest('td')?.colSpan).toBe(4)
+   expect(container.textContent).toContain('Connection pinned')
+   expect(container.textContent).toContain('waiting for tool output')
+   expect(container.textContent).toContain('Accounts at selection')
+@@ -31,10 +37,20 @@ it('distinguishes live work from cached affinity and preserves the last snapshot
+   expect(container.textContent).toContain('Waiting for tool result')
+   expect(container.textContent).toContain('Tools requested: local_probe')
+   expect(container.textContent).toContain('4 output events received')
++   await act(async () => detailsToggle.click())
++   expect(container.querySelector('#routing-details-socket-one')).toBeNull()
++   await act(async () => detailsToggle.click())
++   expect(container.querySelector('#routing-details-socket-one')?.textContent).toContain('First synthetic prompt')
++   await act(async () => live.refresh!(new AbortController().signal))
++   expect(detailsToggle.getAttribute('aria-expanded')).toBe('true')
+   vi.mocked(apiFetch).mockRejectedValue(new Error('Connection lost'))
+   await act(async () => live.refresh!(new AbortController().signal))
+   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Last successful snapshot')
+   expect(container.textContent).toContain('Example account')
++   vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => ({ ...structuredClone(payload), activity: { ...payload.activity, rows: [] } }) } as Response)
++   await act(async () => live.refresh!(new AbortController().signal))
++   expect(container.querySelector('#routing-details-socket-one')).toBeNull()
++   expect(container.querySelector('[role="status"]')?.textContent).toContain('Connection finished')
+   await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Pause')!.click())
+   expect(live.stop).toHaveBeenCalled()
+   expect(container.textContent).toContain('Paused')

@@ -320,7 +320,7 @@ The installed Codex app-server was tested end to end with two synthetic accounts
 
 ## Live routing
 
-Open **Live routing** in the LAN administrator dashboard to see current HTTP requests, open WebSockets, queued/generating response work, pending tool outputs and safe drains together. Account distribution cards and pool/state/search filters help locate a connection. Select its session/request reference to inspect the observed routing reason, priority, candidate eligibility at selection and current work. Connection transport identifies the client-facing HTTP/WebSocket connection; it does not prove upstream transport.
+Open **Live routing** in the LAN administrator dashboard to see current HTTP requests, open WebSockets, queued/generating response work, pending tool outputs and safe drains together. Active traffic spans the full page: Session/client, Age, Route and a wider Activity column with multiline prompt text. Account distribution cards and pool/state/search filters help locate a connection. Select its session/request reference or **Show details** to expand prompt previews, observed activity, current work, routing reason, priority and candidate eligibility below all columns. **Hide details** or **Close details** collapses the row. Connection transport identifies the client-facing HTTP/WebSocket connection; it does not prove upstream transport.
 
 The rebalance panel shows retired sessions and response/tool/protocol waits. Cached session affinity is listed separately because a binding can outlive its connection. Pause freezes the snapshot; Resume or Refresh reloads it. Errors retain the last successful snapshot and display a warning.
 

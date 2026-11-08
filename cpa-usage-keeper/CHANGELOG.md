@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.8
+
+- Make Active traffic span the full Live routing page, move Age beside Session/client, and give Activity more room for multiline prompt text.
+- Expand a traffic row to inspect prompt previews, observed activity, current work and routing candidates below all columns, with responsive details and accessible controls.
+
 ## 0.2.7
 
 - Show observed request activity and first/current user prompt previews in the admin Live routing inspector.

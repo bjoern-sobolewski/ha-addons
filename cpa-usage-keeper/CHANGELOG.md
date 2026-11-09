@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.9
+
+- Preserve the browser's reset request ID through the API handler so Codex and Claude quota resets reach the shared CPA reset service.
+- Show app, CPA, upstream-provider or unconfirmed error sources for account actions, quota refreshes and reset lookups, with safe explanations and HTTP status.
+- Treat refused and uncertain Codex reset results as warnings; refresh only after confirmed success and retain safe same-attempt retries.
+
 ## 0.2.8
 
 - Make Active traffic span the full Live routing page, move Age beside Session/client, and give Activity more room for multiline prompt text.

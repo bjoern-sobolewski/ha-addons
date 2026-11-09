@@ -1,0 +1,1170 @@
+diff --git a/internal/api/errors.go b/internal/api/errors.go
+index 4726ae2..fb6cc07 100644
+--- a/internal/api/errors.go
++++ b/internal/api/errors.go
+@@ -1,6 +1,7 @@
+ package api
+ 
+ import (
++	"cpa-usage-keeper/internal/operationerror"
+ 	"net/http"
+ 
+ 	"github.com/gin-gonic/gin"
+@@ -11,5 +12,7 @@ func writeInternalError(c *gin.Context, message string, err error) {
+ 	if err != nil {
+ 		logrus.WithError(err).Error(message)
+ 	}
+-	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
++	details := operationerror.Describe(err)
++	if err == nil { details = operationerror.Details{Source: "keeper", Reason: "This app operation is not configured."} }
++	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error", "error_source": details.Source, "error_status": details.Status, "error_reason": message + ". " + details.Reason})
+ }
+diff --git a/internal/api/quota.go b/internal/api/quota.go
+index 83e8de3..35e0e2a 100644
+--- a/internal/api/quota.go
++++ b/internal/api/quota.go
+@@ -7,6 +7,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
++	"cpa-usage-keeper/internal/operationerror"
+ 	"cpa-usage-keeper/internal/quota"
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/sirupsen/logrus"
+@@ -285,26 +286,23 @@ func registerQuotaRoutes(router gin.IRoutes, provider QuotaProvider) {
+ 			return
+ 		}
+ 
+-		var request struct {
+-			AuthIndex      string `json:"auth_index"`
+-			GrantID        string `json:"grant_id"`
+-			OrganizationID string `json:"organization_id"`
+-		}
++		var request quota.ResetRequest
+ 		if err := c.ShouldBindJSON(&request); err != nil {
+-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required"})
++			c.JSON(http.StatusBadRequest, gin.H{"error": "The reset request must be valid JSON with auth_index and UUID request_id", "error_source": "keeper"})
+ 			return
+ 		}
+ 		authIndex := strings.TrimSpace(request.AuthIndex)
+ 		if authIndex == "" {
+-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required"})
++			c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required", "error_source": "keeper"})
+ 			return
+ 		}
+ 
+-		response, err := provider.Reset(c.Request.Context(), quota.ResetRequest{AuthIndex: authIndex, GrantID: request.GrantID, OrganizationID: request.OrganizationID})
++		request.AuthIndex = authIndex
++		response, err := provider.Reset(c.Request.Context(), request)
+ 		if err != nil {
+ 			switch {
+ 			case errors.Is(err, quota.ErrValidation):
+-				c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required"})
++				c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index and UUID request_id are required", "error_source": "keeper"})
+ 			case errors.Is(err, quota.ErrNotFound):
+ 				writeQuotaResetError(c, http.StatusNotFound, err)
+ 			case errors.Is(err, quota.ErrUnsupportedType):
+@@ -352,6 +350,8 @@ func quotaProviderErrorStatus(err error) int {
+ 
+ func writeQuotaResetCreditsError(c *gin.Context, statusCode int, err error) {
+ 	payload := gin.H{"error": quotaResetCreditsErrorFailed}
++	details := operationerror.Describe(err)
++	payload["error_source"], payload["error_status"], payload["error_reason"] = details.Source, details.Status, details.Reason
+ 	if err != nil {
+ 		payload["detail"] = err.Error()
+ 	}
+@@ -360,6 +360,8 @@ func writeQuotaResetCreditsError(c *gin.Context, statusCode int, err error) {
+ 
+ func writeQuotaResetError(c *gin.Context, statusCode int, err error) {
+ 	payload := gin.H{"error": quotaResetErrorFailed}
++	details := operationerror.Describe(err)
++	payload["error_source"], payload["error_status"], payload["error_reason"] = details.Source, details.Status, details.Reason
+ 	if err != nil {
+ 		// detail 仅用于浏览器 Network/F12 排查，不作为前端展示文案。
+ 		payload["detail"] = err.Error()
+diff --git a/internal/api/test/account_error_source_test.go b/internal/api/test/account_error_source_test.go
+new file mode 100644
+index 0000000..8e36389
+--- /dev/null
++++ b/internal/api/test/account_error_source_test.go
+@@ -0,0 +1,54 @@
++package test
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/cpa"
++	"cpa-usage-keeper/internal/cpa/dto/quotareset"
++	"cpa-usage-keeper/internal/quota"
++)
++
++func TestAccountErrorsPreserveCPAAndProviderOriginWithoutRawSecrets(t *testing.T) {
++	for _, test := range []struct { name, upstream, source string; status int }{
++		{"CPA authentication", `{"error":"synthetic-secret-token"}`, "cpa", 401},
++		{"provider authentication", `{"error_source":"provider","error_status":403,"error_reason":"synthetic-secret-token"}`, "provider", 403},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				status := http.StatusBadGateway
++				if test.source == "cpa" { status = test.status }
++				w.WriteHeader(status)
++				_, _ = w.Write([]byte(test.upstream))
++			}))
++			defer server.Close()
++			client := cpa.NewClient(server.URL, "synthetic-management-key", time.Second, false)
++			_, err := client.RedeemQuotaReset(context.Background(), quotareset.Request{})
++			provider := &quotaProviderStub{resetErr: err}
++			router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
++			response := serveCredentialMutation(router, http.MethodPost, "/api/v1/quota/reset", `{"auth_index":"synthetic","request_id":"11111111-1111-4111-8111-111111111111"}`)
++			var result struct { Source string `json:"error_source"`; Reason string `json:"error_reason"`; Status int `json:"error_status"` }
++			if json.Unmarshal(response.Body.Bytes(), &result) != nil || result.Source != test.source || result.Reason == "" {
++				t.Fatalf("failure source lost: %d %s", response.Code, response.Body.String())
++			}
++			if test.source == "provider" && result.Status != test.status { t.Fatalf("upstream status lost: %+v", result) }
++			if strings.Contains(response.Body.String(), "synthetic-secret-token") { t.Fatal("raw provider or CPA error exposed") }
++		})
++	}
++}
++
++func TestQuotaResetValidationClearlyNamesTheMissingRequestID(t *testing.T) {
++	service := quota.NewService(nil, nil)
++	t.Cleanup(service.StopRefreshTasks)
++	router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: service})
++	response := serveCredentialMutation(router, http.MethodPost, "/api/v1/quota/reset", `{"auth_index":"synthetic"}`)
++	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "request_id") || !strings.Contains(response.Body.String(), `"error_source":"keeper"`) {
++		t.Fatalf("misleading validation error: %d %s", response.Code, response.Body.String())
++	}
++}
+diff --git a/internal/api/test/quota_reset_request_test.go b/internal/api/test/quota_reset_request_test.go
+new file mode 100644
+index 0000000..a1fa8c7
+--- /dev/null
++++ b/internal/api/test/quota_reset_request_test.go
+@@ -0,0 +1,77 @@
++package test
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	. "cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/cpa"
++	"cpa-usage-keeper/internal/cpa/dto/quotareset"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++)
++
++func TestQuotaResetHTTPPreservesRequestAcrossServiceAndCPARetry(t *testing.T) {
++	for _, provider := range []string{"codex", "claude"} {
++		t.Run(provider, func(t *testing.T) {
++			const requestID = "11111111-1111-4111-8111-111111111111"
++			var requests []quotareset.Request
++			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.Method != http.MethodPost || r.URL.Path != "/v8/management/quota/reset" {
++					t.Errorf("unexpected upstream request: %s %s", r.Method, r.URL.Path)
++					w.WriteHeader(http.StatusNotFound)
++					return
++				}
++				var request quotareset.Request
++				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
++					t.Error(err)
++					w.WriteHeader(http.StatusBadRequest)
++					return
++				}
++				requests = append(requests, request)
++				code := "reset"
++				if len(requests) > 1 {
++					code = "already_redeemed"
++				}
++				_ = json.NewEncoder(w).Encode(quotareset.Result{Code: code, WindowsReset: 2})
++			}))
++			defer upstream.Close()
++
++			db := openAPITestDatabase(t)
++			identity := entities.UsageIdentity{Identity: "synthetic", Provider: provider, Type: provider, AuthType: entities.UsageIdentityAuthTypeCredential}
++			if err := db.Create(&identity).Error; err != nil {
++				t.Fatal(err)
++			}
++			service := quota.NewService(db, cpa.NewClient(upstream.URL, "synthetic-management-key", time.Second, false))
++			t.Cleanup(service.StopRefreshTasks)
++			router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: service})
++			request := quota.ResetRequest{AuthIndex: " synthetic ", RequestID: requestID}
++			if provider == "claude" {
++				request.GrantID = "chosen"
++				request.OrganizationID = requestID
++			}
++			body, err := json.Marshal(request)
++			if err != nil {
++				t.Fatal(err)
++			}
++			for _, expectedCode := range []string{"reset", "already_redeemed"} {
++				response := serveCredentialMutation(router, http.MethodPost, "/api/v1/quota/reset", string(body))
++				var result quota.ResetResponse
++				if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil || result.Code != expectedCode || result.AuthIndex != "synthetic" || result.WindowsReset != 2 {
++					t.Fatalf("reset response: %d %s", response.Code, response.Body.String())
++				}
++			}
++			if len(requests) != 2 {
++				t.Fatalf("expected two attempts with the same request ID, got %+v", requests)
++			}
++			for _, forwarded := range requests {
++				if forwarded.AuthIndex != "synthetic" || forwarded.Provider != provider || forwarded.RequestID != requestID || forwarded.GrantID != request.GrantID || forwarded.OrganizationID != request.OrganizationID || forwarded.CreditID != "" {
++					t.Fatalf("reset identity or selection lost: %+v", forwarded)
++				}
++			}
++		})
++	}
++}
+diff --git a/internal/api/test/quota_test.go b/internal/api/test/quota_test.go
+index 1d0f46b..10ecf1f 100644
+--- a/internal/api/test/quota_test.go
++++ b/internal/api/test/quota_test.go
+@@ -390,7 +390,7 @@ func TestQuotaResetMapsServiceErrors(t *testing.T) {
+ 		{name: "unsupported", err: quota.ErrUnsupportedType, status: http.StatusBadRequest, messages: []string{`"error":"quota_reset_failed"`, "quota identity type is unsupported"}},
+ 		{name: "rate limited", err: quota.ProviderHTTPError{StatusCode: 429, Message: "rate limited"}, status: http.StatusTooManyRequests, messages: []string{`"error":"quota_reset_failed"`, "HTTP 429: rate limited"}},
+ 		{name: "provider unauthorized", err: quota.ProviderHTTPError{StatusCode: 401, Message: "invalid codex token"}, status: http.StatusBadGateway, messages: []string{`"error":"quota_reset_failed"`, "HTTP 401: invalid codex token"}},
+-		{name: "validation", err: quota.ErrValidation, status: http.StatusBadRequest, messages: []string{"auth_index is required"}},
++		{name: "validation", err: quota.ErrValidation, status: http.StatusBadRequest, messages: []string{"auth_index and UUID request_id are required", `"error_source":"keeper"`}},
+ 		{name: "in progress", err: quota.ErrResetInProgress, status: http.StatusConflict, messages: []string{`"error":"quota_reset_failed"`, "quota reset already in progress"}},
+ 	} {
+ 		t.Run(tc.name, func(t *testing.T) {
+diff --git a/internal/cpa/client.go b/internal/cpa/client.go
+index 2854be5..1259c64 100644
+--- a/internal/cpa/client.go
++++ b/internal/cpa/client.go
+@@ -4,6 +4,7 @@ import (
+ 	"bytes"
+ 	"context"
+ 	"cpa-usage-keeper/internal/cpa/dto/quotareset"
++	"cpa-usage-keeper/internal/operationerror"
+ 	"crypto/tls"
+ 	"encoding/json"
+ 	"errors"
+@@ -61,6 +62,7 @@ type credentialsDeleteRequest struct {
+ 
+ // httpStatusError 只随本次失败响应携带 CPA 标识，不缓存到客户端或输出到错误文本。
+ type httpStatusError struct {
++	details    *operationerror.Details
+ 	kind       string
+ 	statusCode int
+ 	cpaVersion string
+@@ -70,6 +72,21 @@ func (e *httpStatusError) Error() string {
+ 	return fmt.Sprintf("%s request returned status %d", e.kind, e.statusCode)
+ }
+ 
++func (e *httpStatusError) FailureDetails() operationerror.Details {
++	if e.details != nil {
++		return *e.details
++	}
++	return operationerror.HTTP("cpa", e.statusCode)
++}
++
++type connectionError struct{ cause error }
++
++func (e *connectionError) Error() string { return e.cause.Error() }
++func (e *connectionError) Unwrap() error { return e.cause }
++func (e *connectionError) FailureDetails() operationerror.Details {
++	return operationerror.Details{Source: "cpa", Reason: "Keeper could not reach CPA or read its response. The action result is unconfirmed; refresh before retrying."}
++}
++
+ func (c *Client) doJSONRequest(ctx context.Context, path string, target any, kind string, configure func(*http.Request)) (int, []byte, error) {
+ 	statusCode, body, _, err := c.doJSONRequestWithBody(ctx, http.MethodGet, path, nil, target, kind, configure)
+ 	return statusCode, body, err
+@@ -93,18 +110,30 @@ func (c *Client) doJSONRequestWithBody(ctx context.Context, method string, path
+ 
+ 	resp, err := c.httpClient.Do(req)
+ 	if err != nil {
+-		return 0, nil, nil, fmt.Errorf("request %s: %w", kind, err)
++		return 0, nil, nil, &connectionError{cause: fmt.Errorf("request %s: %w", kind, err)}
+ 	}
+ 	defer resp.Body.Close()
+ 
+ 	responseBody, err := io.ReadAll(resp.Body)
+ 	if err != nil {
+-		return resp.StatusCode, nil, resp.Header, fmt.Errorf("read %s response: %w", kind, err)
++		return resp.StatusCode, nil, resp.Header, &connectionError{cause: fmt.Errorf("read %s response: %w", kind, err)}
+ 	}
+ 
+ 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
++		var upstream struct {
++			Source string `json:"error_source"`
++			Status int    `json:"error_status"`
++		}
++		var details *operationerror.Details
++		if json.Unmarshal(responseBody, &upstream) == nil && upstream.Source == "provider" {
++			value := operationerror.HTTP("provider", upstream.Status)
++			if upstream.Status == 0 {
++				value = operationerror.Details{Source: "provider", Reason: "CPA could not obtain a confirmed response from the upstream provider."}
++			}
++			details = &value
++		}
+ 		return resp.StatusCode, responseBody, resp.Header, &httpStatusError{
+-			kind: kind, statusCode: resp.StatusCode, cpaVersion: resp.Header.Get("X-CPA-VERSION"),
++			kind: kind, statusCode: resp.StatusCode, cpaVersion: resp.Header.Get("X-CPA-VERSION"), details: details,
+ 		}
+ 	}
+ 	if target == nil || isBlankJSONResponseBody(responseBody) {
+diff --git a/internal/cpa/dto/quotareset/reset.go b/internal/cpa/dto/quotareset/reset.go
+index d6e5ba9..64a5840 100644
+--- a/internal/cpa/dto/quotareset/reset.go
++++ b/internal/cpa/dto/quotareset/reset.go
+@@ -18,6 +18,9 @@ type Options struct {
+ 	OrganizationID  string          `json:"organizationId"`
+ }
+ type Result struct {
++	ErrorSource    string `json:"error_source,omitempty"`
++	ErrorReason    string `json:"error_reason,omitempty"`
++	ErrorStatus    int    `json:"error_status,omitempty"`
+ 	Code           string `json:"code"`
+ 	WindowsReset   int    `json:"windowsReset"`
+ 	RecoveryFailed bool   `json:"recoveryFailed"`
+diff --git a/internal/operationerror/details.go b/internal/operationerror/details.go
+new file mode 100644
+index 0000000..efbda95
+--- /dev/null
++++ b/internal/operationerror/details.go
+@@ -0,0 +1,52 @@
++package operationerror
++
++import (
++	"errors"
++	"fmt"
++)
++
++// Details contains only safe diagnostics, never raw provider bodies or credentials.
++type Details struct {
++	Source string `json:"error_source"`
++	Status int    `json:"error_status,omitempty"`
++	Reason string `json:"error_reason"`
++}
++
++type Failure interface {
++	FailureDetails() Details
++}
++
++func Describe(err error) Details {
++	var failure Failure
++	if errors.As(err, &failure) {
++		return failure.FailureDetails()
++	}
++	return Details{Source: "unknown", Reason: "The app could not confirm the failure source. Check the app logs."}
++}
++
++func HTTP(source string, status int) Details {
++	reason := "The service rejected the request."
++	switch status {
++	case 401, 403:
++		reason = "Authentication or permission was rejected. Check the account connection."
++	case 402:
++		reason = "The account has insufficient credits or requires payment."
++	case 404:
++		reason = "The account or requested operation was not found. Refresh the account list."
++	case 409, 412:
++		reason = "The account state changed or another operation is in progress. Refresh before retrying."
++	case 429:
++		reason = "The service is rate limiting requests. Wait before retrying."
++	default:
++		if status >= 500 {
++			reason = "The service is temporarily unavailable."
++		}
++	}
++	return Details{Source: source, Status: status, Reason: fmt.Sprintf("HTTP %d. %s", status, reason)}
++}
++
++func Display(err error) string {
++	details := Describe(err)
++	label := map[string]string{"keeper": "Keeper app", "cpa": "CPA proxy", "provider": "Upstream provider", "unknown": "Source unconfirmed"}[details.Source]
++	return label + ": " + details.Reason
++}
+diff --git a/internal/quota/errors.go b/internal/quota/errors.go
+index 9be73d3..a96e51d 100644
+--- a/internal/quota/errors.go
++++ b/internal/quota/errors.go
+@@ -1,6 +1,7 @@
+ package quota
+ 
+ import (
++	"cpa-usage-keeper/internal/operationerror"
+ 	"errors"
+ 	"fmt"
+ 	"strings"
+@@ -21,6 +22,10 @@ type ProviderHTTPError struct {
+ 	Message    string
+ }
+ 
++func (e ProviderHTTPError) FailureDetails() operationerror.Details {
++	return operationerror.HTTP("provider", e.StatusCode)
++}
++
+ func (e ProviderHTTPError) Error() string {
+ 	message := strings.TrimSpace(e.Message)
+ 	if message == "" {
+diff --git a/internal/quota/refresh.go b/internal/quota/refresh.go
+index 0ead72e..d97b312 100644
+--- a/internal/quota/refresh.go
++++ b/internal/quota/refresh.go
+@@ -2,6 +2,7 @@ package quota
+ 
+ import (
+ 	"context"
++	"cpa-usage-keeper/internal/operationerror"
+ 	"errors"
+ 	"fmt"
+ 	"strings"
+@@ -463,19 +464,12 @@ func (s *Service) deleteRefreshTask(task *RefreshTaskRecord) {
+ 
+ func refreshTaskErrorMessage(err error) string {
+ 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+-		return "Quota refresh timed out. Please try again later."
++		return "Source unconfirmed: Quota refresh was cancelled or timed out. Refresh again to check the account."
+ 	}
+ 	if errors.Is(err, ErrProviderInput) {
+-		return ProviderInputErrorMessage(err, "Quota request is missing required parameters.")
++		return "Keeper app: " + ProviderInputErrorMessage(err, "Quota request is missing required parameters.")
+ 	}
+-	var httpErr ProviderHTTPError
+-	if errors.As(err, &httpErr) {
+-		return httpErr.Error()
+-	}
+-	if strings.HasPrefix(err.Error(), "HTTP ") {
+-		return err.Error()
+-	}
+-	return "Quota refresh failed. Please try again later."
++	return operationerror.Display(err)
+ }
+ 
+ func refreshTaskHTTPStatusCode(err error) *int {
+diff --git a/internal/quota/reset.go b/internal/quota/reset.go
+index d0218cf..4c55ffc 100644
+--- a/internal/quota/reset.go
++++ b/internal/quota/reset.go
+@@ -20,6 +20,9 @@ type ResetRequest struct {
+ }
+ 
+ type ResetResponse struct {
++	ErrorSource    string `json:"error_source,omitempty"`
++	ErrorReason    string `json:"error_reason,omitempty"`
++	ErrorStatus    int    `json:"error_status,omitempty"`
+ 	AuthIndex      string `json:"authIndex"`
+ 	Code           string `json:"code,omitempty"`
+ 	WindowsReset   int    `json:"windowsReset,omitempty"`
+@@ -109,7 +112,7 @@ func (s *Service) Reset(ctx context.Context, request ResetRequest) (ResetRespons
+ 		if err != nil {
+ 			return ResetResponse{}, err
+ 		}
+-		return ResetResponse{AuthIndex: authIndex, Code: output.Code, WindowsReset: output.WindowsReset, RecoveryFailed: output.RecoveryFailed}, nil
++		return ResetResponse{ErrorSource: output.ErrorSource, ErrorReason: output.ErrorReason, ErrorStatus: output.ErrorStatus, AuthIndex: authIndex, Code: output.Code, WindowsReset: output.WindowsReset, RecoveryFailed: output.RecoveryFailed}, nil
+ 	}
+ 	if !ok || resolvedType != "codex" {
+ 		return ResetResponse{}, fmt.Errorf("%w: %s", ErrUnsupportedType, normalizeIdentityType(identity.Provider))
+@@ -124,6 +127,7 @@ func (s *Service) Reset(ctx context.Context, request ResetRequest) (ResetRespons
+ 		return ResetResponse{}, err
+ 	}
+ 	return ResetResponse{
++		ErrorSource: output.ErrorSource, ErrorReason: output.ErrorReason, ErrorStatus: output.ErrorStatus,
+ 		AuthIndex:      authIndex,
+ 		Code:           output.Code,
+ 		WindowsReset:   output.WindowsReset,
+diff --git a/internal/quota/shared_reset.go b/internal/quota/shared_reset.go
+index 659fd2f..042e77e 100644
+--- a/internal/quota/shared_reset.go
++++ b/internal/quota/shared_reset.go
+@@ -38,5 +38,5 @@ func redeemSharedReset(ctx context.Context, caller ManagementAPICaller, input Pr
+ 		return ProviderResetOutput{}, err
+ 	}
+ 	out, err := client.RedeemQuotaReset(ctx, quotareset.Request{AuthIndex: input.Identity.Identity, Provider: provider, RequestID: input.ResetRequestID, GrantID: grant, OrganizationID: org})
+-	return ProviderResetOutput{Code: out.Code, WindowsReset: out.WindowsReset, RecoveryFailed: out.RecoveryFailed}, err
++	return ProviderResetOutput{ErrorSource: out.ErrorSource, ErrorReason: out.ErrorReason, ErrorStatus: out.ErrorStatus, Code: out.Code, WindowsReset: out.WindowsReset, RecoveryFailed: out.RecoveryFailed}, err
+ }
+diff --git a/internal/quota/test/service_refresh_test.go b/internal/quota/test/service_refresh_test.go
+index 38f47ff..4a98a23 100644
+--- a/internal/quota/test/service_refresh_test.go
++++ b/internal/quota/test/service_refresh_test.go
+@@ -646,7 +646,7 @@ func TestQueuedRefreshTaskFailsWhenParentContextCancelsBeforeWorkerSlot(t *testi
+ 	cancel()
+ 	defer releaseWorkerToken()
+ 	task := waitForRefreshTask(t, service, response.Tasks[0].AuthIndex, RefreshTaskStatusFailed)
+-	if task.Error != "Quota refresh timed out. Please try again later." {
++	if task.Error != "Source unconfirmed: Quota refresh was cancelled or timed out. Refresh again to check the account." {
+ 		t.Fatalf("expected canceled queued task to fail with timeout message, got %+v", task)
+ 	}
+ 	if handler.callCount() != 0 {
+@@ -690,7 +690,7 @@ func TestRefreshTaskUsesParentContextCancellation(t *testing.T) {
+ 	waitForRefreshTask(t, service, response.Tasks[0].AuthIndex, RefreshTaskStatusRunning)
+ 	cancel()
+ 	task := waitForRefreshTask(t, service, response.Tasks[0].AuthIndex, RefreshTaskStatusFailed)
+-	if task.Error != "Quota refresh timed out. Please try again later." {
++	if task.Error != "Source unconfirmed: Quota refresh was cancelled or timed out. Refresh again to check the account." {
+ 		t.Fatalf("expected canceled task to fail with timeout message, got %+v", task)
+ 	}
+ 	close(block)
+@@ -706,7 +706,7 @@ func TestStopRefreshTasksPreventsNewRefreshWorkers(t *testing.T) {
+ 	response := queueManualQuotaRefresh(t, service, "auth-1")
+ 
+ 	task := waitForRefreshTask(t, service, response.Tasks[0].AuthIndex, RefreshTaskStatusFailed)
+-	if task.Error != "Quota refresh timed out. Please try again later." {
++	if task.Error != "Source unconfirmed: Quota refresh was cancelled or timed out. Refresh again to check the account." {
+ 		t.Fatalf("expected stopped service task to fail with timeout message, got %+v", task)
+ 	}
+ 	if handler.callCount() != 0 {
+@@ -722,7 +722,7 @@ func TestRefreshTaskFailureReturnsFriendlyMessage(t *testing.T) {
+ 
+ 	response := queueManualQuotaRefresh(t, service, "auth-1")
+ 	task := waitForRefreshTask(t, service, response.Tasks[0].AuthIndex, RefreshTaskStatusFailed)
+-	if task.Error != "Quota refresh failed. Please try again later." {
++	if task.Error != "Source unconfirmed: The app could not confirm the failure source. Check the app logs." {
+ 		t.Fatalf("expected friendly error message, got %q", task.Error)
+ 	}
+ 	cache, err := service.GetCachedQuota(context.Background(), CacheRequest{AuthIndexes: []string{"auth-1"}})
+diff --git a/internal/quota/types.go b/internal/quota/types.go
+index 4244065..ba579b3 100644
+--- a/internal/quota/types.go
++++ b/internal/quota/types.go
+@@ -28,6 +28,9 @@ type ProviderOutput struct {
+ }
+ 
+ type ProviderResetOutput struct {
++	ErrorSource    string `json:"error_source,omitempty"`
++	ErrorReason    string `json:"error_reason,omitempty"`
++	ErrorStatus    int    `json:"error_status,omitempty"`
+ 	Code           string `json:"code,omitempty"`
+ 	WindowsReset   int    `json:"windowsReset,omitempty"`
+ 	RecoveryFailed bool   `json:"recoveryFailed,omitempty"`
+diff --git a/web/src/components/usage/credentials/CredentialEditModal.tsx b/web/src/components/usage/credentials/CredentialEditModal.tsx
+index dcc8800..1f31523 100644
+--- a/web/src/components/usage/credentials/CredentialEditModal.tsx
++++ b/web/src/components/usage/credentials/CredentialEditModal.tsx
+@@ -5,6 +5,7 @@ import { Modal } from '@/components/ui/Modal'
+ import { Button } from '@/components/ui/Button'
+ import { Input } from '@/components/ui/Input'
+ import { ApiError } from '@/lib/api'
++import { accountActionError } from '@/lib/accountErrors'
+ import { parseCredentialPriority } from './CredentialPriorityEditor'
+ import { isCredentialStatusToggleSupported } from './CredentialStatusToggle'
+ import type { CredentialDetailSelection, CredentialEditChange } from './credentialViewModels'
+@@ -74,7 +75,7 @@ export function CredentialEditModal({ selection, onClose, onSaveField, onSaved,
+           : cause instanceof ApiError && cause.status === 409
+             ? selection.kind === 'credential' ? 'usage_stats.credentials_priority_conflict_credential' : 'usage_stats.credentials_edit_unsupported'
+             : 'usage_stats.credentials_edit_failed'
+-      setError(t(key))
++      setError(accountActionError(cause, t(key)))
+     } finally {
+       busyRef.current = false
+       setSaving(false)
+diff --git a/web/src/components/usage/credentials/CredentialPriorityEditor.tsx b/web/src/components/usage/credentials/CredentialPriorityEditor.tsx
+index f0fb92d..8623da1 100644
+--- a/web/src/components/usage/credentials/CredentialPriorityEditor.tsx
++++ b/web/src/components/usage/credentials/CredentialPriorityEditor.tsx
+@@ -1,3 +1,4 @@
++import { accountActionError } from '@/lib/accountErrors'
+ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+ import { createPortal } from 'react-dom'
+ import { useTranslation } from 'react-i18next'
+@@ -155,9 +156,9 @@ export function CredentialPriorityEditor({ priority, displayName, readOnly = fal
+  else await onSave(parsed)
+       busyRef.current = false
+       close(true)
+-    } catch {
++    } catch (error) {
+       // API 层给出全局提示；浮层保留草稿和行内错误以便重试。
+-      setError(t('usage_stats.credentials_priority_save_failed'))
++      setError(accountActionError(error, t('usage_stats.credentials_priority_save_failed')))
+     } finally {
+       busyRef.current = false
+       setSaving(false)
+diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
+index a0a6c36..3573464 100644
+--- a/web/src/components/usage/credentials/CredentialsSection.tsx
++++ b/web/src/components/usage/credentials/CredentialsSection.tsx
+@@ -1,3 +1,4 @@
++import { accountActionError } from '@/lib/accountErrors'
+ import { browserDateLocale } from '@/utils/browserDateTime';
+ import { formatBrowserDateTime } from '@/utils/browserDateTime'
+ import { useCallback, useEffect, useId, useRef, useState, type Ref } from 'react'
+@@ -454,6 +455,7 @@ export function QuotaResetAction({
+   const [resetCreditsDetails, setResetCreditsDetails] = useState<UsageQuotaResetCreditsResponse | null>(null)
+   const [resetCreditsLoading, setResetCreditsLoading] = useState(false)
+   const [resetCreditsFailed, setResetCreditsFailed] = useState(false)
++  const [resetCreditsError, setResetCreditsError] = useState('')
+   const [claudeDetails, setClaudeDetails] = useState<ClaudeResetGrantsResponse | null>(null)
+   const [selectedClaudeGrantId, setSelectedClaudeGrantId] = useState('')
+   const [claudeMessage, setClaudeMessage] = useState('')
+@@ -518,6 +520,7 @@ export function QuotaResetAction({
+       active = false
+       controller.abort()
+       setResetCreditsFailed(true)
++      setResetCreditsError(accountActionError(undefined, 'Loading reset information timed out.'))
+       setResetCreditsLoading(false)
+     }, provider === 'claude' ? 20_000 : RESET_CREDITS_LOOKUP_TIMEOUT_MS)
+     // Claude 确认需要本次查询的 grant 与组织 UUID；Codex 保留明细失败后的缓存回退。
+@@ -532,9 +535,10 @@ export function QuotaResetAction({
+           } else setResetCreditsDetails(response as UsageQuotaResetCreditsResponse)
+         }
+       })
+-      .catch(() => {
++      .catch((error: unknown) => {
+         if (active) {
+           setResetCreditsFailed(true)
++          setResetCreditsError(accountActionError(error, 'Reset information could not be loaded.'))
+         }
+       })
+       .finally(() => {
+@@ -606,6 +610,7 @@ export function QuotaResetAction({
+     updatePopoverPosition()
+     setResetCreditsDetails(null)
+     setResetCreditsFailed(false)
++    setResetCreditsError('')
+     setResetCreditsLoading(true)
+     setClaudeDetails(null)
+     setClaudeMessage('')
+@@ -669,6 +674,7 @@ export function QuotaResetAction({
+             <span>{t('usage_stats.credentials_quota_reset_message_prompt')}</span>
+           </p>
+           <div className={styles.credentialQuotaResetExpiry} aria-live="polite">
++            {resetCreditsError && <p role="alert">{resetCreditsError}</p>}
+             <p className={styles.credentialQuotaResetExpiryTitle}>{t(provider === 'claude' ? 'usage_stats.claude_reset_grants_title' : 'usage_stats.credentials_quota_reset_expiry_title')}</p>
+             {resetCreditsLoading && (
+               <div className={styles.credentialQuotaResetExpiryStatus}>
+@@ -1060,7 +1066,7 @@ export function QuotaInspectionModal({
+       setInvalidAccountAction(null)
+       setSelectedInvalidFileNames([])
+     } catch (nextError) {
+-      setInvalidAccountError(nextError instanceof Error ? nextError.message : t('usage_stats.credentials_inspection_invalid_accounts_failed'))
++      setInvalidAccountError(accountActionError(nextError, t('usage_stats.credentials_inspection_invalid_accounts_failed')))
+     } finally {
+       setInvalidAccountSubmitting(false)
+     }
+@@ -1138,7 +1144,7 @@ export function QuotaInspectionModal({
+         setValue: setScheduleValue,
+       })
+     } catch (nextError) {
+-      setSettingsError(nextError instanceof Error ? nextError.message : t('usage_stats.credentials_auto_refresh_save_failed'))
++      setSettingsError(accountActionError(nextError, t('usage_stats.credentials_auto_refresh_save_failed')))
+     } finally {
+       setSettingsSaving(false)
+     }
+diff --git a/web/src/components/usage/credentials/QuotaPolicyPanel.tsx b/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
+index 79da81e..a85270e 100644
+--- a/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
++++ b/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
+@@ -1,5 +1,6 @@
+ import { useState, useSyncExternalStore } from 'react'
+-import { apiFetch, apiPath } from '@/lib/api'
++import { apiFetch, apiPath, parseApiError } from '@/lib/api'
++import { accountActionError } from '@/lib/accountErrors'
+ import { startLiveRefresh } from '@/lib/live'
+ import styles from './QuotaPolicyPanel.module.scss'
+ 
+@@ -109,9 +110,9 @@ function SupportedQuotaPolicyPanel({ authIndex, provider }: { authIndex: string;
+         method: 'PUT', headers: { 'Content-Type': 'application/json' },
+         body: JSON.stringify({ auth_index: authIndex, provider, thresholds, expected_thresholds: expected, rebalance_settings: behavior, expected_rebalance_settings: expectedBehavior }),
+       })
+-      if (!response.ok) throw new Error(response.status === 409 ? 'Policy changed elsewhere. Cancel and reopen to load it.' : 'Could not save quota policy. Reload and retry.')
++      if (!response.ok) await parseApiError(response, 'Could not save quota policy. Reload and retry.')
+       await refresh(); setEditing(false)
+-    } catch (caught) { setError(caught instanceof Error ? caught.message : 'Could not save quota policy.') }
++    } catch (caught) { setError(accountActionError(caught, 'Could not save quota policy.')) }
+     finally { setPending(false) }
+   }
+   return <section className={styles.panel} data-quota-policy={authIndex} aria-label="Quota routing policy">
+diff --git a/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx b/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx
+index afa0d57..c8c2edf 100644
+--- a/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx
+@@ -7,7 +7,7 @@ import { CredentialPriorityEditor, parseCredentialPriority } from '../Credential
+ 
+ globalThis.IS_REACT_ACT_ENVIRONMENT = true
+ 
+-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
++vi.mock('react-i18next', async (importOriginal) => ({ ...await importOriginal<typeof import('react-i18next')>(), useTranslation: () => ({ t: (key: string) => key }) }))
+ 
+ function changeInput(input: HTMLInputElement, value: string) {
+   const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+@@ -79,7 +79,7 @@ describe('CredentialPriorityEditor', () => {
+     await act(async () => changeInput(input, '4'))
+     await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await Promise.resolve() })
+     expect(input.value).toBe('4')
+-    expect(popover()!.querySelector('[role="alert"]')?.textContent).toBe('usage_stats.credentials_priority_save_failed')
++    expect(popover()!.querySelector('[role="alert"]')?.textContent).toBe('Source unconfirmed: usage_stats.credentials_priority_save_failed No confirmed server result was received. Check the connection and refresh before retrying.')
+     await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+     expect(popover()).toBeNull()
+     expect(document.activeElement).toBe(container.querySelector('button'))
+diff --git a/web/src/components/usage/credentials/test/quotaResetRecovery.test.ts b/web/src/components/usage/credentials/test/quotaResetRecovery.test.ts
+index 3864098..286a7aa 100644
+--- a/web/src/components/usage/credentials/test/quotaResetRecovery.test.ts
++++ b/web/src/components/usage/credentials/test/quotaResetRecovery.test.ts
+@@ -13,7 +13,8 @@ describe('quota reset recovery', () => {
+ 
+     expect(outcome).toEqual({
+       kind: 'warning',
+-      message: 'Quota was reset, but CPA account recovery failed. Recover the account in CPA; do not reset quota again.',
++      message: 'CPA proxy: Quota was reset, but CPA account recovery failed. Recover the account in CPA; do not reset quota again.',
++      result: { authIndex: 'auth-1', code: 'reset', windowsReset: 2, recoveryFailed: true },
+     })
+     expect(resetUsageQuota).toHaveBeenCalledTimes(1)
+     expect(refreshQuotaForAuthIndex).toHaveBeenCalledWith('auth-1')
+diff --git a/web/src/components/usage/credentials/test/useCredentialsTabData.interaction.test.tsx b/web/src/components/usage/credentials/test/useCredentialsTabData.interaction.test.tsx
+index dfb806a..2360e73 100644
+--- a/web/src/components/usage/credentials/test/useCredentialsTabData.interaction.test.tsx
++++ b/web/src/components/usage/credentials/test/useCredentialsTabData.interaction.test.tsx
+@@ -148,7 +148,7 @@ describe('credential status refresh after toggle', () => {
+ 
+     const last = pageCalls(fetchMock, 1).at(-1)
+     expect(last?.searchParams.get('active_only')).toBe('true')
+-    expect(notices.at(-1)).toBe(`error:${i18n.t('usage_stats.credentials_status_stale_target')}`)
++    expect(notices.at(-1)).toBe(`error:Keeper app: ${i18n.t('usage_stats.credentials_status_stale_target')} (HTTP 404)`)
+   })
+ 
+   it('ignores repeated activation of the same credential while the first request is in flight', async () => {
+diff --git a/web/src/components/usage/credentials/test/useCredentialsTabData.priority.test.tsx b/web/src/components/usage/credentials/test/useCredentialsTabData.priority.test.tsx
+index c1e114b..5962720 100644
+--- a/web/src/components/usage/credentials/test/useCredentialsTabData.priority.test.tsx
++++ b/web/src/components/usage/credentials/test/useCredentialsTabData.priority.test.tsx
+@@ -77,7 +77,7 @@ describe('credential priority save data flow', () => {
+     })
+     await act(async () => root.render(<Harness onNotice={onNotice} onPrioritySaved={onPrioritySaved} />))
+     await act(async () => { await expect(latest!.saveAiProviderPriority('local-id', 'idx/one', 3)).rejects.toThrow() })
+-    expect(onNotice).toHaveBeenCalledWith('error', i18n.t('usage_stats.credentials_priority_save_failed'))
++    expect(onNotice).toHaveBeenCalledWith('error', `Keeper app: ${i18n.t('usage_stats.credentials_priority_save_failed')} (HTTP ${status})`)
+     expect(onPrioritySaved).not.toHaveBeenCalled()
+   })
+ 
+@@ -89,7 +89,7 @@ describe('credential priority save data flow', () => {
+     await act(async () => root.render(<Harness onNotice={onNotice} onPrioritySaved={onPrioritySaved} />))
+     const beforePages = fetchMock.mock.calls.filter(([input]) => String(input).includes('/usage/identities/page')).length
+     await act(async () => { await expect(latest!.saveAiProviderPriority('local-id', 'idx/one', 3)).rejects.toThrow() })
+-    expect(onNotice).toHaveBeenCalledWith('error', i18n.t('usage_stats.credentials_config_changed'))
++    expect(onNotice).toHaveBeenCalledWith('error', `Keeper app: ${i18n.t('usage_stats.credentials_config_changed')} (HTTP 412)`)
+     expect(onPrioritySaved).not.toHaveBeenCalled()
+     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/priority'))).toHaveLength(1)
+     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/usage/identities/page'))).toHaveLength(beforePages)
+diff --git a/web/src/components/usage/credentials/test/useCredentialsTabData.test.ts b/web/src/components/usage/credentials/test/useCredentialsTabData.test.ts
+index 9849a92..47c1b04 100644
+--- a/web/src/components/usage/credentials/test/useCredentialsTabData.test.ts
++++ b/web/src/components/usage/credentials/test/useCredentialsTabData.test.ts
+@@ -150,8 +150,9 @@ describe('buildQuotaRefreshTaskErrorUpdate', () => {
+ })
+ 
+ describe('quotaResetDisplayError', () => {
+-  it('always returns the generic localized reset failure message', () => {
+-    expect(quotaResetDisplayError()).toBe('Quota reset failed. Please try again later.')
++  it('identifies an unconfirmed result and explains safe retries', () => {
++    expect(quotaResetDisplayError()).toContain('Source unconfirmed:')
++    expect(quotaResetDisplayError()).toContain('retry this same attempt')
+   })
+ })
+ 
+@@ -161,14 +162,14 @@ describe('runQuotaResetForAuthIndex', () => {
+     const outcome = await runQuotaResetForAuthIndex('auth-1', {
+       resetUsageQuota: async () => {
+         calls.push('reset')
+-        return { authIndex: 'auth-1' }
++        return { authIndex: 'auth-1', code: 'reset' }
+       },
+       refreshQuotaForAuthIndex: async () => {
+         calls.push('refresh')
+       },
+     })
+ 
+-    expect(outcome).toEqual({ kind: 'success' })
++    expect(outcome).toEqual({ kind: 'success', result: { authIndex: 'auth-1', code: 'reset' } })
+     expect(calls).toEqual(['reset', 'refresh'])
+   })
+ 
+@@ -177,7 +178,7 @@ describe('runQuotaResetForAuthIndex', () => {
+     const outcome = await runQuotaResetForAuthIndex('auth-1', {
+       resetUsageQuota: async () => {
+         calls.push('reset')
+-        return { authIndex: 'auth-1' }
++        return { authIndex: 'auth-1', code: 'reset' }
+       },
+       refreshQuotaForAuthIndex: async () => {
+         calls.push('refresh')
+@@ -185,7 +186,7 @@ describe('runQuotaResetForAuthIndex', () => {
+       },
+     })
+ 
+-    expect(outcome).toEqual({ kind: 'success' })
++    expect(outcome).toEqual({ kind: 'success', result: { authIndex: 'auth-1', code: 'reset' } })
+     expect(calls).toEqual(['reset', 'refresh'])
+   })
+ 
+@@ -200,7 +201,8 @@ describe('runQuotaResetForAuthIndex', () => {
+       },
+     })
+ 
+-    expect(outcome).toEqual({ kind: 'error', message: 'Quota reset failed. Please try again later.' })
++    expect(outcome).toMatchObject({ kind: 'error', result: { code: 'unknown' } })
++    expect('message' in outcome ? outcome.message : '').toContain('retry this same attempt')
+     expect(refreshCalls).toEqual([])
+   })
+ 
+@@ -215,7 +217,8 @@ describe('runQuotaResetForAuthIndex', () => {
+       },
+     })
+ 
+-    expect(outcome).toEqual({ kind: 'error', message: 'Quota reset failed. Please try again later.' })
++    expect(outcome).toMatchObject({ kind: 'error', result: { code: 'unknown' } })
++    expect('message' in outcome ? outcome.message : '').toContain('retry this same attempt')
+     expect(refreshCalls).toEqual([])
+   })
+ 
+@@ -227,7 +230,8 @@ describe('runQuotaResetForAuthIndex', () => {
+       refreshQuotaForAuthIndex: async () => undefined,
+     })
+ 
+-    expect(outcome).toEqual({ kind: 'error', message: 'Quota reset failed. Please try again later.' })
++    expect(outcome).toMatchObject({ kind: 'error', result: { code: 'unknown' } })
++    expect('message' in outcome ? outcome.message : '').toContain('retry this same attempt')
+   })
+ })
+ 
+@@ -256,7 +260,7 @@ describe('Claude manual quota reset outcomes', () => {
+     })
+     expect(refreshed).toBe(false)
+     expect(outcome.result?.code).toBe('unknown')
+-    expect('message' in outcome ? outcome.message : '').toContain('check quota before deciding whether to submit again')
++    expect('message' in outcome ? outcome.message : '').toContain('Refresh quota and reset credits first')
+   })
+   it('uses the existing recovery warning and single-row refresh after confirmed success', async () => {
+     const calls: string[] = []
+diff --git a/web/src/components/usage/credentials/test/useCredentialsTabData.wiring.test.tsx b/web/src/components/usage/credentials/test/useCredentialsTabData.wiring.test.tsx
+index fd8f0e3..cbb895a 100644
+--- a/web/src/components/usage/credentials/test/useCredentialsTabData.wiring.test.tsx
++++ b/web/src/components/usage/credentials/test/useCredentialsTabData.wiring.test.tsx
+@@ -100,7 +100,7 @@ describe('credential hook coordination', () => {
+     vi.mocked(resetUsageQuota).mockRejectedValueOnce(new ApiError('quota_reset_failed', status))
+     await act(async () => latest!.resetQuotaForAuthIndex('auth-1'))
+     expect(resetUsageQuota).toHaveBeenCalledWith('auth-1')
+-    expect(onNotice).toHaveBeenCalledWith('error', quotaResetDisplayError())
++    expect(onNotice).toHaveBeenCalledWith('error', quotaResetDisplayError(new ApiError('quota_reset_failed', status)))
+     expect(onAuthRequired).not.toHaveBeenCalled()
+     expect(mocks.refreshQuota).not.toHaveBeenCalled()
+   })
+diff --git a/web/src/components/usage/credentials/test/useQuotaInspection.test.tsx b/web/src/components/usage/credentials/test/useQuotaInspection.test.tsx
+index 2b3601b..02e4401 100644
+--- a/web/src/components/usage/credentials/test/useQuotaInspection.test.tsx
++++ b/web/src/components/usage/credentials/test/useQuotaInspection.test.tsx
+@@ -145,7 +145,8 @@ describe('useQuotaInspection', () => {
+     await act(async () => root.render(<Harness enabled onInspectionCompleted={onCompleted} />))
+     await act(async () => vi.advanceTimersByTimeAsync(3_000))
+     await act(async () => latest!.refreshQuotaInspectionStatus())
+-    expect(latest!.quotaInspectionError).toBe('temporary outage')
++    expect(latest!.quotaInspectionError).toContain('Source unconfirmed:')
++    expect(latest!.quotaInspectionError).not.toContain('temporary outage')
+     await act(async () => resolveOldPoll(status(false, true)))
+     expect(onCompleted).not.toHaveBeenCalled()
+     await act(async () => vi.advanceTimersByTimeAsync(3_000))
+diff --git a/web/src/components/usage/credentials/useCredentialPages.ts b/web/src/components/usage/credentials/useCredentialPages.ts
+index 8d20250..3d4312d 100644
+--- a/web/src/components/usage/credentials/useCredentialPages.ts
++++ b/web/src/components/usage/credentials/useCredentialPages.ts
+@@ -1,3 +1,4 @@
++import { accountActionError } from '@/lib/accountErrors'
+ import { startLiveRefresh } from '@/lib/live'
+ import { useCallback, useEffect, useRef, useState } from 'react'
+ import { ApiError, fetchUsageIdentitiesPage, resetUsageIdentityStats, type UsageIdentityPageSort } from '@/lib/api'
+@@ -199,7 +200,7 @@ export function useCredentialPages({ enabledCredentials, enabledAiProviders, onA
+         setCredentialTotal(0)
+         setCredentialTotalPages(0)
+       }
+-      setCredentialsError(nextError instanceof Error ? nextError.message : 'Failed to load usage identities')
++      setCredentialsError(accountActionError(nextError, 'Failed to load usage identities'))
+     } finally {
+       if (credentialsRequestControllerRef.current === controller) {
+         setCredentialsLoading(false)
+@@ -238,7 +239,7 @@ export function useCredentialPages({ enabledCredentials, enabledAiProviders, onA
+         setAiProviderTotal(0)
+         setAiProviderTotalPages(0)
+       }
+-      setAiProvidersError(nextError instanceof Error ? nextError.message : 'Failed to load usage identities')
++      setAiProvidersError(accountActionError(nextError, 'Failed to load usage identities'))
+     } finally {
+       if (aiProvidersRequestControllerRef.current === controller) {
+         setAiProvidersLoading(false)
+diff --git a/web/src/components/usage/credentials/useCredentialsTabData.ts b/web/src/components/usage/credentials/useCredentialsTabData.ts
+index 22d2660..4a19bb7 100644
+--- a/web/src/components/usage/credentials/useCredentialsTabData.ts
++++ b/web/src/components/usage/credentials/useCredentialsTabData.ts
+@@ -12,6 +12,7 @@ import { useQuotaCache } from './useQuotaCache'
+ import { useQuotaInspection } from './useQuotaInspection'
+ import { ApiError, resetUsageQuota, setCredentialDisabled, setCredentialPriority, updateUsageIdentityAlias, type CredentialStatusKind, type UsageIdentityPageSort } from '@/lib/api'
+ import i18n from '@/i18n'
++import { accountActionError, resetResultError } from '@/lib/accountErrors'
+ import type { UsageIdentity, UsageIdentityTypeCount, UsageQuotaInspectionStatusResponse, UsageQuotaResetResponse } from '@/lib/types'
+ import { quotaRefreshDisplayError, useQuotaRefreshTasks, type QuotaState } from './useQuotaRefreshTasks'
+ import type { CredentialProviderFilterKey } from './credentialProviderFilters'
+@@ -204,7 +205,7 @@ export function useCredentialsTabData({ enabledCredentials, enabledAiProviders,
+       if (failure.authRequired) {
+         onAuthRequired?.()
+       }
+-      onNotice?.('error', i18n.t(failure.noticeKey))
++      onNotice?.('error', accountActionError(error, i18n.t(failure.noticeKey)))
+       // 404 说明本地列表已经过期，用最新筛选与页码重新拉取，让用户看到真实状态。
+       if (failure.refresh) {
+         await refreshCredentialPagesRef.current()
+@@ -252,7 +253,7 @@ export function useCredentialsTabData({ enabledCredentials, enabledAiProviders,
+           : error instanceof ApiError && error.status === 409 && kind === 'credential'
+             ? 'usage_stats.credentials_priority_conflict_credential'
+             : 'usage_stats.credentials_priority_save_failed'
+-      onNotice?.('error', i18n.t(key))
++      onNotice?.('error', accountActionError(error, i18n.t(key)))
+       throw error
+     }
+   }, [onAuthRequired, onNotice, onPrioritySaved])
+@@ -303,12 +304,12 @@ export function useCredentialsTabData({ enabledCredentials, enabledAiProviders,
+         onNotice?.('info', outcome.message)
+       }
+       return outcome.result
+-    } catch {
++    } catch (error) {
+       setQuotaResetStateByAuthIndex((current) => ({
+         ...current,
+         [authIndex]: { quotaResetting: false },
+       }))
+-      onNotice?.('error', quotaResetDisplayError())
++      onNotice?.('error', quotaResetDisplayError(error))
+     }
+   }, [onNotice, refreshQuotaForAuthIndex])
+ 
+@@ -386,17 +387,13 @@ export async function runQuotaResetForAuthIndex(
+   try {
+     // 后端在官方重置后恢复 CPA 路由；只有官方重置失败才中止额度刷新。
+     result = await deps.resetUsageQuota(authIndex)
+-  } catch {
+-    if (deps.grantId) return { kind: 'warning', message: i18n.t('usage_stats.claude_reset_unknown'), result: { authIndex, code: 'unknown' } }
+-    return {
+-      kind: 'error',
+-      message: quotaResetDisplayError(),
+-    }
++  } catch (error) {
++    return { kind: 'error', message: quotaResetDisplayError(error), result: { authIndex, code: 'unknown' } }
+   }
+ 
+-  const response = deps.grantId ? { result } : {}
+-  if (deps.grantId && result.code !== 'reset' && result.code !== 'already_used') {
+-    return { kind: 'warning', message: i18n.t(`usage_stats.claude_reset_${claudeResetResultKey(result.code)}`), ...response }
++  const response = { result }
++  if (!['reset', 'already_redeemed', 'already_used'].includes(result.code ?? '')) {
++    return { kind: 'warning', message: resetResultError(result), ...response }
+   }
+ 
+   try {
+@@ -406,7 +403,7 @@ export async function runQuotaResetForAuthIndex(
+     // reset 已成功消费官方次数，后续刷新失败不影响本次 reset 的成功提示。
+   }
+   if (result.recoveryFailed) {
+-    return { kind: 'warning', message: i18n.t('usage_stats.credentials_quota_reset_recovery_failed'), ...response }
++    return { kind: 'warning', message: 'CPA proxy: ' + i18n.t('usage_stats.credentials_quota_reset_recovery_failed'), ...response }
+   }
+   return { kind: 'success', ...response }
+ }
+@@ -415,8 +412,8 @@ export function claudeResetResultKey(code?: string): string {
+   return ['not_limited', 'cooldown', 'ineligible', 'unavailable', 'rate_limited', 'auth_error', 'status_unavailable', 'unknown'].includes(code ?? '') ? code! : 'unavailable'
+ }
+ 
+-export function quotaResetDisplayError(): string {
+-  return i18n.t('usage_stats.credentials_quota_reset_failed', { defaultValue: 'Quota reset failed. Please try again later.' })
++export function quotaResetDisplayError(error?: unknown): string {
++  return accountActionError(error, 'Quota reset could not be completed.') + ' ' + i18n.t('account_errors.reset_retry')
+ }
+ 
+ export function buildCredentialQuotaStateMap(
+diff --git a/web/src/components/usage/credentials/useQuotaInspection.ts b/web/src/components/usage/credentials/useQuotaInspection.ts
+index 9bd27ae..875da86 100644
+--- a/web/src/components/usage/credentials/useQuotaInspection.ts
++++ b/web/src/components/usage/credentials/useQuotaInspection.ts
+@@ -1,3 +1,4 @@
++import { accountActionError } from '@/lib/accountErrors'
+ import { useCallback, useEffect, useRef, useState } from 'react'
+ import { ApiError, fetchUsageQuotaInspectionStatus, startUsageQuotaInspection } from '@/lib/api'
+ import type { UsageQuotaInspectionStatusResponse } from '@/lib/types'
+@@ -80,7 +81,7 @@ export function useQuotaInspection({ enabled, onAuthRequired, onInspectionComple
+       onAuthRequiredRef.current?.()
+       return
+     }
+-    setQuotaInspectionError(error instanceof Error ? error.message : 'Failed to load quota inspection status')
++    setQuotaInspectionError(accountActionError(error, 'Failed to load quota inspection status'))
+   }, [])
+ 
+   const loadQuotaInspectionStatus = useCallback(async (controller = new AbortController()): Promise<UsageQuotaInspectionStatusResponse | null> => {
+diff --git a/web/src/components/usage/credentials/useQuotaRefreshTasks.ts b/web/src/components/usage/credentials/useQuotaRefreshTasks.ts
+index e1e6f2a..905fd0d 100644
+--- a/web/src/components/usage/credentials/useQuotaRefreshTasks.ts
++++ b/web/src/components/usage/credentials/useQuotaRefreshTasks.ts
+@@ -1,3 +1,4 @@
++import { accountActionError } from '@/lib/accountErrors'
+ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import { ApiError, fetchUsageQuotaRefreshTask, refreshUsageQuotas } from '@/lib/api'
+ import i18n from '@/i18n'
+@@ -273,8 +274,5 @@ export function quotaRefreshDisplayError(error?: string): string {
+ }
+ 
+ function quotaErrorMessage(error: unknown): string {
+-  if (error instanceof Error) {
+-    return error.message
+-  }
+-  return 'Quota request failed'
++  return accountActionError(error, 'Quota request failed.')
+ }
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index 7f20dd9..ac62349 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -20,6 +20,7 @@ const getInitialLanguage = (): SupportedLanguage => {
+ const resources = {
+   en: {
+     translation: {
++      account_errors: {"keeper": "Keeper app", "cpa": "CPA proxy", "provider": "Upstream provider", "unconfirmed": "Source unconfirmed", "connection": "No confirmed server result was received. Check the connection and refresh before retrying.", "reset_retry": "Refresh quota and reset credits first. If the result is uncertain, retry this same attempt; do not start a new reset.", "reset_unknown": "The reset result could not be confirmed. A credit may have been consumed.", "reset_not_limited": "The account is not currently limited; no reset was applied.", "reset_cooldown": "The provider requires waiting before another reset.", "reset_ineligible": "This account or selected reset credit is not eligible.", "reset_unavailable": "No usable reset credit is currently available.", "reset_rate_limited": "The provider is rate limiting requests. Wait before retrying.", "reset_auth_error": "The provider rejected the account authentication. Reconnect the account.", "reset_status_unavailable": "Reset eligibility could not be checked."},
+       usage_graph: {peak: 'Peak {{count}} / 10m'},
+       live: { live: 'Live', connecting: 'Connecting…', reconnecting: 'Reconnecting…', paused: 'Paused while hidden' },
+       overview_limits: { window: 'Window', observed_ago: '{{minutes}}m {{seconds}}s ago', title: 'Usage Limits', account: 'Provider / account', remaining: 'Remaining', resets: 'Resets in', unavailable: 'Quota unavailable', capture_unknown: 'Capture time unavailable', stale: 'Stale observation', awaiting: 'Awaiting update', info: 'Quota details', rpm_avg: 'RPM avg' },
+@@ -1118,6 +1119,7 @@ const resources = {
+   },
+   zh: {
+     translation: {
++      account_errors: {"keeper": "Keeper app", "cpa": "CPA proxy", "provider": "Upstream provider", "unconfirmed": "Source unconfirmed", "connection": "No confirmed server result was received. Check the connection and refresh before retrying.", "reset_retry": "Refresh quota and reset credits first. If the result is uncertain, retry this same attempt; do not start a new reset.", "reset_unknown": "The reset result could not be confirmed. A credit may have been consumed.", "reset_not_limited": "The account is not currently limited; no reset was applied.", "reset_cooldown": "The provider requires waiting before another reset.", "reset_ineligible": "This account or selected reset credit is not eligible.", "reset_unavailable": "No usable reset credit is currently available.", "reset_rate_limited": "The provider is rate limiting requests. Wait before retrying.", "reset_auth_error": "The provider rejected the account authentication. Reconnect the account.", "reset_status_unavailable": "Reset eligibility could not be checked."},
+       usage_graph: {peak: '峰值 {{count}} / 10分钟'},
+       live: { live: '实时', connecting: '正在连接…', reconnecting: '正在重新连接…', paused: '页面隐藏时暂停' },
+       overview_limits: { window: '窗口', observed_ago: '{{minutes}}分 {{seconds}}秒前', title: '用量限额', account: '提供商 / 账号', remaining: '剩余', resets: '重置倒计时', unavailable: '限额不可用', capture_unknown: '采集时间不可用', stale: '数据已过期', awaiting: '等待更新', info: '限额详情', rpm_avg: 'RPM 平均' },
+@@ -2216,6 +2218,7 @@ const resources = {
+   },
+   'zh-TW': {
+     translation: {
++      account_errors: {"keeper": "Keeper app", "cpa": "CPA proxy", "provider": "Upstream provider", "unconfirmed": "Source unconfirmed", "connection": "No confirmed server result was received. Check the connection and refresh before retrying.", "reset_retry": "Refresh quota and reset credits first. If the result is uncertain, retry this same attempt; do not start a new reset.", "reset_unknown": "The reset result could not be confirmed. A credit may have been consumed.", "reset_not_limited": "The account is not currently limited; no reset was applied.", "reset_cooldown": "The provider requires waiting before another reset.", "reset_ineligible": "This account or selected reset credit is not eligible.", "reset_unavailable": "No usable reset credit is currently available.", "reset_rate_limited": "The provider is rate limiting requests. Wait before retrying.", "reset_auth_error": "The provider rejected the account authentication. Reconnect the account.", "reset_status_unavailable": "Reset eligibility could not be checked."},
+       usage_graph: {peak: '峰值 {{count}} / 10分鐘'},
+       live: { live: '即時', connecting: '正在連線…', reconnecting: '正在重新連線…', paused: '頁面隱藏時暫停' },
+       overview_limits: { window: '時段', observed_ago: '{{minutes}}分 {{seconds}}秒前', title: '用量限額', account: '供應商 / 帳號', remaining: '剩餘', resets: '重置倒數', unavailable: '限額不可用', capture_unknown: '擷取時間不可用', stale: '資料已過期', awaiting: '等待更新', info: '限額詳情', rpm_avg: 'RPM 平均' },
+diff --git a/web/src/lib/accountErrors.ts b/web/src/lib/accountErrors.ts
+new file mode 100644
+index 0000000..067539c
+--- /dev/null
++++ b/web/src/lib/accountErrors.ts
+@@ -0,0 +1,21 @@
++import i18n from '@/i18n'
++import { ApiError } from './api'
++import type { UsageQuotaResetResponse } from './types'
++
++export function accountActionError(error: unknown, fallback: string): string {
++  if (!(error instanceof ApiError)) {
++    return `${i18n.t('account_errors.unconfirmed')}: ${fallback} ${i18n.t('account_errors.connection')}`
++  }
++  const source = error.errorSource === 'unknown' ? 'unconfirmed' : ['keeper', 'cpa', 'provider'].includes(error.errorSource ?? '') ? error.errorSource! : 'keeper'
++  const validation = error.message === 'auth_index and UUID request_id are required' ? error.message : undefined
++  const reason = error.errorReason || validation || fallback
++  return `${i18n.t(`account_errors.${source}`)}: ${reason} (HTTP ${error.errorStatus || error.status})`
++}
++
++export function resetResultError(result: UsageQuotaResetResponse): string {
++  const source = result.error_source && ['keeper', 'cpa', 'provider'].includes(result.error_source) ? result.error_source : 'unconfirmed'
++  const code = result.code || 'unknown'
++  const reason = result.error_reason || i18n.t(`account_errors.reset_${code}`, { defaultValue: i18n.t('account_errors.reset_unknown') })
++  const status = result.error_status ? ` (HTTP ${result.error_status})` : ''
++  return `${i18n.t(`account_errors.${source}`)}: ${reason}${status} ${i18n.t('account_errors.reset_retry')}`
++}
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index 537d14b..f59ee91 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -25,6 +25,9 @@ export async function fetchKeyQuota(signal?: AbortSignal): Promise<{accounts: Vi
+ 
+ export class ApiError extends Error {
+   status: number
++  errorSource?: string
++  errorReason?: string
++  errorStatus?: number
+   code?: string
+   // 价格表单按字段路径标红，分支冲突用 branch_ids 指明双方。
+   fields?: PricingFieldError[]
+@@ -150,23 +153,29 @@ export function apiPath(path: string): string {
+   return `${normalizeBasePath(window.__APP_BASE_PATH__)}/api/v1${normalizedPath}`
+ }
+ 
+-async function parseApiError(response: Response, fallback: string): Promise<never> {
++export async function parseApiError(response: Response, fallback: string): Promise<never> {
+   let message = fallback
+   let code: string | undefined
+   let fields: PricingFieldError[] | undefined
++  let diagnostics: { error_source?: string; error_reason?: string; error_status?: number } = {}
+   try {
+-    const payload = await response.json() as Partial<PricingErrorResponse> & { error?: string }
++    const payload = await response.json() as Partial<PricingErrorResponse> & { error?: string; error_source?: string; error_reason?: string; error_status?: number }
+     if (payload.error) {
+       message = payload.error
+     } else if (payload.message) {
+       message = payload.message
+     }
++    diagnostics = payload
+     code = payload.code
+     fields = Array.isArray(payload.fields) ? payload.fields : undefined
+   } catch {
+     // ignore invalid error payloads
+   }
+-  throw new ApiError(message, response.status, code, fields)
++  const error = new ApiError(message, response.status, code, fields)
++  error.errorSource = diagnostics.error_source
++  error.errorReason = diagnostics.error_reason
++  error.errorStatus = diagnostics.error_status
++  throw error
+ }
+ 
+ function isMutatingMethod(method: string | undefined): boolean {
+diff --git a/web/src/lib/test/accountErrors.test.ts b/web/src/lib/test/accountErrors.test.ts
+new file mode 100644
+index 0000000..9b1a054
+--- /dev/null
++++ b/web/src/lib/test/accountErrors.test.ts
+@@ -0,0 +1,29 @@
++import { describe, expect, it, vi } from 'vitest'
++import { ApiError } from '../api'
++import { accountActionError, resetResultError } from '../accountErrors'
++import { runQuotaResetForAuthIndex } from '@/components/usage/credentials/useCredentialsTabData'
++
++describe('account error provenance', () => {
++  it('distinguishes app validation from upstream authentication', () => {
++    expect(accountActionError(new ApiError('auth_index and UUID request_id are required', 400), 'Reset failed')).toContain('Keeper app: auth_index and UUID request_id are required')
++    const error = new ApiError('quota_reset_failed', 502)
++    error.errorSource = 'provider'
++    error.errorStatus = 401
++    error.errorReason = 'Account authentication was rejected.'
++    expect(accountActionError(error, 'Reset failed')).toBe('Upstream provider: Account authentication was rejected. (HTTP 401)')
++  })
++
++  it('does not guess an upstream cause or expose raw network errors', () => {
++    expect(accountActionError(new Error('synthetic-secret-token'), 'Save failed')).toContain('Source unconfirmed: Save failed')
++    expect(accountActionError(new Error('synthetic-secret-token'), 'Save failed')).not.toContain('synthetic-secret-token')
++  })
++
++  it.each(['unknown', 'unavailable', 'auth_error', 'rate_limited', 'not_limited', 'cooldown', 'ineligible'])('never reports %s as a successful reset', async (code) => {
++    const refresh = vi.fn()
++    const result = { authIndex: 'synthetic', code, error_source: 'provider' }
++    const outcome = await runQuotaResetForAuthIndex('synthetic', { resetUsageQuota: vi.fn().mockResolvedValue(result), refreshQuotaForAuthIndex: refresh })
++    expect(outcome.kind).toBe('warning')
++    expect(refresh).not.toHaveBeenCalled()
++    expect(resetResultError(result)).toContain('Upstream provider:')
++  })
++})
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 24f0fa2..bc426e7 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -570,6 +570,9 @@ export interface UsageQuotaUpstreamResponse {
+ }
+ 
+ export interface UsageQuotaResetResponse {
++	error_source?: string
++	error_reason?: string
++	error_status?: number
+   authIndex: string
+   code?: string
+   windowsReset?: number

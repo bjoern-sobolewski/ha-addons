@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.27
+
+- Identify whether reset failures originate in CPA or the upstream provider, with safe HTTP status and recovery guidance.
+- Preserve uncertain reset results and the existing same-request retry journal without exposing raw provider errors.
+
 ## 0.1.26
 
 - Count each WebSocket output event once at the downstream writer, preserving accurate activity counters through the shared HTTP execution path.

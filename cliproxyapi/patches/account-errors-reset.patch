@@ -1,0 +1,266 @@
+diff --git a/internal/api/handlers/management/quota_reset.go b/internal/api/handlers/management/quota_reset.go
+index 4cf818d..04a06db 100644
+--- a/internal/api/handlers/management/quota_reset.go
++++ b/internal/api/handlers/management/quota_reset.go
+@@ -28,6 +28,9 @@ type quotaResetRequest struct {
+ 	OrganizationID string `json:"organization_id,omitempty"`
+ }
+ type quotaResetResult struct {
++	ErrorSource    string `json:"error_source,omitempty"`
++	ErrorStatus    int    `json:"error_status,omitempty"`
++	ErrorReason    string `json:"error_reason,omitempty"`
+ 	Code           string `json:"code"`
+ 	WindowsReset   int    `json:"windowsReset,omitempty"`
+ 	RecoveryFailed bool   `json:"recoveryFailed,omitempty"`
+@@ -54,11 +57,36 @@ func resetIdentity(a *coreauth.Auth) string {
+ 	return hex.EncodeToString(sum[:])
+ }
+ 
++type quotaResetCallError struct {
++	source string
++	status int
++	reason string
++}
++
++func (e *quotaResetCallError) Error() string { return e.reason }
++
++func resetCallFailure(status int, err error) *quotaResetCallError {
++	var failure *quotaResetCallError
++	if errors.As(err, &failure) {
++		return failure
++	}
++	if err != nil {
++		return &quotaResetCallError{source: "provider", reason: "The provider response could not be read. The result is unconfirmed."}
++	}
++	if status < 200 || status >= 300 {
++		return &quotaResetCallError{source: "provider", status: status, reason: "The provider rejected the reset request."}
++	}
++	return nil
++}
++func failedReset(code string, failure *quotaResetCallError) quotaResetResult {
++	return quotaResetResult{Code: code, ErrorSource: failure.source, ErrorStatus: failure.status, ErrorReason: failure.reason}
++}
++
+ // No caller-controlled URLs or headers reach the provider from this endpoint.
+ func (h *Handler) resetProviderCall(ctx context.Context, a *coreauth.Auth, method, path string, body any) (int, []byte, error) {
+ 	token, err := h.resolveTokenForAuth(ctx, a, "")
+ 	if err != nil || token == "" {
+-		return 0, nil, errors.New("account authentication unavailable")
++		return 0, nil, &quotaResetCallError{source: "cpa", reason: "CPA could not resolve the account authentication. Reconnect the account."}
+ 	}
+ 	origin := "https://chatgpt.com"
+ 	if a.Provider == "claude" {
+@@ -100,7 +128,7 @@ func (h *Handler) resetProviderCall(ctx context.Context, a *coreauth.Auth, metho
+ 	}
+ 	resp, err := doer.Do(req)
+ 	if err != nil {
+-		return 0, nil, errors.New("provider request failed")
++		return 0, nil, &quotaResetCallError{source: "provider", reason: "CPA could not reach the provider. The reset result is unconfirmed; refresh before retrying."}
+ 	}
+ 	defer resp.Body.Close()
+ 	data, err = io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+@@ -111,7 +139,10 @@ func (h *Handler) quotaResetOptions(ctx context.Context, a *coreauth.Auth) (quot
+ 	if a.Provider == "codex" {
+ 		code, data, err := h.resetProviderCall(ctx, a, "GET", "/backend-api/wham/rate-limit-reset-credits", nil)
+ 		if err != nil || code < 200 || code >= 300 || !json.Valid(data) {
+-			return options, errors.New("reset credits unavailable")
++			if failure := resetCallFailure(code, err); failure != nil {
++				return options, failure
++			}
++			return options, &quotaResetCallError{source: "provider", status: code, reason: "The provider returned invalid reset information."}
+ 		}
+ 		options.Credits = data
+ 		return options, nil
+@@ -121,7 +152,10 @@ func (h *Handler) quotaResetOptions(ctx context.Context, a *coreauth.Auth) (quot
+ 	}
+ 	code, data, err := h.resetProviderCall(ctx, a, "GET", "/api/oauth/usage?cedar_ember=1&skip_spend=1", nil)
+ 	if err != nil || code < 200 || code >= 300 {
+-		return options, errors.New("reset grants unavailable")
++		if failure := resetCallFailure(code, err); failure != nil {
++			return options, failure
++		}
++		return options, &quotaResetCallError{source: "provider", status: code, reason: "The provider returned invalid reset information."}
+ 	}
+ 	var usage struct {
+ 		Grants json.RawMessage `json:"cedar_ember"`
+@@ -144,7 +178,10 @@ func (h *Handler) quotaResetOptions(ctx context.Context, a *coreauth.Auth) (quot
+ 		} `json:"organization"`
+ 	}
+ 	if err != nil || code < 200 || code >= 300 || json.Unmarshal(data, &profile) != nil || !claudeUUIDPattern.MatchString(profile.Organization.UUID) {
+-		return options, errors.New("reset organization unavailable")
++		if failure := resetCallFailure(code, err); failure != nil {
++			return options, failure
++		}
++		return options, &quotaResetCallError{source: "provider", status: code, reason: "The provider returned invalid reset information."}
+ 	}
+ 	options.OrganizationID = strings.ToLower(profile.Organization.UUID)
+ 	// The popup offers only currently usable grants. Keep original usage for quota display.
+@@ -169,7 +206,8 @@ func (h *Handler) GetQuotaResetOptions(c *gin.Context) {
+ 	}
+ 	options, err := h.quotaResetOptions(c.Request.Context(), a)
+ 	if err != nil {
+-		c.JSON(502, gin.H{"error": err.Error()})
++		failure := resetCallFailure(0, err)
++		c.JSON(502, gin.H{"error": "Reset information could not be loaded", "error_source": failure.source, "error_status": failure.status, "error_reason": failure.reason})
+ 		return
+ 	}
+ 	c.JSON(200, options)
+@@ -333,12 +371,12 @@ func (h *Handler) executeQuotaReset(ctx context.Context, a *coreauth.Auth, req q
+ 	body := map[string]string{"redeem_request_id": req.RequestID}
+ 	if req.Provider == "claude" {
+ 		if !claudeGrantIDPattern.MatchString(req.GrantID) || !claudeUUIDPattern.MatchString(req.OrganizationID) {
+-			return quotaResetResult{Code: "unavailable"}
++			return failedReset("unavailable", &quotaResetCallError{source: "cpa", reason: "The reset grant or organization is invalid. Reload the reset options."})
+ 		}
+ 		if !retry {
+ 			options, err := h.quotaResetOptions(ctx, a)
+ 			if err != nil {
+-				return quotaResetResult{Code: "unavailable"}
++				return failedReset("unavailable", resetCallFailure(0, err))
+ 			}
+ 			valid := false
+ 			for _, grant := range options.Status.Grants {
+@@ -347,7 +385,7 @@ func (h *Handler) executeQuotaReset(ctx context.Context, a *coreauth.Auth, req q
+ 				}
+ 			}
+ 			if !valid || options.OrganizationID != strings.ToLower(req.OrganizationID) {
+-				return quotaResetResult{Code: "ineligible"}
++				return failedReset("ineligible", &quotaResetCallError{source: "provider", reason: "The selected reset grant is no longer eligible. Reload the reset options."})
+ 			}
+ 		}
+ 		path = "/api/organizations/" + strings.ToLower(req.OrganizationID) + "/reset_rate_limits"
+@@ -355,8 +393,11 @@ func (h *Handler) executeQuotaReset(ctx context.Context, a *coreauth.Auth, req q
+ 	} else {
+ 		if !retry {
+ 			options, err := h.quotaResetOptions(ctx, a)
+-			if err != nil || !codexResetEligible(options.Credits, req.CreditID, time.Now()) {
+-				return quotaResetResult{Code: "unavailable"}
++			if err != nil {
++				return failedReset("unavailable", resetCallFailure(0, err))
++			}
++			if !codexResetEligible(options.Credits, req.CreditID, time.Now()) {
++				return failedReset("unavailable", &quotaResetCallError{source: "provider", reason: "No usable reset credit is available. Refresh the account quota."})
+ 			}
+ 		}
+ 		if req.CreditID != "" {
+@@ -365,17 +406,22 @@ func (h *Handler) executeQuotaReset(ctx context.Context, a *coreauth.Auth, req q
+ 	}
+ 	current := h.authByIndex(req.AuthIndex)
+ 	if current == nil || resetIdentity(current) != resetIdentity(a) {
+-		return quotaResetResult{Code: "unavailable"}
++		return failedReset("unavailable", &quotaResetCallError{source: "cpa", reason: "The account changed before the reset. Reload the account list."})
+ 	}
+ 	code, data, err := h.resetProviderCall(ctx, current, "POST", path, body)
+-	if err != nil {
+-		return result
++	if failure := resetCallFailure(code, err); failure != nil {
++		result = failedReset("unknown", failure)
++		if err != nil {
++			return result
++		}
+ 	}
+ 	if code == 429 {
+-		return quotaResetResult{Code: "rate_limited"}
++		result.Code = "rate_limited"
++		return result
+ 	}
+ 	if code == 401 || code == 403 {
+-		return quotaResetResult{Code: "auth_error"}
++		result.Code = "auth_error"
++		return result
+ 	}
+ 	if code < 200 || code >= 300 {
+ 		return result
+@@ -386,7 +432,7 @@ func (h *Handler) executeQuotaReset(ctx context.Context, a *coreauth.Auth, req q
+ 		WindowsReset int    `json:"windows_reset"`
+ 	}
+ 	if json.Unmarshal(data, &response) != nil {
+-		return result
++		return failedReset("unknown", &quotaResetCallError{source: "provider", status: code, reason: "The provider returned an unreadable reset result. A credit may have been consumed."})
+ 	}
+ 	value := response.Code
+ 	if req.Provider == "claude" {
+@@ -397,6 +443,13 @@ func (h *Handler) executeQuotaReset(ctx context.Context, a *coreauth.Auth, req q
+ 		result.Code = value
+ 	}
+ 	result.WindowsReset = response.WindowsReset
++	if result.Code != "reset" && result.Code != "already_redeemed" && result.Code != "already_used" {
++		result.ErrorSource = "provider"
++		result.ErrorReason = ""
++		if result.Code == "unknown" {
++			result.ErrorReason = "The provider returned an unrecognized reset result. A credit may have been consumed."
++		}
++	}
+ 	if result.Code == "reset" || result.Code == "already_redeemed" || result.Code == "already_used" {
+ 		current = h.authByIndex(req.AuthIndex)
+ 		if current == nil || resetIdentity(current) != resetIdentity(a) || h.authManager == nil {
+diff --git a/internal/api/handlers/management/quota_reset_diagnostics_test.go b/internal/api/handlers/management/quota_reset_diagnostics_test.go
+new file mode 100644
+index 0000000..76b004b
+--- /dev/null
++++ b/internal/api/handlers/management/quota_reset_diagnostics_test.go
+@@ -0,0 +1,64 @@
++package management
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"strings"
++	"testing"
++)
++
++func TestSharedResetFailureProvenanceAndSafeDiagnostics(t *testing.T) {
++	for _, test := range []struct {
++		name           string
++		status         int
++		body           string
++		transportError bool
++		code           string
++	}{
++		{"authentication", 401, "synthetic-secret-token", false, "auth_error"},
++		{"rate limit", 429, "synthetic-secret-token", false, "rate_limited"},
++		{"provider unavailable", 503, "synthetic-secret-token", false, "unknown"},
++		{"transport", 0, "", true, "unknown"},
++		{"malformed result", 200, "synthetic-secret-token", false, "unknown"},
++		{"provider business result", 200, `{"code":"not_limited"}`, false, "not_limited"},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			h, _ := resetFixture(t, "codex")
++			h.resetHTTPClient = resetDoer(func(request *http.Request) (*http.Response, error) {
++				if request.Method == "GET" {
++					return resetReply(resetCredits), nil
++				}
++				if test.transportError {
++					return nil, errors.New("synthetic-secret-token")
++				}
++				response := resetReply(test.body)
++				response.StatusCode = test.status
++				return response, nil
++			})
++			response := resetRequest(h, resetID, "codex", "")
++			var result quotaResetResult
++			if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &result) != nil || result.Code != test.code || result.ErrorSource != "provider" {
++				t.Fatalf("wrong failure provenance: %d %s", response.Code, response.Body.String())
++			}
++			if strings.Contains(response.Body.String(), "synthetic-secret-token") {
++				t.Fatal("raw error leaked")
++			}
++		})
++	}
++}
++
++func TestSharedResetOptionsIdentifyProviderFailure(t *testing.T) {
++	h, account := resetFixture(t, "codex")
++	h.resetHTTPClient = resetDoer(func(*http.Request) (*http.Response, error) {
++		response := resetReply("synthetic-secret-token")
++		response.StatusCode = 403
++		return response, nil
++	})
++	_, err := h.quotaResetOptions(context.Background(), account)
++	var failure *quotaResetCallError
++	if !errors.As(err, &failure) || failure.source != "provider" || failure.status != 403 || strings.Contains(failure.Error(), "synthetic-secret-token") {
++		t.Fatalf("provider options failure was lost: %v", err)
++	}
++}

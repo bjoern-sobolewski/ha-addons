@@ -1,5 +1,5 @@
 diff --git a/internal/api/errors.go b/internal/api/errors.go
-index 4726ae2..fb6cc07 100644
+index 4726ae2..2347767 100644
 --- a/internal/api/errors.go
 +++ b/internal/api/errors.go
 @@ -1,6 +1,7 @@
@@ -10,13 +10,15 @@ index 4726ae2..fb6cc07 100644
  	"net/http"
  
  	"github.com/gin-gonic/gin"
-@@ -11,5 +12,7 @@ func writeInternalError(c *gin.Context, message string, err error) {
+@@ -11,5 +12,9 @@ func writeInternalError(c *gin.Context, message string, err error) {
  	if err != nil {
  		logrus.WithError(err).Error(message)
  	}
 -	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 +	details := operationerror.Describe(err)
-+	if err == nil { details = operationerror.Details{Source: "keeper", Reason: "This app operation is not configured."} }
++	if err == nil {
++		details = operationerror.Details{Source: "keeper", Reason: "This app operation is not configured."}
++	}
 +	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error", "error_source": details.Source, "error_status": details.Status, "error_reason": message + ". " + details.Reason})
  }
 diff --git a/internal/api/quota.go b/internal/api/quota.go
@@ -84,10 +86,10 @@ index 83e8de3..35e0e2a 100644
  		payload["detail"] = err.Error()
 diff --git a/internal/api/test/account_error_source_test.go b/internal/api/test/account_error_source_test.go
 new file mode 100644
-index 0000000..8e36389
+index 0000000..c5415fb
 --- /dev/null
 +++ b/internal/api/test/account_error_source_test.go
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,67 @@
 +package test
 +
 +import (
@@ -106,14 +108,19 @@ index 0000000..8e36389
 +)
 +
 +func TestAccountErrorsPreserveCPAAndProviderOriginWithoutRawSecrets(t *testing.T) {
-+	for _, test := range []struct { name, upstream, source string; status int }{
++	for _, test := range []struct {
++		name, upstream, source string
++		status                 int
++	}{
 +		{"CPA authentication", `{"error":"synthetic-secret-token"}`, "cpa", 401},
 +		{"provider authentication", `{"error_source":"provider","error_status":403,"error_reason":"synthetic-secret-token"}`, "provider", 403},
 +	} {
 +		t.Run(test.name, func(t *testing.T) {
 +			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 +				status := http.StatusBadGateway
-+				if test.source == "cpa" { status = test.status }
++				if test.source == "cpa" {
++					status = test.status
++				}
 +				w.WriteHeader(status)
 +				_, _ = w.Write([]byte(test.upstream))
 +			}))
@@ -123,12 +130,20 @@ index 0000000..8e36389
 +			provider := &quotaProviderStub{resetErr: err}
 +			router := NewRouter(nil, nil, nil, nil, AuthConfig{}, nil, "", OptionalProviders{Quota: provider})
 +			response := serveCredentialMutation(router, http.MethodPost, "/api/v1/quota/reset", `{"auth_index":"synthetic","request_id":"11111111-1111-4111-8111-111111111111"}`)
-+			var result struct { Source string `json:"error_source"`; Reason string `json:"error_reason"`; Status int `json:"error_status"` }
++			var result struct {
++				Source string `json:"error_source"`
++				Reason string `json:"error_reason"`
++				Status int    `json:"error_status"`
++			}
 +			if json.Unmarshal(response.Body.Bytes(), &result) != nil || result.Source != test.source || result.Reason == "" {
 +				t.Fatalf("failure source lost: %d %s", response.Code, response.Body.String())
 +			}
-+			if test.source == "provider" && result.Status != test.status { t.Fatalf("upstream status lost: %+v", result) }
-+			if strings.Contains(response.Body.String(), "synthetic-secret-token") { t.Fatal("raw provider or CPA error exposed") }
++			if test.source == "provider" && result.Status != test.status {
++				t.Fatalf("upstream status lost: %+v", result)
++			}
++			if strings.Contains(response.Body.String(), "synthetic-secret-token") {
++				t.Fatal("raw provider or CPA error exposed")
++			}
 +		})
 +	}
 +}

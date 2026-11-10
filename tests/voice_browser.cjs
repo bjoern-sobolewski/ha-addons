@@ -39,6 +39,7 @@ const http = require('node:http');
       microphone.getTracks().forEach(track => peer.addTrack(track, microphone));
       const channel = peer.createDataChannel('oai-events');
       const events = []; let errorCode = null; let location = null; let setupStatus = null;
+      const outcome = {};
       channel.onmessage = ({data}) => {
         try {
           const event = JSON.parse(data); events.push(event.type);
@@ -61,7 +62,7 @@ const http = require('node:http');
             audio: {output: {voice: 'marin'}}, delegation: {type: 'client'}},
         })});
         setupStatus = response.status; location = response.headers.get('location');
-        if (!response.ok) return {setupStatus, mediaVerified: false};
+        if (!response.ok) return Object.assign(outcome, {setupStatus, mediaVerified: false});
         await peer.setRemoteDescription({type: 'answer', sdp: await response.text()});
         await new Promise(resolve => setTimeout(resolve, 16000));
         let receivedBytes = 0, sentBytes = 0;
@@ -69,15 +70,19 @@ const http = require('node:http');
           if (stat.type === 'inbound-rtp' && stat.kind === 'audio') receivedBytes += stat.bytesReceived || 0;
           if (stat.type === 'outbound-rtp' && stat.kind === 'audio') sentBytes += stat.bytesSent || 0;
         });
-        return {setupStatus, state: peer.connectionState, channel: channel.readyState, sentBytes, receivedBytes,
-          events: [...new Set(events)], errorCode, mediaVerified: sentBytes > 0 && receivedBytes > 0};
+        return Object.assign(outcome, {setupStatus, hasCallIdentifier: Boolean(location), state: peer.connectionState,
+          channel: channel.readyState, sentBytes, receivedBytes,
+          events: [...new Set(events)], errorCode, mediaVerified: sentBytes > 0 && receivedBytes > 0});
       } finally {
         if (channel.readyState === 'open') channel.send(JSON.stringify({type: 'session.close'}));
         channel.close(); microphone.getTracks().forEach(track => track.stop()); peer.close();
+        outcome.localStopped = microphone.getTracks().every(track => track.readyState === 'ended') && peer.connectionState === 'closed';
         if (location) {
           const callID = location.split('/').pop();
           const stopped = await fetch('/v1/realtime/calls/' + encodeURIComponent(callID) + '/hangup', {method: 'POST', body: '{}'});
-          console.log('hangup status', stopped.status);
+          outcome.hangupStatus = stopped.status;
+          const repeated = await fetch('/v1/realtime/calls/' + encodeURIComponent(callID) + '/hangup', {method: 'POST', body: '{}'});
+          outcome.repeatedHangupStatus = repeated.status;
         }
       }
     });

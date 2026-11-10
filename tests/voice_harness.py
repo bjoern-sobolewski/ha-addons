@@ -54,7 +54,7 @@ def main():
         source.connect(destination); source.start(audioContext.currentTime + delay);
       }
       const microphone = destination.stream;''')
-        script = script.replace('peer.close();', 'peer.close(); await audioContext.close();')
+        script = script.replace('peer.close();', "peer.close(); if(audioContext.state !== 'closed') await audioContext.close();")
     html = ('<!doctype html><meta charset="utf-8"><title>Native voice verification</title>'
             '<h1>Native voice verification</h1><p>This diagnostic has no ACP tools or action permissions.</p>'
             '<button id="start">Start bounded test</button> <button id="stop">Stop microphone and audio</button>'

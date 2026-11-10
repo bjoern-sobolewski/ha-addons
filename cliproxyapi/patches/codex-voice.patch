@@ -907,10 +907,10 @@ index c7cf51ad..2bd9f48a 100644
  		t.Fatalf("refresh/http calls = %d/%d, want 0/1", executor.refreshCalls.Load(), executor.httpCalls.Load())
 diff --git a/internal/client/codex/live/shutdown_test.go b/internal/client/codex/live/shutdown_test.go
 new file mode 100644
-index 00000000..25906df7
+index 00000000..bb8da59d
 --- /dev/null
 +++ b/internal/client/codex/live/shutdown_test.go
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,109 @@
 +package live
 +
 +import (
@@ -935,6 +935,9 @@ index 00000000..25906df7
 +		}
 +		defer connection.Close()
 +		defer close(upstreamStopped)
++		if r.Header.Get("OpenAI-Alpha") != "quicksilver=v2" {
++			t.Error("native live handshake omitted required alpha header")
++		}
 +		if r.URL.Path != "/v1/live" {
 +			t.Error("native model used incorrect upstream route")
 +		}
@@ -1133,7 +1136,7 @@ index 7dc7d02b..babbfbc4 100644
  		return dialer
  	}
 diff --git a/internal/client/codex/live/websocket.go b/internal/client/codex/live/websocket.go
-index a1dd42b2..ac946925 100644
+index a1dd42b2..eec67eac 100644
 --- a/internal/client/codex/live/websocket.go
 +++ b/internal/client/codex/live/websocket.go
 @@ -41,6 +41,16 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
@@ -1153,7 +1156,17 @@ index a1dd42b2..ac946925 100644
  	requestedModel := strings.TrimSpace(c.Query("model"))
  	if requestedModel == "" {
  		requestedModel = defaultStandardRealtimeModel
-@@ -150,21 +160,10 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
+@@ -104,6 +114,9 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
+ 			return nil, nil, errRequest
+ 		}
+ 		request.Header = directRealtimeHeaders(c.Request.Header)
++		if requestedModel == defaultLiveModel {
++			request.Header.Set("OpenAI-Alpha", "quicksilver=v2")
++		}
+ 		setAccountHeader(request.Header, current)
+ 		if errPrepare := h.authManager.PrepareHttpRequest(ctx, current, request); errPrepare != nil {
+ 			return nil, nil, errPrepare
+@@ -150,21 +163,10 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
  				diagnosticBody = []byte(errDial.Error())
  			}
  			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, diagnosticBody)
@@ -1177,7 +1190,7 @@ index a1dd42b2..ac946925 100644
  		helpDetails := "Codex Realtime WebSocket upstream unavailable"
  		helpType := "api_error"
  		if status == http.StatusNotFound || status == http.StatusNotImplemented {
-@@ -185,6 +184,8 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
+@@ -185,6 +187,8 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
  	closeHandshakeBody(handshakeResponse, "direct websocket handshake")
  	closeUpstream := websocketCloseFunc("upstream", upstream)
  	defer func() { _ = closeUpstream() }()
@@ -1186,7 +1199,7 @@ index a1dd42b2..ac946925 100644
  	if len(tokenSession) > 0 {
  		updateSession, errSession := realtimeSessionUpdate(tokenSession)
  		if errSession != nil {
-@@ -226,6 +227,8 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
+@@ -226,6 +230,8 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
  	}
  	closeDownstream := websocketCloseFunc("downstream", downstream)
  	defer func() { _ = closeDownstream() }()
@@ -1195,7 +1208,7 @@ index a1dd42b2..ac946925 100644
  	if selection != nil {
  		if errBind := selection.Bind(closeDownstream); errBind != nil {
  			return
-@@ -252,6 +255,9 @@ func realtimeSessionUpdate(session json.RawMessage) (json.RawMessage, error) {
+@@ -252,6 +258,9 @@ func realtimeSessionUpdate(session json.RawMessage) (json.RawMessage, error) {
  func (h *Handler) directRealtimeURL(model string) string {
  	values := make(url.Values)
  	values.Set("model", strings.TrimSpace(model))

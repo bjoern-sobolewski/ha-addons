@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.29
+
+- Retain the required native live WebSocket handshake header while keeping standard Realtime transport behavior unchanged.
+
 ## 0.1.28
 
 - Add multipart recorded-audio dictation through existing Codex OAuth, including

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.28
+
+- Add multipart recorded-audio dictation through existing Codex OAuth, including
+  validated browser WebM/Opus, bounded decoding and sanitized errors.
+- Add the explicit `codex-speech` selector for native AAC read aloud while
+  preserving existing provider speech routing.
+- Bound live sessions, close active sockets on shutdown, preserve absolute
+  session expiry across sideband reconnects, and protect voice body privacy.
+- Document ACP integration, native voice events, subscription limitations and
+  the distinction between successful signaling and verified audio.
+
 ## 0.1.27
 
 - Identify whether reset failures originate in CPA or the upstream provider, with safe HTTP status and recovery guidance.

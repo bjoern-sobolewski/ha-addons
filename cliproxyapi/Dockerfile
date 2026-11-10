@@ -51,16 +51,22 @@ RUN git apply --check /tmp/request-previews.patch && git apply /tmp/request-prev
 COPY patches/account-errors-reset.patch /tmp/account-errors-reset.patch
 RUN git apply --check /tmp/account-errors-reset.patch && git apply /tmp/account-errors-reset.patch
 
+COPY patches/codex-voice.patch /tmp/codex-voice.patch
+RUN git apply --check /tmp/codex-voice.patch && git apply /tmp/codex-voice.patch
+
 FROM golang:1.26-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./
 RUN go mod download
 COPY --from=source /src/ ./
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/client/codex/live ./internal/api/middleware
+RUN --mount=type=cache,target=/root/.cache/go-build go vet ./internal/client/codex/live
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/promptpreview ./internal/routinglive ./internal/sessionrebalance ./internal/live ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/api/handlers/openai
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api ./sdk/api/handlers -run 'TestManagementV8|TestRoutingActivity'
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.11" -o /out/CLIProxyAPI ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.12" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -89,7 +95,7 @@ RUN npx --yes --package=bun@1.4.3 bun run verify
 FROM eceasy/cli-proxy-api:v8.0.51@sha256:15d13889e1a39a688be306dfbf2f6cf9003e99cd913b5070fa463f8ab2aa0031
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-yaml nginx-light \
+    && apt-get install -y --no-install-recommends python3 python3-yaml nginx-light ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /out/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 COPY --from=panel-builder /src/dist/index.html /opt/ha/static/management.html
@@ -98,7 +104,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.27
+ARG BUILD_VERSION=0.1.28
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

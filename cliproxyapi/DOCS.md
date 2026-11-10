@@ -104,3 +104,8 @@ Keeper offers **Save priority**, which preserves existing sessions, and **Save &
 The administrator account pages show progress such as “Priority saved · codex · 5 sessions rebalanced · 2 waiting” through the existing live stream. Progress counts retired WebSocket sessions; clearing HTTP affinity takes effect on their next selection. Pending tools, queued requests, accepted steering and ambiguous protocol state can keep a session waiting until completion or client disconnect; CPA does not force a timeout that would interrupt them. A failed rebalance is reported separately from an already saved priority. Progress history is in memory and resets on server restart.
 
 The installed Codex app-server was tested end to end with two synthetic accounts: a pending dynamic tool finished on its original account, the socket retired, and a subsequent turn replayed full conversation and tool context on the eligible account. Other clients must support reconnect/full-context recovery. This does not change the existing rule that a WebSocket-capable account can outrank a higher-priority HTTP-only account.
+
+## Voice integration
+
+See [VOICE.md](VOICE.md) for dictation, Codex AAC speech, native live voice,
+resource limits, capability evidence requirements, and separate ACP work.

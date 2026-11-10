@@ -93,6 +93,8 @@ an upstream-requested action directly in a browser or in this proxy.
 WebRTC carries Opus audio and handles playback; it does not carry a WebM file.
 The native WebSocket variant uses base64 mono PCM16 at 24 kHz:
 `GET /v1/realtime?model=gpt-live-1-codex` selects the native `/v1/live` upstream.
+The proxy supplies `OpenAI-Alpha: quicksilver=v2` for this native WebSocket
+handshake; standard Realtime model transports keep their existing headers.
 Client messages include `session.update`, `input_audio.append`,
 `session.context.append`, `delegation.context.append`, and `session.close`.
 The standard Realtime model selectors retain their existing transport.

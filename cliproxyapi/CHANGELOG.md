@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.30
+
+- Preserve Responses output-token ceilings and automatic compaction settings on Codex routes, including the legacy completion-token alias.
+- Report omitted Codex request controls using safe field names, with HTTP/WebSocket continuation and fallback regression coverage.
+
 ## 0.1.29
 
 - Retain the required native live WebSocket handshake header while keeping standard Realtime transport behavior unchanged.

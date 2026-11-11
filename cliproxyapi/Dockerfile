@@ -54,19 +54,22 @@ RUN git apply --check /tmp/account-errors-reset.patch && git apply /tmp/account-
 COPY patches/codex-voice.patch /tmp/codex-voice.patch
 RUN git apply --check /tmp/codex-voice.patch && git apply /tmp/codex-voice.patch
 
+COPY patches/codex-responses-controls.patch /tmp/codex-responses-controls.patch
+RUN git apply --check /tmp/codex-responses-controls.patch && git apply /tmp/codex-responses-controls.patch
+
 FROM golang:1.26-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY --from=source /src/go.mod /src/go.sum ./
 RUN go mod download
 COPY --from=source /src/ ./
-RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/client/codex/live ./internal/api/middleware
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/client/codex/live ./internal/api/middleware ./internal/translator/codex/openai/responses
 RUN --mount=type=cache,target=/root/.cache/go-build go vet ./internal/client/codex/live
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/promptpreview ./internal/routinglive ./internal/sessionrebalance ./internal/live ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/api/handlers/openai
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api ./sdk/api/handlers -run 'TestManagementV8|TestRoutingActivity'
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.13" -o /out/CLIProxyAPI ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.14" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -104,7 +107,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.29
+ARG BUILD_VERSION=0.1.30
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

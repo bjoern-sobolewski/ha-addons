@@ -22,6 +22,8 @@ def mock():
         body = await request.json()
         assert 'previous_response_id' not in body
         assert body['service_tier'] == 'priority'
+        assert body['max_output_tokens'] == 64
+        assert body['context_management'] == [{'type': 'compaction', 'compact_threshold': 16384}]
         counts['http'] += 1
         n = counts['http']
         items = body['input']
@@ -97,7 +99,9 @@ def main():
             eventually(lambda: request(api + '/v1/models', headers)[0] == 200)
 
             def turn(ws, **fields):
-                ws.send(json.dumps({'type': 'response.create', 'service_tier': 'priority', **fields}))
+                ws.send(json.dumps({'type': 'response.create', 'service_tier': 'priority',
+                                    'max_output_tokens': 64,
+                                    'context_management': [{'type': 'compaction', 'compact_threshold': 16384}], **fields}))
                 while True:
                     event = json.loads(ws.recv(timeout=30))
                     assert event['type'] not in ('error', 'response.failed'), 'upstream request failed'

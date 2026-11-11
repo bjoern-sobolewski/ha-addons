@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.31
+
+- Preserve explicit empty token-cap receipts and upstream usage detail availability on Codex Responses routes.
+- Retain sanitized failed-response accounting receipts without repeating completed failed generations.
+- Finish cancelled HTTP/SSE/WebSocket turns consistently and release same-socket continuation state.
+
 ## 0.1.30
 
 - Preserve Responses output-token ceilings and automatic compaction settings on Codex routes, including the legacy completion-token alias.

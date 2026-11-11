@@ -52,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [smoke, codex_compatibility_flow, oversized_flow, quota_flow, weekly_quota_flow, migration_flow, live_routing, email_privacy, voice_flow]
+        suite: [smoke, codex_compatibility_flow, codex_terminal_flow, oversized_flow, quota_flow, weekly_quota_flow, migration_flow, live_routing, email_privacy, voice_flow]
     env:
       PYTHONUNBUFFERED: '1'
       CPA_TEST_IMAGE: ha-cliproxyapi-ci:local
@@ -85,7 +85,11 @@ jobs:
       - name: Run integration suite
         env:
           SUITE: ${{ matrix.suite }}
-        run: python "tests/$SUITE.py"
+        run: |
+          python "tests/$SUITE.py"
+          if [ "$SUITE" = codex_terminal_flow ]; then
+            python tests/codex_terminal_flow.py --duplex
+          fi
 
   # Keep a single required-check name, including when a prerequisite fails.
   validate:

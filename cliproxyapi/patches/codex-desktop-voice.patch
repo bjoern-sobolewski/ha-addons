@@ -1,0 +1,506 @@
+diff --git a/internal/client/codex/live/sideband.go b/internal/client/codex/live/sideband.go
+--- a/internal/client/codex/live/sideband.go
++++ b/internal/client/codex/live/sideband.go
+@@ -71,10 +71,12 @@
+ }
+ 
+ type sessionStore struct {
+-	mu       sync.Mutex
+-	next     uint64
+-	lifetime time.Duration
+-	sessions map[string]*storedSession
++	mu                   sync.Mutex
++	next                 uint64
++	lifetime             time.Duration
++	sessions             map[string]*storedSession
++	knownCalls           map[string]time.Time
++	adoptionBlockedUntil time.Time
+ }
+ 
+ type sessionClaim int
+@@ -111,6 +113,7 @@
+ 		s.expire(callID, session.token)
+ 	})
+ 	s.sessions[callID] = entry
++	s.rememberCallLocked(callID)
+ 	s.mu.Unlock()
+ 
+ 	if previous != nil {
+@@ -327,6 +330,10 @@
+ 		return
+ 	case sessionClaimAcquired:
+ 	default:
++		if style == sidebandFrameless && desktopCallIDPattern.MatchString(callID) {
++			h.handleDesktopSideband(c, callID)
++			return
++		}
+ 		writeLiveError(c, http.StatusNotFound, "Codex live session not found")
+ 		return
+ 	}
+diff --git a/internal/client/codex/live/desktop_sideband.go b/internal/client/codex/live/desktop_sideband.go
+new file mode 100644
+--- /dev/null
++++ b/internal/client/codex/live/desktop_sideband.go
+@@ -0,0 +1,196 @@
++package live
++
++import (
++	"context"
++	"net/http"
++	"regexp"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++)
++
++const (
++	desktopJoinTimeout     = 30 * time.Second
++	desktopAccountAttempts = 8
++	knownCallLifetime      = 2 * time.Hour
++	knownCallLimit         = 4096
++)
++
++var desktopCallIDPattern = regexp.MustCompile(`^rtc_[A-Za-z0-9_-]{24,124}$`)
++
++// Keep tombstones beyond the upstream call lifetime so completed proxy calls
++// cannot be adopted by another principal. Saturation fails closed rather than
++// evicting an ownership record that is still relevant.
++func (s *sessionStore) rememberCallLocked(callID string) {
++	now := time.Now()
++	for knownID, expires := range s.knownCalls {
++		if !expires.After(now) {
++			delete(s.knownCalls, knownID)
++		}
++	}
++	if s.knownCalls == nil {
++		s.knownCalls = make(map[string]time.Time)
++	}
++	if _, exists := s.knownCalls[callID]; !exists && len(s.knownCalls) >= knownCallLimit {
++		s.adoptionBlockedUntil = now.Add(knownCallLifetime)
++		return
++	}
++	s.knownCalls[callID] = now.Add(knownCallLifetime)
++}
++
++func (s *sessionStore) reserveDesktopCall(callID string, session liveSession) (liveSession, bool) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	now := time.Now()
++	if s.sessions[callID] != nil || s.knownCalls[callID].After(now) || s.adoptionBlockedUntil.After(now) {
++		return liveSession{}, false
++	}
++	s.next++
++	session.callID, session.token = callID, s.next
++	entry := &storedSession{session: session, claimed: true}
++	entry.timer = time.AfterFunc(s.expiryDuration(), func() { s.expire(callID, session.token) })
++	s.sessions[callID] = entry
++	return session, true
++}
++
++func (s *sessionStore) confirmDesktopCall(session liveSession, authID string) bool {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	entry := s.sessions[session.callID]
++	if entry == nil || entry.session.token != session.token {
++		return false
++	}
++	entry.session.authID = authID
++	s.rememberCallLocked(session.callID)
++	return true
++}
++
++// Desktop creates its WebRTC media call with its local ChatGPT login, then
++// attaches app-server control through the configured provider. Such calls have
++// no proxy creation record. Only full API principals may attach, and only an
++// upstream 101 proves that one of our eligible OAuth accounts owns the call.
++func (h *Handler) handleDesktopSideband(c *gin.Context, callID string) {
++	principal, provider := requestOwner(c)
++	_, scopedSecret := c.Get(ClientSecretPrincipalContextKey)
++	if scopedSecret || principal == "" || provider == "" || h.authManager.HomeEnabled() {
++		writeLiveError(c, http.StatusNotFound, "Codex live session not found")
++		return
++	}
++	releaseSlot, admitted := h.acquireLiveSlot(c)
++	if !admitted {
++		return
++	}
++	ctx := context.WithValue(c.Request.Context(), "gin", c)
++	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
++	ctx, cancel := context.WithCancel(ctx)
++	resources := &liveSessionResources{}
++	resources.add(func() error { cancel(); releaseSlot(); return nil })
++	defer resources.close()
++	stopShutdown := context.AfterFunc(h.voiceContext, resources.close)
++	defer stopShutdown()
++	stopRequest := context.AfterFunc(ctx, resources.close)
++	defer stopRequest()
++	session, reserved := h.sessions.reserveDesktopCall(callID, liveSession{
++		model: "gpt-live-1.1-codex", ownerPrincipal: principal, ownerProvider: provider, resources: resources,
++	})
++	if !reserved {
++		writeLiveError(c, http.StatusNotFound, "Codex live session not found")
++		return
++	}
++	defer h.sessions.complete(session, "desktop_sideband_closed")
++	setupCtx, cancelSetup := context.WithTimeout(ctx, desktopJoinTimeout)
++	defer cancelSetup()
++	upstream, selected, status := h.dialDesktopSideband(setupCtx, c, callID)
++	if upstream == nil {
++		writeLiveError(c, status, "Unable to attach Codex desktop voice call; the same ChatGPT account must be connected to the proxy")
++		return
++	}
++	logging.SetGinCPATraceID(c, selected.EnsureIndex())
++	resources.add(websocketCloseFunc("upstream", upstream))
++	if !h.sessions.confirmDesktopCall(session, selected.ID) {
++		writeLiveError(c, http.StatusGone, "Codex live session expired")
++		return
++	}
++	upgradeHeaders := make(http.Header)
++	if protocol := upstream.Subprotocol(); protocol != "" {
++		upgradeHeaders.Set("Sec-WebSocket-Protocol", protocol)
++	}
++	downstream, err := sidebandUpgrader.Upgrade(c.Writer, c.Request, upgradeHeaders)
++	if err != nil {
++		return
++	}
++	resources.add(websocketCloseFunc("downstream", downstream))
++	// The media connection stays between desktop and OpenAI. This socket carries
++	// only native control/delegation events; no audio conversion is necessary.
++	_ = relayWebsockets(downstream, upstream)
++}
++
++func (h *Handler) dialDesktopSideband(ctx context.Context, c *gin.Context, callID string) (*websocket.Conn, *auth.Auth, int) {
++	opts := coreexecutor.Options{Headers: liveSelectionHeaders(c), Metadata: map[string]any{coreexecutor.ExecutionSessionMetadataKey: callID}}
++	_, first, err := h.selectOAuth(ctx, "gpt-live-1.1-codex", opts)
++	if err != nil || first == nil {
++		return nil, nil, http.StatusServiceUnavailable
++	}
++	candidates := []*auth.Auth{first}
++	for _, candidate := range h.authManager.List() {
++		if candidate.ID != first.ID && candidate.Provider == "codex" && candidate.AuthKind() == auth.AuthKindOAuth {
++			candidates = append(candidates, candidate)
++		}
++	}
++	upstreamURL := buildSidebandURL(h.sidebandAPIBaseURL, sidebandFrameless, callID)
++	attempts := 0
++	for _, candidate := range candidates {
++		if ctx.Err() != nil {
++			return nil, nil, http.StatusGatewayTimeout
++		}
++		// Re-select pinned candidates through the manager; listing credentials
++		// alone must never bypass disabled, quota, or credential-policy checks.
++		opts.Metadata[coreexecutor.PinnedAuthMetadataKey] = candidate.ID
++		_, selected, selectErr := h.selectOAuth(ctx, "gpt-live-1.1-codex", opts)
++		if selectErr != nil || selected == nil || selected.ID != candidate.ID {
++			continue
++		}
++		attempts++
++		req, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, websocketHTTPURL(upstreamURL), nil)
++		if requestErr != nil {
++			return nil, nil, http.StatusBadGateway
++		}
++		req.Header = protocolHeaders(c.Request.Header)
++		if req.Header.Get("OpenAI-Alpha") == "" {
++			req.Header.Set("OpenAI-Alpha", "quicksilver=v2")
++		}
++		setAccountHeader(req.Header, selected)
++		if err := h.authManager.PrepareHttpRequest(ctx, selected, req); err != nil {
++			return nil, nil, http.StatusBadGateway
++		}
++		dialer := newProxyAwareSidebandDialer(h.currentConfig(), selected)
++		dialer.Subprotocols = websocket.Subprotocols(c.Request)
++		connection, response, dialErr := dialer.DialContext(ctx, upstreamURL, req.Header)
++		status := http.StatusBadGateway
++		if response != nil {
++			status = response.StatusCode
++			if response.Body != nil {
++				_ = response.Body.Close()
++			}
++		}
++		if dialErr == nil {
++			return connection, selected, http.StatusSwitchingProtocols
++		}
++		if connection != nil {
++			_ = connection.Close()
++		}
++		// A missing call can mean a different account owns it. Never retry
++		// authentication, policy, quota, or network errors under other accounts.
++		if status != http.StatusNotFound || attempts >= desktopAccountAttempts {
++			if status != http.StatusNotFound {
++				status = http.StatusBadGateway
++			}
++			return nil, nil, status
++		}
++	}
++	return nil, nil, http.StatusNotFound
++}
+diff --git a/internal/client/codex/live/desktop_sideband_test.go b/internal/client/codex/live/desktop_sideband_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/client/codex/live/desktop_sideband_test.go
+@@ -0,0 +1,261 @@
++package live
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++)
++
++const desktopTestCallID = "rtc_desktop_external_call_123456789"
++
++func TestDesktopSidebandJoinsExternalCallAndClosesResources(t *testing.T) {
++	var handshakes atomic.Int32
++	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
++		handshakes.Add(1)
++		if request.URL.Path != "/v1/live/"+desktopTestCallID || request.Header.Get("Authorization") != "Bearer test-only-token" || request.Header.Get("OpenAI-Alpha") != "quicksilver=v2" {
++			t.Error("desktop sideband used incorrect upstream route or credentials")
++		}
++		connection, err := sidebandUpgrader.Upgrade(writer, request, nil)
++		if err != nil {
++			return
++		}
++		defer connection.Close()
++		for {
++			kind, payload, err := connection.ReadMessage()
++			if err != nil {
++				return
++			}
++			if err := connection.WriteMessage(kind, payload); err != nil {
++				return
++			}
++		}
++	}))
++	defer upstream.Close()
++	handler := audioTestHandler(t, &captureExecutor{})
++	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstream.URL, "http") + "/v1"
++	router := gin.New()
++	router.GET("/v1/live/:call_id", func(c *gin.Context) {
++		c.Set("userApiKey", c.GetHeader("X-Test-Principal"))
++		c.Set("accessProvider", "fixture")
++		handler.HandleSideband(c)
++	})
++	proxy := httptest.NewServer(router)
++	defer proxy.Close()
++	url := "ws" + strings.TrimPrefix(proxy.URL, "http") + "/v1/live/" + desktopTestCallID
++	connection, response, err := websocket.DefaultDialer.Dial(url, http.Header{"X-Test-Principal": []string{"client-a"}, "OpenAI-Alpha": []string{"quicksilver=v2"}})
++	if response != nil && response.Body != nil {
++		response.Body.Close()
++	}
++	if err != nil {
++		t.Fatalf("join desktop-created call: %v", err)
++	}
++	defer connection.Close()
++	_ = connection.SetReadDeadline(time.Now().Add(2 * time.Second))
++	event := `{"type":"delegation.context.append","content":[{"type":"input_text","text":"Synthetic result"}]}`
++	if err := connection.WriteMessage(websocket.TextMessage, []byte(event)); err != nil {
++		t.Fatal(err)
++	}
++	_, payload, err := connection.ReadMessage()
++	if err != nil || string(payload) != event {
++		t.Fatalf("control relay = %q, %v", payload, err)
++	}
++	handler.Close()
++	if _, _, err := connection.ReadMessage(); err == nil {
++		t.Fatal("shutdown left desktop sideband connected")
++	}
++	if handshakes.Load() != 1 {
++		t.Fatalf("upstream handshakes=%d", handshakes.Load())
++	}
++	if len(handler.liveSlots) != 0 {
++		t.Fatal("desktop sideband leaked admission slot")
++	}
++}
++
++func TestDesktopSidebandAccountDiscovery(t *testing.T) {
++	for _, test := range []struct {
++		name         string
++		firstStatus  int
++		disabled     bool
++		wantStatus   int
++		wantAttempts int
++	}{
++		{"another account owns call", 404, false, 101, 2},
++		{"authentication errors stop discovery", 401, false, 502, 1},
++		{"quota errors stop discovery", 429, false, 502, 1},
++		{"disabled account is never dialed", 404, true, 404, 1},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			handler := audioTestHandler(t, &captureExecutor{})
++			registerCredential(t, handler.authManager, &auth.Auth{ID: "second-oauth", Provider: "codex", Status: auth.StatusActive, Disabled: test.disabled, Metadata: map[string]any{"access_token": "second-test-token", "account_id": "second-test-account"}})
++			var attempts atomic.Int32
++			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				attempts.Add(1)
++				if r.Header.Get("Authorization") == "Bearer test-only-token" {
++					w.WriteHeader(test.firstStatus)
++					_, _ = w.Write([]byte("private provider error"))
++					return
++				}
++				if r.Header.Get("Authorization") != "Bearer second-test-token" {
++					t.Error("unexpected credential")
++				}
++				connection, err := sidebandUpgrader.Upgrade(w, r, nil)
++				if err == nil {
++					defer connection.Close()
++					_, _, _ = connection.ReadMessage()
++				}
++			}))
++			defer upstream.Close()
++			handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstream.URL, "http") + "/v1"
++			router := desktopTestRouter(handler, "client-a", false)
++			proxy := httptest.NewServer(router)
++			defer proxy.Close()
++			connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxy.URL, "http")+"/v1/live/"+desktopTestCallID, nil)
++			if connection != nil {
++				connection.Close()
++			}
++			if response == nil {
++				t.Fatalf("no HTTP response: %v", err)
++			}
++			defer response.Body.Close()
++			if response.StatusCode != test.wantStatus || int(attempts.Load()) != test.wantAttempts {
++				t.Fatalf("status=%d attempts=%d, want %d/%d", response.StatusCode, attempts.Load(), test.wantStatus, test.wantAttempts)
++			}
++			handler.Close()
++			if len(handler.liveSlots) != 0 {
++				t.Fatal("failed or closed join leaked admission slot")
++			}
++		})
++	}
++}
++
++func desktopTestRouter(handler *Handler, principal string, scoped bool) *gin.Engine {
++	router := gin.New()
++	router.GET("/v1/live/:call_id", func(c *gin.Context) {
++		c.Set("userApiKey", principal)
++		c.Set("accessProvider", "fixture")
++		if scoped {
++			c.Set(ClientSecretPrincipalContextKey, "scoped-secret")
++		}
++		handler.HandleSideband(c)
++	})
++	return router
++}
++
++func TestDesktopSidebandRejectsUnscopedAndConcurrentJoins(t *testing.T) {
++	for _, test := range []struct {
++		name      string
++		principal string
++		scoped    bool
++		reserve   bool
++		callID    string
++	}{
++		{"anonymous", "", false, false, desktopTestCallID},
++		{"client secret", "client-a", true, false, desktopTestCallID},
++		{"concurrent call", "client-b", false, true, desktopTestCallID},
++		{"short unknown call", "client-a", false, false, "rtc_short"},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			handler := audioTestHandler(t, &captureExecutor{})
++			if test.reserve {
++				handler.sessions.reserveDesktopCall(test.callID, liveSession{ownerPrincipal: "client-a", ownerProvider: "fixture", resources: &liveSessionResources{}})
++			}
++			router := desktopTestRouter(handler, test.principal, test.scoped)
++			r := httptest.NewRequest("GET", "/v1/live/"+test.callID, nil)
++			r.Header.Set("Connection", "Upgrade")
++			r.Header.Set("Upgrade", "websocket")
++			w := httptest.NewRecorder()
++			router.ServeHTTP(w, r)
++			if w.Code != 404 && !(test.reserve && w.Code == 409) {
++				t.Fatalf("unexpected status %d", w.Code)
++			}
++			if len(handler.liveSlots) != 0 {
++				t.Fatal("rejected request acquired live slot")
++			}
++		})
++	}
++}
++
++func TestDesktopSidebandExpiresDuringHandshake(t *testing.T) {
++	handler := audioTestHandler(t, &captureExecutor{})
++	handler.sessions.lifetime = 20 * time.Millisecond
++	entered := make(chan struct{})
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(entered); <-r.Context().Done() }))
++	defer upstream.Close()
++	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstream.URL, "http") + "/v1"
++	proxy := httptest.NewServer(desktopTestRouter(handler, "client-a", false))
++	defer proxy.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	connection, response, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(proxy.URL, "http")+"/v1/live/"+desktopTestCallID, nil)
++	if connection != nil {
++		connection.Close()
++		t.Fatal("expired join upgraded")
++	}
++	if err == nil {
++		t.Fatal("expired join succeeded")
++	}
++	if response != nil {
++		response.Body.Close()
++	}
++	select {
++	case <-entered:
++	default:
++		t.Fatal("handshake was not attempted")
++	}
++	if _, ok := handler.sessions.peek(desktopTestCallID); ok {
++		t.Fatal("expired reservation retained")
++	}
++	if len(handler.liveSlots) != 0 {
++		t.Fatal("expired join leaked admission slot")
++	}
++}
++
++func TestDesktopSidebandHistorySaturationFailsClosed(t *testing.T) {
++	store := newSessionStore()
++	defer store.closeAll("test")
++	store.mu.Lock()
++	store.knownCalls = make(map[string]time.Time)
++	for index := 0; index < knownCallLimit; index++ {
++		store.knownCalls[time.Unix(int64(index), 0).String()] = time.Now().Add(time.Hour)
++	}
++	store.rememberCallLocked("overflow")
++	store.mu.Unlock()
++	if _, ok := store.reserveDesktopCall(desktopTestCallID, liveSession{}); ok {
++		t.Fatal("history saturation allowed adoption")
++	}
++}
++
++func TestDesktopSidebandCannotAdoptFinishedProxyCall(t *testing.T) {
++	var handshakes atomic.Int32
++	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
++		handshakes.Add(1)
++		writer.WriteHeader(http.StatusNotFound)
++	}))
++	defer upstream.Close()
++	handler := audioTestHandler(t, &captureExecutor{})
++	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstream.URL, "http") + "/v1"
++	session := handler.sessions.put(desktopTestCallID, liveSession{authID: "audio-oauth", model: defaultLiveModel, ownerPrincipal: "client-a", ownerProvider: "fixture"})
++	handler.sessions.complete(session, "test_finished")
++	router := gin.New()
++	router.GET("/v1/live/:call_id", func(c *gin.Context) {
++		c.Set("userApiKey", "client-b")
++		c.Set("accessProvider", "fixture")
++		handler.HandleSideband(c)
++	})
++	request := httptest.NewRequest(http.MethodGet, "/v1/live/"+desktopTestCallID, nil)
++	request.Header.Set("Connection", "Upgrade")
++	request.Header.Set("Upgrade", "websocket")
++	response := httptest.NewRecorder()
++	router.ServeHTTP(response, request)
++	if response.Code != http.StatusNotFound || handshakes.Load() != 0 {
++		t.Fatalf("finished owned call was adopted: status=%d handshakes=%d", response.Code, handshakes.Load())
++	}
++}

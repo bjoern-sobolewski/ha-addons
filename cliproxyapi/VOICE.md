@@ -47,7 +47,7 @@ timestamp, and diarization options are rejected explicitly.
 ```
 
 Success is binary ADTS AAC with `Content-Type: audio/aac`. `input` must contain
-1–4096 characters. Format and voice may be omitted; only AAC and the upstream
+1â€“4096 characters. Format and voice may be omitted; only AAC and the upstream
 default voice are supported. Speed and instruction overrides are rejected.
 An ACP server can stream the returned bytes to a browser audio element and
 discard the response afterward. Stop playback locally and abort pending
@@ -57,6 +57,35 @@ Existing speech selectors keep their existing provider behavior. In
 particular, `tts-1`, `gpt-4o-mini-tts`, and `grok-tts` retain the existing xAI
 route. ACP must explicitly request `codex-speech` to use ChatGPT OAuth.
 Do not infer subscription support from the existence of `/audio/speech`.
+
+## Codex desktop voice
+
+Codex desktop creates its native WebRTC media call using the desktop's saved
+ChatGPT login, then attaches app-server control through the configured provider
+at `GET /v1/live/{call_id}`. The proxy accepts these externally created native
+calls with an ordinary client Bearer key. The same ChatGPT account must also be
+connected to the proxy as an eligible Codex OAuth account. Set the top-level Codex setting
+`experimental_realtime_ws_base_url = "http://proxy-host:8080/v1"` to the same
+base as the inference provider: this desktop version otherwise sends the control
+socket directly to OpenAI even when a custom inference provider is configured.
+Keep the existing provider and file-based Bearer key. A proxy client key
+does not supply a desktop login or grant a subscription voice entitlement.
+
+Before relaying any control events, the proxy matches the call against at most
+eight eligible OAuth accounts. Only an upstream missing-call 404 permits trying
+another account. Authentication, quota and network errors stop discovery. Scoped
+Realtime client secrets cannot attach to externally created calls. Existing
+proxy-created call ownership remains enforced; completed call IDs are remembered
+for two hours in this process, with a bounded history that fails closed when full.
+Home-backed external-call discovery is unsupported; existing Home-created calls
+retain their normal path.
+
+The control attachment shares the eight-session limit, 30-second setup deadline,
+15-minute absolute lifetime, bounded WebSocket relay and shutdown cleanup.
+Desktop audio travels directly over WebRTC between the client and OpenAI; the
+proxy carries the control/delegation connection. Stop closes both client media
+and the control session. This does not add microphone access or action execution
+to the proxy.
 
 ## Native live voice
 

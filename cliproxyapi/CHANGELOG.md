@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.32
+
+- Attach Codex desktop voice control to calls created with the desktop's ChatGPT login, resolving the proxy's missing-session 404.
+- Match eligible OAuth accounts before relaying control, retain API-principal ownership, and enforce bounded setup, concurrency, expiry and shutdown cleanup.
+
 ## 0.1.31
 
 - Preserve explicit empty token-cap receipts and upstream usage detail availability on Codex Responses routes.

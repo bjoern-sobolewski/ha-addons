@@ -1,97 +1,24 @@
 # Home Assistant AI proxy apps
 
-CLIProxyAPI and CPA Usage Keeper packaged for Home Assistant OS on Raspberry Pi 5 (64-bit) and amd64 machines. Images are built by GitHub Actions and published to GHCR. Upstream source commits and runtime image digests are pinned. Some integrations include explicitly identified fixes beyond stable releases.
+Community Home Assistant wrappers for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+and [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper), supporting
+amd64 and aarch64 systems. These wrappers are unaffiliated with the upstream projects.
 
-| App | Upstream | Purpose |
-| --- | --- | --- |
-| CLIProxyAPI | 8.0.51 + main `be2563f`; management UI 1.27.2 | Model API, provider credentials, private management, API-only gateway |
-| CPA Usage Keeper | 2.0.3 + main `7b2b670` | Password-protected usage dashboard with persistent SQLite history |
+## Installation
 
-These are experimental community wrappers, unaffiliated with the upstream projects. Container integration and installation on Home Assistant OS are tested. Verify provider OAuth and long Cloudflare streams in your own deployment.
+1. Add this repository in Home Assistant under **Settings → Apps → Install app → Repositories**
+   (called **Add-ons** in older versions):
+   `https://github.com/bjoern-sobolewski/ha-addons`.
+2. Install the desired apps and follow their configuration guides:
+   - [CLIProxyAPI](cliproxyapi/DOCS.md) — model API and provider management.
+   - [CPA Usage Keeper](cpa-usage-keeper/DOCS.md) — usage reporting.
 
-## Install
-
-1. In Home Assistant, go to **Settings → Apps → Install app → ⋮ → Repositories** (older versions: Add-ons / Add-on Store).
-2. Add `https://github.com/bjoern-sobolewski/ha-addons`.
-3. Install **CLIProxyAPI** and **CPA Usage Keeper** after the [image build](https://github.com/bjoern-sobolewski/ha-addons/actions) succeeds. The GHCR packages must be public so Supervisor can pull them anonymously.
-4. In CLIProxyAPI options, add one randomly generated `api_keys` entry per client and a separate `management_key`, each at least 24 characters. Start the app.
-5. Find CLIProxyAPI's internal hostname from its app identifier: replace underscores with hyphens. For an identifier `abcdef12_cliproxyapi`, the hostname is `abcdef12-cliproxyapi`.
-6. In Keeper options, set `cpa_base_url` to `http://abcdef12-cliproxyapi:8317`, use the same `management_key`, and set a separate `login_password` of at least 16 characters. Start Keeper and open `http://HOME_ASSISTANT_IP:8081`.
-7. Add upstream credentials using the [CLIProxyAPI setup instructions](cliproxyapi/DOCS.md). Client API keys alone do not connect a model provider.
-
-To manage client keys in the private management UI, set `api_key_source` to `management_ui` in HA options and restart. The app preserves saved client keys across restarts; HA keys only initialize a missing saved list. See [client key management and recovery](cliproxyapi/DOCS.md#client-api-key-management).
-
-Generate secrets locally, for example `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Generate a different value for each credential. Store them in Home Assistant options and a password manager, never this repository.
-
-## Cloudflare Tunnel
-
-Point a dedicated hostname such as `codex.example.com` to **CLIProxyAPI port 8080**:
-
-```yaml
-# Existing locally managed Cloudflared app: merge into additional_hosts.
-additional_hosts:
-  - hostname: codex.example.com
-    service: http://abcdef12-cliproxyapi:8080
-```
-
-For a remotely managed tunnel, add the equivalent published application route in the Cloudflare dashboard. Replace the illustrative hostname with your app's actual internal hostname. Follow the [Cloudflared app documentation](https://github.com/homeassistant-apps/app-cloudflared/blob/main/cloudflared/DOCS.md) for your tunnel mode.
-
-Create an Access application for this hostname with a **Service Auth** policy accepting one service token per machine. Follow [Cloudflare's service-token instructions](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/). Each model request supplies:
-
-```http
-CF-Access-Client-Id: <machine's Access client ID>
-CF-Access-Client-Secret: <machine's Access client secret>
-Authorization: Bearer <machine's CPA client key>
-```
-
-Use `https://codex.example.com/v1` as the client API base URL. The gateway forwards `/v1/` requests with streaming buffering disabled, supports WebSocket upgrades, and returns 404 for other paths. Management (`/v0/management`, `/v8/management`) and `/management.html` are therefore unavailable through this route. Never point the public tunnel at port 8317 or Keeper's port.
-
-Codex full-context WebSocket requests of 8 MiB or larger automatically use HTTP upstream while the client WebSocket stays open. That connection retains HTTP conversation state for later turns; new small-request connections still use WebSockets. Incremental requests that depend on an existing upstream WebSocket are not blindly replayed over HTTP.
-
-Before connecting a real client, check that missing/incorrect Access credentials are rejected at Cloudflare, missing/incorrect CPA keys are rejected by CPA, a valid `/v1/models` request succeeds, and `/management.html` returns 404 even with valid credentials. Then test an actual long streaming request with your provider; the local gateway's one-hour read timeout does not override Cloudflare's limits.
-
-## Storage and backups
-
-CPA stores generated configuration and OAuth files under `/data`. Keeper stores its database, logs and rolling backups under `/data`. Home Assistant cold backups stop the apps while capturing their data. Treat backups as sensitive: they contain credentials and request metadata. Keeper's one-hour CPA queue retention helps short interruptions; it does not replace continuous collection or persist CPA's in-memory queue across CPA restarts.
-
-## Email privacy in Keeper
-
-In CPAMC, open **Auth Files → Details / Edit**, enable **Hide email in Keeper**, and save. This per-file setting is off by default. Keeper displays the first six email characters followed by `**` and the domain: `example.person@example.com` becomes `exampl**@example.com`. Reload any already-open Keeper pages after saving.
-
-Keeper enforces masking on the server for reports, details, exports, routing information and credential filenames; its UI cannot reveal the original email. CPAMC remains the trusted credential-management interface and retains the original. Raw request logs are unavailable through Keeper while any email is hidden. Hidden historical identities remain protected after deleting an auth file. If Keeper cannot verify the privacy policy with CPA, data APIs return 503 until verification succeeds; health and sign-in remain available. Upgrade CPA before Keeper to provide the required privacy endpoint.
+Keep administrative interfaces private and back up app data before upgrades.
 
 ## Development
 
-```sh
-python -m pip install -r requirements-dev.txt
-python -m unittest discover -s tests -v
-docker build -t ha-cpa-test:local cliproxyapi
-docker build -t ha-keeper-test:local cpa-usage-keeper
-python tests/smoke.py
-```
+Maintainer instructions and local tooling live in the private `.local-docs` submodule.
+Source pins and patches are defined in the app Dockerfiles; builds and checks
+are defined in [GitHub Actions](.github/workflows/build.yaml).
 
-Smoke tests use random disposable credentials, a fake model provider, isolated Docker resources, and no paid model calls. They check API authentication, blocked management paths, a model response, SSE forwarding, Keeper authentication and usage ingestion, persistence across restarts, and graceful shutdown. Resources are removed when the test exits.
-
-To update upstream, freeze each source commit and runtime image digest, reconcile the local patch chain, and verify the packaged applications before bumping app versions and changelogs. Keeper v2 upgrades require a stopped pre-upgrade database backup; rollback restores that backup together with the previous app version. Do not open a migrated v2 database with a v1 binary. Local ranking and restricted reporting remain supported by these wrappers. Actions builds both apps in parallel on native amd64 and arm64 runners. The amd64 images feed seven independent integration suites; publication waits for all builds and tests to pass. Published images are copied from the original OCI build artifacts, including provenance, without rebuilding them. Home Assistant uses the exact app version tag. Forks must update `repository.yaml` and the app image names/URLs to their own account.
-
-Pull requests retain the amd64 build and integration checks without registry write permissions. Build layers use separate app/architecture caches; temporary Go compiler caches stay outside exported layers. OCI artifacts expire after one day, so rerun the full workflow if a later publication retry needs expired artifacts. Concurrent main-branch releases are serialized to keep their tags ordered.
-
-## Internal documentation
-
-Maintainer documentation is stored in a separate private repository, referenced
-by the `.local-docs` submodule. It is optional for installation and development.
-Automatic fetching is disabled so public checkouts do not require access.
-Authorized maintainers can fetch the pinned documents from this project root:
-
-```sh
-git submodule update --init --checkout -- .local-docs
-```
-
-## Upstream and packaging references
-
-- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (MIT)
-- [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper) (MIT)
-- [Home Assistant app configuration](https://developers.home-assistant.io/docs/apps/configuration/)
-- [Home Assistant internal networking](https://developers.home-assistant.io/docs/apps/communication/)
-
-The wrapper code in this repository is MIT licensed. The upstream binaries retain their upstream licenses.
+The wrapper code is MIT licensed. Upstream components retain their own licenses.

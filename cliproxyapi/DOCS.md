@@ -109,3 +109,27 @@ The installed Codex app-server was tested end to end with two synthetic accounts
 
 See [VOICE.md](VOICE.md) for dictation, Codex AAC speech, native live voice,
 resource limits, capability evidence requirements, and separate ACP work.
+
+## Per-account model whitelist
+
+In the private management panel, open **Auth Files**, edit an account, and set
+**Model whitelist (allowed_models)** to one exact upstream model ID per line.
+For example, `gpt-6-astra` permits Astra and aliases that resolve to Astra,
+including Astra Fast. Other models, including future additions, cannot use that
+account. Other accounts keep their existing routing eligibility.
+
+An empty list removes this restriction. Existing model exclusions still apply;
+a whitelist does not enable an unsupported or excluded model. Save changes to
+apply them without restarting. Account metadata retains the whitelist across
+restarts, credential refresh and reconnect. Invalid whitelist writes are rejected;
+malformed lists edited directly on disk fail closed.
+
+New native WebSocket turns enforce saved whitelist changes. Already admitted
+output can finish and interruption remains available. A blocked pinned session
+must reconnect with full context to select another account. The whitelist also
+limits account selection for voice routes. This setting belongs to file-backed
+accounts; provider API-key groups retain their existing model configuration.
+
+The auth-file JSON representation is `"allowed_models": ["gpt-6-astra"]`.
+Rolling back to a package older than 0.1.33 disables whitelist enforcement;
+restore an appropriate account exclusion policy before relying on such a rollback.

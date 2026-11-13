@@ -63,6 +63,9 @@ RUN git apply --check /tmp/codex-terminal-receipts.patch && git apply /tmp/codex
 COPY patches/codex-desktop-voice.patch /tmp/codex-desktop-voice.patch
 RUN git apply --check /tmp/codex-desktop-voice.patch && git apply /tmp/codex-desktop-voice.patch
 
+COPY patches/model-whitelist.patch /tmp/model-whitelist.patch
+RUN git apply --check /tmp/model-whitelist.patch && git apply /tmp/model-whitelist.patch
+
 FROM golang:1.26-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
@@ -75,7 +78,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/promptpre
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/api/handlers/openai
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api ./sdk/api/handlers -run 'TestManagementV8|TestRoutingActivity'
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.16" -o /out/CLIProxyAPI ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/cliproxy -run TestAccountWhitelistModelRegistration
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.17" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
@@ -95,6 +99,8 @@ COPY patches/cpamc-keeper-email-privacy.patch /tmp/cpamc-keeper-email-privacy.pa
 RUN git apply --check /tmp/cpamc-keeper-email-privacy.patch && git apply /tmp/cpamc-keeper-email-privacy.patch
 COPY patches/cpamc-quota-tooltip.patch /tmp/cpamc-quota-tooltip.patch
 RUN git apply --check /tmp/cpamc-quota-tooltip.patch && git apply /tmp/cpamc-quota-tooltip.patch
+COPY patches/cpamc-model-whitelist.patch /tmp/cpamc-model-whitelist.patch
+RUN git apply --check /tmp/cpamc-model-whitelist.patch && git apply /tmp/cpamc-model-whitelist.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/package.json /src/bun.lock ./

@@ -52,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [smoke, codex_compatibility_flow, codex_terminal_flow, oversized_flow, quota_flow, weekly_quota_flow, migration_flow, live_routing, email_privacy, voice_flow]
+        suite: [smoke, codex_compatibility_flow, codex_terminal_flow, oversized_flow, quota_flow, weekly_quota_flow, migration_flow, live_routing, email_privacy, voice_flow, model_whitelist]
     env:
       PYTHONUNBUFFERED: '1'
       CPA_TEST_IMAGE: ha-cliproxyapi-ci:local

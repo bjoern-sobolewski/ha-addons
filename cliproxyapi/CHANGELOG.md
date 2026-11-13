@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.33
+
+- Add an optional per-account model whitelist in Auth Files. Only listed upstream models and their aliases remain eligible; an empty list keeps existing routing.
+- Apply whitelist changes to account selection, model catalogs, voice selection and new native WebSocket turns while preserving admitted output and interruption.
+
 ## 0.1.32
 
 - Attach Codex desktop voice control to calls created with the desktop's ChatGPT login, resolving the proxy's missing-session 404.

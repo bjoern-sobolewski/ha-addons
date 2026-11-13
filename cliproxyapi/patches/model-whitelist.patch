@@ -1,0 +1,766 @@
+diff --git a/internal/api/handlers/management/auth_files_crud.go b/internal/api/handlers/management/auth_files_crud.go
+index 8f62d27..f465591 100644
+--- a/internal/api/handlers/management/auth_files_crud.go
++++ b/internal/api/handlers/management/auth_files_crud.go
+@@ -553,6 +553,9 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
+ 	if _, errExcluded := synthesizer.ExtractExcludedModelsFromMetadata(metadata); errExcluded != nil {
+ 		return nil, fmt.Errorf("%w: %w", errInvalidAuthFile, errExcluded)
+ 	}
++	if _, errAllowed := coreauth.AllowedModelsFromMetadata(metadata); errAllowed != nil {
++		return nil, fmt.Errorf("%w: %w", errInvalidAuthFile, errAllowed)
++	}
+ 	provider, _ := metadata["type"].(string)
+ 	if provider == "" {
+ 		provider = "unknown"
+diff --git a/internal/api/handlers/management/auth_files_excluded_models_test.go b/internal/api/handlers/management/auth_files_excluded_models_test.go
+index f93a1a0..5bc2f10 100644
+--- a/internal/api/handlers/management/auth_files_excluded_models_test.go
++++ b/internal/api/handlers/management/auth_files_excluded_models_test.go
+@@ -219,3 +219,88 @@ func TestPatchAuthFileFieldsRejectsInvalidExcludedModels(t *testing.T) {
+ 		})
+ 	}
+ }
++
++func TestUploadAuthFileRejectsInvalidAllowedModels(t *testing.T) {
++	t.Setenv("MANAGEMENT_PASSWORD", "")
++	gin.SetMode(gin.TestMode)
++	for _, content := range []string{
++		`{"type":"codex","email":"bad@example.test","allowed_models":123}`,
++		`{"type":"gemini-cli","email":"bad@example.test","allowed_models":123}`,
++		`{"type":"codex","email":"bad@example.test","allowed_models":["codex-new",1]}`,
++	} {
++		for _, form := range []string{"multipart", "raw"} {
++			t.Run(form+"/"+content, func(t *testing.T) {
++				authDir := t.TempDir()
++				manager := coreauth.NewManager(nil, nil, nil)
++				h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
++
++				rec := httptest.NewRecorder()
++				c, _ := gin.CreateTestContext(rec)
++				if form == "multipart" {
++					var body bytes.Buffer
++					writer := multipart.NewWriter(&body)
++					part, errCreate := writer.CreateFormFile("file", "bad.json")
++					if errCreate != nil {
++						t.Fatal(errCreate)
++					}
++					if _, errWrite := part.Write([]byte(content)); errWrite != nil {
++						t.Fatal(errWrite)
++					}
++					if errClose := writer.Close(); errClose != nil {
++						t.Fatal(errClose)
++					}
++					c.Request = httptest.NewRequest(http.MethodPost, "/v8/management/credentials", &body)
++					c.Request.Header.Set("Content-Type", writer.FormDataContentType())
++				} else {
++					c.Request = httptest.NewRequest(http.MethodPost, "/v8/management/credentials?name=bad.json", strings.NewReader(content))
++					c.Request.Header.Set("Content-Type", "application/json")
++				}
++				h.UploadAuthFile(c)
++
++				// Invalid client input is a 400, not a server failure.
++				if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "allowed_models") || !strings.Contains(rec.Body.String(), "must be a string") {
++					t.Fatalf("status = %d body = %s, want 400 allowed_models validation error", rec.Code, rec.Body.String())
++				}
++				if entries, errRead := os.ReadDir(authDir); errRead != nil || len(entries) != 0 {
++					t.Fatalf("auth dir entries = %v (err %v), want no file written", entries, errRead)
++				}
++				if auths := manager.List(); len(auths) != 0 {
++					t.Fatalf("registered auths = %d, want none", len(auths))
++				}
++			})
++		}
++	}
++}
++
++func TestPatchAuthFileFieldsAllowedModels(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	for _, fields := range []string{`"allowed_models":123`, `"allowed_models":["gpt-6-astra",null]`, `"allowed_models":["*"]`, `"allowed_models.child":[]`} {
++		h, manager, record := newExcludedModelsPatchTestHandler(t, "oauth")
++		before, _ := manager.GetByID(record.ID)
++		response := patchExcludedModelsFields(h, fields)
++		if response.Code != 400 {
++			t.Fatalf("invalid whitelist status %d", response.Code)
++		}
++		after, _ := manager.GetByID(record.ID)
++		if !reflect.DeepEqual(before.Metadata, after.Metadata) {
++			t.Fatal("invalid update changed the account")
++		}
++	}
++	for _, fields := range []string{`"allowed_models":[" GPT-6-ASTRA ","gpt-6-astra"]`, `"allowed_models":[]`, `"allowed_models":null`} {
++		h, manager, record := newExcludedModelsPatchTestHandler(t, "oauth")
++		response := patchExcludedModelsFields(h, fields)
++		if response.Code != 200 {
++			t.Fatalf("whitelist save status %d: %s", response.Code, response.Body.String())
++		}
++		updated, _ := manager.GetByID(record.ID)
++		if updated.Metadata["allowed_models"] != nil {
++			models, err := coreauth.AllowedModelsFromMetadata(updated.Metadata)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if len(models) > 0 && (len(models) != 1 || models[0] != "gpt-6-astra") {
++				t.Fatalf("unexpected whitelist %v", models)
++			}
++		}
++	}
++}
+diff --git a/internal/api/handlers/management/auth_files_fields.go b/internal/api/handlers/management/auth_files_fields.go
+index 2b76941..67dc411 100644
+--- a/internal/api/handlers/management/auth_files_fields.go
++++ b/internal/api/handlers/management/auth_files_fields.go
+@@ -381,6 +381,18 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
+ 		if errDecode != nil {
+ 			return &authFileFieldPatchError{message: fmt.Sprintf("invalid field %s", fieldPath)}
+ 		}
++		if rootAuthFileField(fieldPath) == "allowed_models" {
++			if fieldPath != "allowed_models" {
++				return &authFileFieldPatchError{message: "allowed_models does not support nested fields"}
++			}
++			models, err := coreauth.AllowedModelsFromMetadata(map[string]any{"allowed_models": value})
++			if err != nil {
++				return &authFileFieldPatchError{message: err.Error()}
++			}
++			if value != nil {
++				value = models
++			}
++		}
+ 		if rootAuthFileField(fieldPath) == "excluded_models" {
+ 			if fieldPath != "excluded_models" {
+ 				return &authFileFieldPatchError{message: "excluded_models does not support nested fields"}
+diff --git a/internal/client/codex/live/live.go b/internal/client/codex/live/live.go
+index 67837ad..cbe473a 100644
+--- a/internal/client/codex/live/live.go
++++ b/internal/client/codex/live/live.go
+@@ -529,6 +529,7 @@ func mediaCredentialName(selected *auth.Auth, authIndex string) string {
+ }
+ 
+ func (h *Handler) selectOAuth(ctx context.Context, model string, opts coreexecutor.Options) (*auth.HomeDispatchSelection, *auth.Auth, error) {
++	ctx = auth.WithRequestedUpstreamModel(ctx, model)
+ 	var selection *auth.HomeDispatchSelection
+ 	var selected *auth.Auth
+ 	var errSelect error
+diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
+index 21593f5..4f79853 100644
+--- a/internal/runtime/executor/codex_websockets_duplex.go
++++ b/internal/runtime/executor/codex_websockets_duplex.go
+@@ -295,6 +295,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 			}
+ 			return payload, curHeaders, true, true
+ 		}
++		rejectModelWhitelist := func() bool {
++			payload := []byte(`{"type":"error","status":503,"error":{"type":"server_error","code":"model_whitelist_excluded","message":"Account model whitelist changed. Reconnect with full context to select an eligible account."}}`)
++			select {
++			case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
++				consumedPayload = nil
++				return true
++			case <-streamCtx.Done():
++				return false
++			}
++		}
+ 		rejectQuotaPolicy := func() bool {
+ 			payload, _ := json.Marshal(map[string]any{"type": "error", "status": 503, "error": map[string]string{"type": "server_error", "code": "quota_policy_excluded", "message": "Account excluded by quota policy. Reconnect with full context to select an eligible account."}})
+ 			select {
+@@ -307,6 +317,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 		}
+ 		processCreatePayload := func(payload []byte) bool {
+ 			consumedPayload = payload
++			if !cliproxyauth.ModelWhitelistAllows(ctx, auth, req.Model) {
++				return rejectModelWhitelist()
++			}
+ 			cliproxyauth.CheckSessionRebalanceQuota(ctx)
+ 			if !cliproxyauth.SessionRebalanceDraining(ctx) && !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
+ 				return rejectQuotaPolicy()
+@@ -470,6 +483,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 				}
+ 				switch gjson.GetBytes(payload, "type").String() {
+ 				case "response.steer":
++					if !cliproxyauth.ModelWhitelistAllows(ctx, auth, req.Model) {
++						if !rejectModelWhitelist() {
++							return
++						}
++						continue
++					}
+ 					cliproxyauth.CheckSessionRebalanceQuota(ctx)
+ 					if !cliproxyauth.SessionRebalanceDraining(ctx) && !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
+ 						if !rejectQuotaPolicy() {
+@@ -545,6 +564,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+ 					continue
+ 
+ 				case "response.create", "response.append":
++					if !cliproxyauth.ModelWhitelistAllows(ctx, auth, req.Model) {
++						if !rejectModelWhitelist() {
++							return
++						}
++						continue
++					}
+ 					cliproxyauth.CheckSessionRebalanceQuota(ctx)
+ 					if !cliproxyauth.SessionRebalanceDraining(ctx) && !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
+ 						if !rejectQuotaPolicy() {
+diff --git a/internal/runtime/executor/codex_websockets_model_whitelist_test.go b/internal/runtime/executor/codex_websockets_model_whitelist_test.go
+new file mode 100644
+index 0000000..ee538a8
+--- /dev/null
++++ b/internal/runtime/executor/codex_websockets_model_whitelist_test.go
+@@ -0,0 +1,101 @@
++package executor
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/gorilla/websocket"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	authpkg "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
++	"github.com/tidwall/gjson"
++)
++
++// A whitelist change bars new native duplex turns while retaining interrupts.
++func TestCodexDuplexModelWhitelistChanges(t *testing.T) {
++	received := make(chan string, 8)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++		for {
++			_, payload, err := conn.ReadMessage()
++			if err != nil {
++				return
++			}
++			kind := gjson.GetBytes(payload, "type").String()
++			received <- kind
++			event := []byte(`{"type":"response.created","response":{"id":"r1","output":[]}}`)
++			if kind == "response.interrupt" {
++				event = []byte(`{"type":"response.incomplete","response":{"id":"r1","output":[],"incomplete_details":{"reason":"interrupted"}}}`)
++			}
++			if err := conn.WriteMessage(websocket.TextMessage, event); err != nil {
++				return
++			}
++		}
++	}))
++	defer server.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	input := make(chan core.WebsocketInput, 8)
++	ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
++	exec := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ResponseSteering: true}})
++	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
++	auth := &authpkg.Auth{ID: "policy-duplex", Index: "policy-duplex", Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL, "websockets": "true"}}
++	result, err := exec.ExecuteStream(ctx, auth, core.Request{Model: "gpt-6-astra", Payload: []byte(`{"model":"gpt-6-astra","input":[]}`)}, core.Options{SourceFormat: translator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: "policy-duplex"}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	next := func() []byte {
++		t.Helper()
++		select {
++		case c, ok := <-result.Chunks:
++			if !ok || c.Err != nil {
++				t.Fatalf("stream closed: %v", c.Err)
++			}
++			return c.Payload
++		case <-ctx.Done():
++			t.Fatal(ctx.Err())
++			return nil
++		}
++	}
++	if got := gjson.GetBytes(next(), "type").String(); got != "response.created" {
++		t.Fatal(got)
++	}
++	if got := <-received; got != "response.create" {
++		t.Fatal(got)
++	}
++	auth.Metadata = map[string]any{"allowed_models": []string{"gpt-6-sol"}}
++	for _, kind := range []string{"response.create", "response.append", "response.steer"} {
++		input <- core.WebsocketInput{Payload: []byte(`{"type":"` + kind + `","model":"gpt-6-astra","input":[]}`)}
++		if got := gjson.GetBytes(next(), "error.code").String(); got != "model_whitelist_excluded" {
++			t.Fatalf("%s: %s", kind, got)
++		}
++	}
++	if err := exec.InterruptExecutionSession(ctx, "policy-duplex", []byte(`{"type":"response.interrupt","response_id":"r1"}`)); err != nil {
++		t.Fatal(err)
++	}
++	if got := gjson.GetBytes(next(), "type").String(); got != "response.incomplete" {
++		t.Fatal(got)
++	}
++	if got := <-received; got != "response.interrupt" {
++		t.Fatalf("excluded traffic reached provider: %s", got)
++	}
++	auth.Metadata = map[string]any{"allowed_models": []string{}}
++	input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","model":"gpt-6-astra","input":[]}`)}
++	if got := gjson.GetBytes(next(), "type").String(); got != "response.created" {
++		t.Fatal(got)
++	}
++	if got := <-received; got != "response.create" {
++		t.Fatal(got)
++	}
++	cancel()
++	for range result.Chunks {
++	}
++}
+diff --git a/sdk/cliproxy/auth/allowed_models.go b/sdk/cliproxy/auth/allowed_models.go
+new file mode 100644
+index 0000000..cd86e3c
+--- /dev/null
++++ b/sdk/cliproxy/auth/allowed_models.go
+@@ -0,0 +1,141 @@
++package auth
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"fmt"
++	"sort"
++	"strings"
++)
++
++// AllowedModelsFromMetadata reads an optional exact upstream-model whitelist.
++// Missing, null and empty lists preserve unrestricted model eligibility.
++func AllowedModelsFromMetadata(metadata map[string]any) ([]string, error) {
++	value := metadata["allowed_models"]
++	if value == nil {
++		return nil, nil
++	}
++	var entries []string
++	switch models := value.(type) {
++	case []string:
++		entries = models
++	case []any:
++		for _, model := range models {
++			name, ok := model.(string)
++			if !ok {
++				return nil, fmt.Errorf("allowed_models must be a string array or null")
++			}
++			entries = append(entries, name)
++		}
++	default:
++		return nil, fmt.Errorf("allowed_models must be a string array or null")
++	}
++	result := make([]string, 0, len(entries))
++	seen := make(map[string]bool)
++	for _, entry := range entries {
++		name := strings.ToLower(strings.TrimSpace(entry))
++		if name == "" {
++			continue
++		}
++		if strings.ContainsAny(name, "*?\\()") {
++			return nil, fmt.Errorf("allowed_models requires exact upstream model IDs")
++		}
++		if !seen[name] {
++			result = append(result, name)
++			seen[name] = true
++		}
++	}
++	return result, nil
++}
++
++// AllowsUpstreamModel fails closed for malformed persisted whitelists.
++func (a *Auth) AllowsUpstreamModel(model string) bool {
++	if a == nil {
++		return true
++	}
++	allowed, err := AllowedModelsFromMetadata(a.Metadata)
++	if err != nil {
++		return false
++	}
++	if len(allowed) == 0 {
++		return true
++	}
++	model = canonicalModelKey(model)
++	for _, name := range allowed {
++		if model == name {
++			return true
++		}
++	}
++	return false
++}
++
++// ModelAllowedForAuth resolves caller aliases before applying the account whitelist.
++func (m *Manager) ModelAllowedForAuth(auth *Auth, routeModel string) bool {
++	if auth == nil || auth.Metadata["allowed_models"] == nil {
++		return true
++	}
++	model := m.selectionModelForAuth(auth, routeModel)
++	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, model); len(pool) > 0 {
++		for _, upstream := range pool {
++			if !auth.AllowsUpstreamModel(upstream) {
++				return false
++			}
++		}
++		return true
++	}
++	return auth.AllowsUpstreamModel(m.applyAPIKeyModelAlias(auth, model))
++}
++
++// Keep whitelist changes in the existing model-publication fence so a stale
++// catalog computation cannot restore models removed by an account edit.
++func syncAllowedModelsAttribute(auth *Auth) {
++	if auth == nil {
++		return
++	}
++	allowed, err := AllowedModelsFromMetadata(auth.Metadata)
++	if len(allowed) == 0 && err == nil {
++		delete(auth.Attributes, "allowed_models_hash")
++		return
++	}
++	value := "invalid"
++	if err == nil {
++		sort.Strings(allowed)
++		hash := sha256.Sum256([]byte(strings.Join(allowed, "\x00")))
++		value = hex.EncodeToString(hash[:])
++	}
++	if auth.Attributes == nil {
++		auth.Attributes = make(map[string]string)
++	}
++	auth.Attributes["allowed_models_hash"] = value
++}
++
++type requestedUpstreamModelContextKey struct{}
++
++// WithRequestedUpstreamModel applies the account whitelist to special routes
++// whose models are deliberately absent from the ordinary inference registry.
++func WithRequestedUpstreamModel(ctx context.Context, model string) context.Context {
++	return context.WithValue(ctx, requestedUpstreamModelContextKey{}, model)
++}
++
++type currentModelWhitelistContextKey struct{}
++
++func (m *Manager) withCurrentModelWhitelist(ctx context.Context, account *Auth) context.Context {
++	if m.HomeEnabled() {
++		return ctx
++	}
++	accountID := account.ID
++	return context.WithValue(ctx, currentModelWhitelistContextKey{}, func(model string) bool {
++		current, exists := m.GetByID(accountID)
++		return exists && current.AllowsUpstreamModel(model)
++	})
++}
++
++// ModelWhitelistAllows rechecks live policy before each new pinned duplex turn.
++// Already admitted output and interruption do not use this admission gate.
++func ModelWhitelistAllows(ctx context.Context, account *Auth, upstreamModel string) bool {
++	if current, ok := ctx.Value(currentModelWhitelistContextKey{}).(func(string) bool); ok {
++		return current(upstreamModel)
++	}
++	return account.AllowsUpstreamModel(upstreamModel)
++}
+diff --git a/sdk/cliproxy/auth/allowed_models_test.go b/sdk/cliproxy/auth/allowed_models_test.go
+new file mode 100644
+index 0000000..b817aae
+--- /dev/null
++++ b/sdk/cliproxy/auth/allowed_models_test.go
+@@ -0,0 +1,95 @@
++package auth
++
++import (
++	"context"
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
++	"testing"
++)
++
++func TestAccountModelWhitelist(t *testing.T) {
++	manager := NewManager(nil, nil, nil)
++	manager.SetConfig(&config.Config{})
++	manager.SetOAuthModelAlias(map[string][]config.OAuthModelAlias{"codex": {{Name: "gpt-6-astra", Alias: "gpt-6-astra-fast", Fork: true}}})
++	account := &Auth{ID: "whitelist-test", Provider: "codex", Prefix: "dedicated", Metadata: map[string]any{"allowed_models": []any{" GPT-6-ASTRA ", "gpt-6-astra"}}}
++	for _, model := range []string{"gpt-6-astra", "gpt-6-astra(high)", "gpt-6-astra-fast", "dedicated/gpt-6-astra-fast"} {
++		if !manager.ModelAllowedForAuth(account, model) {
++			t.Errorf("allowed model rejected: %s", model)
++		}
++	}
++	for _, model := range []string{"gpt-6-sol", "gpt-6-astra-new", "new-model"} {
++		if manager.ModelAllowedForAuth(account, model) {
++			t.Errorf("non-whitelisted model allowed: %s", model)
++		}
++	}
++	// Selection must reject a blocked model even while an old catalog still lists it.
++	catalog := registry.GetGlobalRegistry()
++	catalog.RegisterClient(account.ID, "codex", []*registry.ModelInfo{{ID: "gpt-6-sol"}})
++	defer catalog.UnregisterClient(account.ID)
++	if manager.authSupportsRouteModel(catalog, account, "gpt-6-sol") {
++		t.Fatal("stale registry bypassed whitelist")
++	}
++	for _, invalid := range []any{true, "gpt-6-astra", []any{"gpt-6-astra", 2}, []string{"*"}} {
++		account.Metadata["allowed_models"] = invalid
++		if manager.ModelAllowedForAuth(account, "gpt-6-astra") {
++			t.Fatal("malformed whitelist did not fail closed")
++		}
++	}
++	for _, empty := range []any{nil, []any{}, []string{" "}} {
++		account.Metadata["allowed_models"] = empty
++		if !manager.ModelAllowedForAuth(account, "gpt-6-sol") {
++			t.Fatal("empty whitelist restricted account")
++		}
++	}
++}
++func TestWhitelistPreservedOnRefresh(t *testing.T) {
++	manager := NewManager(nil, nil, nil)
++	account := &Auth{ID: "whitelist-refresh", Provider: "codex", Metadata: map[string]any{"allowed_models": []string{"gpt-6-astra"}}}
++	registered, err := manager.Register(context.Background(), account)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stale := registered.Clone()
++	current := registered.Clone()
++	current.Metadata["allowed_models"] = []string{"gpt-6-sol"}
++	current, err = manager.Update(context.Background(), current)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if current.Attributes["allowed_models_hash"] == registered.Attributes["allowed_models_hash"] {
++		t.Fatal("whitelist change missing from registration fence")
++	}
++	refreshed := MergeRefreshedAuth(registered, current, stale)
++	if !refreshed.AllowsUpstreamModel("gpt-6-sol") || refreshed.AllowsUpstreamModel("gpt-6-astra") {
++		t.Fatal("refresh overwrote current whitelist")
++	}
++}
++
++func TestWhitelistDuplexAdmissionUsesCurrentAccount(t *testing.T) {
++	manager := NewManager(nil, nil, nil)
++	original, err := manager.Register(context.Background(), &Auth{ID: "duplex-whitelist", Provider: "codex"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx := manager.withCurrentModelWhitelist(context.Background(), original)
++	if !ModelWhitelistAllows(ctx, original, "gpt-6-sol") {
++		t.Fatal("unrestricted initial admission failed")
++	}
++	updated := original.Clone()
++	updated.Metadata = map[string]any{"allowed_models": []string{"gpt-6-astra"}}
++	if _, err = manager.Update(context.Background(), updated); err != nil {
++		t.Fatal(err)
++	}
++	if ModelWhitelistAllows(ctx, original, "gpt-6-sol") {
++		t.Fatal("pinned snapshot bypassed current whitelist")
++	}
++	if !ModelWhitelistAllows(ctx, original, "gpt-6-astra") {
++		t.Fatal("current allowed model rejected")
++	}
++	eligibility := authSelectionEligibilityForRequest(WithRequestedUpstreamModel(context.Background(), "gpt-live-1.1-codex"), cliproxyexecutor.Options{})
++	current, _ := manager.GetByID(original.ID)
++	if eligibility.allows(current) {
++		t.Fatal("special voice route bypassed whitelist")
++	}
++}
+diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
+index b81983d..d744ee8 100644
+--- a/sdk/cliproxy/auth/conductor_execution.go
++++ b/sdk/cliproxy/auth/conductor_execution.go
+@@ -2314,6 +2314,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
+ 	credVersion := auth.CredentialVersion
+ 	regEpoch := auth.RegistrationEpoch
+ 
++	execCtx = m.withCurrentModelWhitelist(execCtx, auth)
+ 	streamRes, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
+ 	if errStream != nil {
+ 		rerr := resultErrorFromError(errStream)
+diff --git a/sdk/cliproxy/auth/conductor_lifecycle.go b/sdk/cliproxy/auth/conductor_lifecycle.go
+index 8e1d8d4..fe1044e 100644
+--- a/sdk/cliproxy/auth/conductor_lifecycle.go
++++ b/sdk/cliproxy/auth/conductor_lifecycle.go
+@@ -88,6 +88,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
+ 		return nil, nil
+ 	}
+ 	NormalizeCredentialMetadata(auth.Metadata)
++	syncAllowedModelsAttribute(auth)
+ 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+ 		return nil, fmt.Errorf("register auth: %w", errWeight)
+ 	}
+@@ -296,6 +297,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
+ 		return nil, false, false, nil
+ 	}
+ 	NormalizeCredentialMetadata(auth.Metadata)
++	syncAllowedModelsAttribute(auth)
+ 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+ 		return nil, false, false, fmt.Errorf("update auth: %w", errWeight)
+ 	}
+@@ -350,12 +352,14 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
+ 			}
+ 			auth = merged
+ 			NormalizeCredentialMetadata(auth.Metadata)
++			syncAllowedModelsAttribute(auth)
+ 		}
+ 	} else if mode == updateModePrepare {
+ 		merged := MergePreparedAuth(base, existing, auth)
+ 		if merged != nil {
+ 			auth = merged
+ 			NormalizeCredentialMetadata(auth.Metadata)
++			syncAllowedModelsAttribute(auth)
+ 		}
+ 	}
+ 	if auth.RegistrationEpoch != 0 && auth.RegistrationEpoch < m.authEpochs[auth.ID] {
+@@ -757,6 +761,7 @@ func (m *Manager) Load(ctx context.Context) error {
+ 			continue
+ 		}
+ 		NormalizeCredentialMetadata(auth.Metadata)
++		syncAllowedModelsAttribute(auth)
+ 		if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+ 			continue
+ 		}
+diff --git a/sdk/cliproxy/auth/conductor_selection.go b/sdk/cliproxy/auth/conductor_selection.go
+index 1750ecf..5e47cc4 100644
+--- a/sdk/cliproxy/auth/conductor_selection.go
++++ b/sdk/cliproxy/auth/conductor_selection.go
+@@ -84,11 +84,12 @@ type requiredAuthKindContextKey struct{}
+ type credentialPolicyContextKey struct{}
+ 
+ type authSelectionEligibility struct {
+-	drainAuthID      string
+-	drainAllowed     func() bool
+-	requiredKind     string
+-	credentialPolicy string
+-	disallowFreeAuth bool
++	drainAuthID            string
++	drainAllowed           func() bool
++	requiredKind           string
++	credentialPolicy       string
++	requestedUpstreamModel string
++	disallowFreeAuth       bool
+ }
+ 
+ func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
+@@ -114,6 +115,7 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
+ 		eligibility.drainAllowed = func() bool { return SessionRebalanceDraining(ctx) }
+ 	}
+ 	if ctx != nil {
++		eligibility.requestedUpstreamModel, _ = ctx.Value(requestedUpstreamModelContextKey{}).(string)
+ 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
+ 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
+ 	}
+@@ -124,6 +126,9 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
+ 	if auth == nil || !QuotaPolicyAllows(auth, time.Now()) {
+ 		return false
+ 	}
++	if e.requestedUpstreamModel != "" && !auth.AllowsUpstreamModel(e.requestedUpstreamModel) {
++		return false
++	}
+ 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
+ 		return false
+ 	}
+@@ -1066,6 +1071,9 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
+ }
+ 
+ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
++	if !m.ModelAllowedForAuth(auth, routeModel) {
++		return false
++	}
+ 	if registryRef == nil || auth == nil {
+ 		return true
+ 	}
+@@ -2154,7 +2162,7 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
+ 		providerMatches := strings.TrimSpace(provider) == "" || strings.EqualFold(strings.TrimSpace(selection.Provider), strings.TrimSpace(provider))
+ 		selectionAuth := selection.CloneAuth()
+ 		kindMatches := selectionAuth != nil && selectionAuth.AuthKind() == requiredKind
+-		if providerMatches && kindMatches {
++		if providerMatches && kindMatches && m.ModelAllowedForAuth(selectionAuth, model) {
+ 			return selection, nil
+ 		}
+ 
+diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
+index 59c6987..233c835 100644
+--- a/sdk/cliproxy/auth/conductor_stream.go
++++ b/sdk/cliproxy/auth/conductor_stream.go
+@@ -438,6 +438,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
+ 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+ 		executionSeq := m.nextExecutionSeq()
+ 		startStream := time.Now()
++		ctx = m.withCurrentModelWhitelist(ctx, auth)
+ 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
+ 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+ 		if hasUpstreamExecutionAttempt(errStream) {
+diff --git a/sdk/cliproxy/service_allowed_models_test.go b/sdk/cliproxy/service_allowed_models_test.go
+new file mode 100644
+index 0000000..96c83d2
+--- /dev/null
++++ b/sdk/cliproxy/service_allowed_models_test.go
+@@ -0,0 +1,66 @@
++package cliproxy
++
++import (
++	"context"
++	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
++	"testing"
++)
++
++func TestAccountWhitelistModelRegistration(t *testing.T) {
++	manager := coreauth.NewManager(nil, nil, nil)
++	aliases := map[string][]config.OAuthModelAlias{"codex": {{Name: "gpt-6-astra", Alias: "gpt-6-astra-fast", Fork: true}}}
++	cfg := &config.Config{OAuthModelAlias: aliases}
++	manager.SetConfig(cfg)
++	manager.SetOAuthModelAlias(aliases)
++	account, err := manager.Register(context.Background(), &coreauth.Auth{ID: "registration-whitelist", Provider: "codex", Attributes: map[string]string{"plan_type": "pro"}, Metadata: map[string]any{"allowed_models": []string{"gpt-6-astra"}}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	service := &Service{cfg: cfg, coreManager: manager}
++	defer GlobalModelRegistry().UnregisterClient(account.ID)
++	if !service.registerModelsForAuth(context.Background(), account) {
++		t.Fatal("registration superseded")
++	}
++	models := GlobalModelRegistry().GetModelsForClient(account.ID)
++	if len(models) != 2 {
++		t.Fatalf("registered %d models, want Astra and Fast: %v", len(models), models)
++	}
++	for _, model := range models {
++		if model.ID != "gpt-6-astra" && model.ID != "gpt-6-astra-fast" {
++			t.Fatalf("unexpected model %s", model.ID)
++		}
++	}
++
++	excluded := account.Clone()
++	excluded.Attributes["excluded_models"] = "gpt-6-astra"
++	excluded, err = manager.Update(context.Background(), excluded)
++	if err != nil {
++		t.Fatal(err)
++	}
++	service.registerModelsForAuth(context.Background(), excluded)
++	if len(GlobalModelRegistry().GetModelsForClient(account.ID)) != 0 {
++		t.Fatal("whitelist bypassed exclusions")
++	}
++	account, err = manager.Update(context.Background(), account)
++	if err != nil {
++		t.Fatal(err)
++	}
++	service.registerModelsForAuth(context.Background(), account)
++	staleFence := newModelRegistrationFence(account, cfg)
++	current := account.Clone()
++	current.Metadata["allowed_models"] = []string{"gpt-6-sol"}
++	current, err = manager.Update(context.Background(), current)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if service.registerResolvedModelsForAuthFenced(account, staleFence, "codex", []*ModelInfo{{ID: "gpt-6-astra"}}) {
++		t.Fatal("stale registration bypassed whitelist fence")
++	}
++	if !service.registerModelsForAuth(context.Background(), current) {
++		t.Fatal("updated registration failed")
++	}
++	if GlobalModelRegistry().ClientSupportsModel(account.ID, "gpt-6-astra") {
++		t.Fatal("removed model remains routable")
++	}
++}
+diff --git a/sdk/cliproxy/service_executors.go b/sdk/cliproxy/service_executors.go
+index c83c246..e2fe1a7 100644
+--- a/sdk/cliproxy/service_executors.go
++++ b/sdk/cliproxy/service_executors.go
+@@ -469,6 +469,9 @@ func (s *Service) registerResolvedModelsForAuthFenced(a *coreauth.Auth, fence mo
+ 		if modelID == "" {
+ 			continue
+ 		}
++		if s.coreManager != nil && !s.coreManager.ModelAllowedForAuth(a, modelID) {
++			continue
++		}
+ 		clone := *model
+ 		clone.ID = modelID
+ 		normalizedModels = append(normalizedModels, &clone)

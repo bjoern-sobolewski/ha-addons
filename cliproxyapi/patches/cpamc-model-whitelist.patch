@@ -1,0 +1,233 @@
+diff --git a/src/features/authFiles/components/AuthFileDetailsSheet.tsx b/src/features/authFiles/components/AuthFileDetailsSheet.tsx
+index 221080d..25027de 100644
+--- a/src/features/authFiles/components/AuthFileDetailsSheet.tsx
++++ b/src/features/authFiles/components/AuthFileDetailsSheet.tsx
+@@ -295,6 +295,19 @@ export function AuthFileDetailsSheet(props: AuthFileDetailsSheetProps) {
+                       <div className="hint">{t('auth_files.using_api_hint')}</div>
+                     </div>
+                   )}
++                  <div className="form-group">
++                    <label htmlFor="auth-file-model-whitelist">{t('auth_files.allowed_models_label')}</label>
++                    <textarea
++                      id="auth-file-model-whitelist"
++                      className="input"
++                      rows={3}
++                      value={editor.allowedModelsText}
++                      disabled={disableControls || editor.saving || !editor.json}
++                      onChange={(event) => onChange('allowedModelsText', event.target.value)}
++                      placeholder="gpt-6-astra"
++                    />
++                    <div className="hint">{t('auth_files.allowed_models_hint')}</div>
++                  </div>
+                   <AuthFileExcludedModelsField
+                     fileName={editor.fileName}
+                     value={editor.excludedModelsText}
+diff --git a/src/features/authFiles/hooks/useAuthFilesPrefixProxyEditor.ts b/src/features/authFiles/hooks/useAuthFilesPrefixProxyEditor.ts
+index 9731bbc..5446b6b 100644
+--- a/src/features/authFiles/hooks/useAuthFilesPrefixProxyEditor.ts
++++ b/src/features/authFiles/hooks/useAuthFilesPrefixProxyEditor.ts
+@@ -55,6 +55,7 @@ export type PrefixProxyEditorField =
+   | 'usingApi'
+   | 'useSiwc'
+   | 'note'
++  | 'allowedModelsText'
+   | 'excludedModelsText'
+   | 'headersText';
+ 
+@@ -89,6 +90,8 @@ export type PrefixProxyEditorState = {
+   usingApiTouched: boolean;
+   note: string;
+   noteTouched: boolean;
++  allowedModelsText: string;
++  allowedModelsTouched: boolean;
+   excludedModelsText: string;
+   excludedModelsTouched: boolean;
+   headersText: string;
+@@ -358,6 +361,13 @@ export const buildAuthFileFieldsPatch = (
+     }
+   }
+ 
++  if (editor.allowedModelsTouched) {
++    const nextModels = parseExcludedModelsText(editor.allowedModelsText);
++    if (JSON.stringify(nextModels) !== JSON.stringify(normalizeExcludedModels(original.allowed_models))) {
++      patch.allowed_models = nextModels;
++    }
++  }
++
+   if (editor.excludedModelsTouched) {
+     const originalExcludedModels = readExcludedModels(original);
+     const nextExcludedModels = parseExcludedModelsText(editor.excludedModelsText);
+@@ -569,6 +579,8 @@ export function useAuthFilesPrefixProxyEditor(
+       usingApiTouched: false,
+       note: '',
+       noteTouched: false,
++      allowedModelsText: '',
++      allowedModelsTouched: false,
+       excludedModelsText: '',
+       excludedModelsTouched: false,
+       headersText: '',
+@@ -659,6 +671,8 @@ export function useAuthFilesPrefixProxyEditor(
+           usingApiTouched: false,
+           note,
+           noteTouched: false,
++          allowedModelsText: normalizeExcludedModels(json.allowed_models).join('\n'),
++          allowedModelsTouched: false,
+           excludedModelsText,
+           excludedModelsTouched: false,
+           headersText,
+@@ -727,6 +741,9 @@ export function useAuthFilesPrefixProxyEditor(
+         return { ...prev, usingApi: Boolean(value), usingApiTouched: true };
+       }
+       if (field === 'note') return { ...prev, note: String(value), noteTouched: true };
++      if (field === 'allowedModelsText') {
++        return { ...prev, allowedModelsText: String(value), allowedModelsTouched: true };
++      }
+       if (field === 'excludedModelsText') {
+         return {
+           ...prev,
+diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
+index 2ea29de..555a86c 100644
+--- a/src/i18n/locales/en.json
++++ b/src/i18n/locales/en.json
+@@ -450,6 +450,8 @@
+     "note_label": "Note",
+     "note_placeholder": "Enter a note, e.g.: John's account",
+     "note_hint": "Optional. Used to describe the purpose or owner of this credential; leave empty to omit.",
++    "allowed_models_label": "Model whitelist (allowed_models)",
++    "allowed_models_hint": "Optional: one exact upstream model ID per line. Empty allows all supported models. Only listed models and their aliases can use this account; exclusions still apply. New models stay blocked.",
+     "excluded_models_label": "Excluded models (excluded_models)",
+     "headers_label": "Custom Headers (headers)",
+     "headers_placeholder": "{\n  \"Header-Name\": \"value\"\n}",
+diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
+index 5392cf0..298dbe5 100644
+--- a/src/i18n/locales/ko.json
++++ b/src/i18n/locales/ko.json
+@@ -447,6 +447,8 @@
+     "note_label": "메모",
+     "note_placeholder": "메모를 입력하세요(예: John의 계정)",
+     "note_hint": "선택 사항입니다. 이 자격 증명의 용도나 소유자를 설명하는 데 사용되며, 생략하려면 비워 두세요.",
++    "allowed_models_label": "Model whitelist (allowed_models)",
++    "allowed_models_hint": "Optional: one exact upstream model ID per line. Empty allows all supported models. Only listed models and their aliases can use this account; exclusions still apply. New models stay blocked.",
+     "excluded_models_label": "제외 모델 (excluded_models)",
+     "headers_label": "사용자 정의 헤더 (headers)",
+     "headers_placeholder": "{\n  \"Header-Name\": \"value\"\n}",
+diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
+index a23c189..be5bfba 100644
+--- a/src/i18n/locales/ru.json
++++ b/src/i18n/locales/ru.json
+@@ -459,6 +459,8 @@
+     "note_label": "Заметка (note)",
+     "note_placeholder": "Введите заметку, например: аккаунт Ивана",
+     "note_hint": "Необязательно. Используется для описания назначения или владельца учётных данных; оставьте пустым, чтобы не записывать.",
++    "allowed_models_label": "Model whitelist (allowed_models)",
++    "allowed_models_hint": "Optional: one exact upstream model ID per line. Empty allows all supported models. Only listed models and their aliases can use this account; exclusions still apply. New models stay blocked.",
+     "excluded_models_label": "Исключённые модели (excluded_models)",
+     "prefix_proxy_invalid_json": "Этот файл авторизации не является JSON-объектом, поэтому поля нельзя редактировать.",
+     "prefix_proxy_html_challenge": "Скачанное содержимое является HTML-страницей проверки, а не JSON-объектом авторизации. Повторно авторизуйтесь или замените файл перед редактированием полей.",
+diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
+index 1f5370a..2025ca6 100644
+--- a/src/i18n/locales/tr.json
++++ b/src/i18n/locales/tr.json
+@@ -429,6 +429,8 @@
+     "note_label": "Not",
+     "note_placeholder": "Bir Not Gir, Ör.: John'un Hesabı",
+     "note_hint": "İsteğe Bağlı. Bu Kimlik Bilgisinin Amacını veya Sahibini Anlatmak için Kullanılır. Atlamak için Boş Bırak.",
++    "allowed_models_label": "Model whitelist (allowed_models)",
++    "allowed_models_hint": "Optional: one exact upstream model ID per line. Empty allows all supported models. Only listed models and their aliases can use this account; exclusions still apply. New models stay blocked.",
+     "excluded_models_label": "Hariç Tutulan Modeller (excluded_models)",
+     "headers_label": "Özel Üst Bilgiler (headers)",
+     "headers_placeholder": "{\n\"Header-Name\": \"value\"\n}",
+diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
+index 2a54630..23f634b 100644
+--- a/src/i18n/locales/vi.json
++++ b/src/i18n/locales/vi.json
+@@ -380,6 +380,8 @@
+     "note_label": "Ghi chú",
+     "note_placeholder": "Nhập ghi chú, ví dụ: Tài khoản của John",
+     "note_hint": "Tùy chọn. Dùng để mô tả mục đích hoặc chủ sở hữu của credential này; để trống nếu không cần.",
++    "allowed_models_label": "Model whitelist (allowed_models)",
++    "allowed_models_hint": "Optional: one exact upstream model ID per line. Empty allows all supported models. Only listed models and their aliases can use this account; exclusions still apply. New models stay blocked.",
+     "excluded_models_label": "Model bị loại trừ (excluded_models)",
+     "headers_label": "Header tùy chỉnh (headers)",
+     "headers_placeholder": "{\n  \"Header-Name\": \"value\"\n}",
+diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
+index d1adb62..dc60810 100644
+--- a/src/i18n/locales/zh-CN.json
++++ b/src/i18n/locales/zh-CN.json
+@@ -448,6 +448,8 @@
+     "note_label": "备注（note）",
+     "note_placeholder": "输入备注信息，例如：张三的账号",
+     "note_hint": "可选，用于标记凭证用途或归属；留空则不写入。",
++    "allowed_models_label": "Model whitelist (allowed_models)",
++    "allowed_models_hint": "Optional: one exact upstream model ID per line. Empty allows all supported models. Only listed models and their aliases can use this account; exclusions still apply. New models stay blocked.",
+     "excluded_models_label": "排除模型（excluded_models）",
+     "headers_label": "自定义请求头（headers）",
+     "headers_placeholder": "{\n  \"Header-Name\": \"value\"\n}",
+diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
+index a0a7570..922fa77 100644
+--- a/src/i18n/locales/zh-TW.json
++++ b/src/i18n/locales/zh-TW.json
+@@ -448,6 +448,8 @@
+     "note_label": "備註（note）",
+     "note_placeholder": "輸入備註資訊，例如：張三的帳號",
+     "note_hint": "選填，用於標記憑證用途或歸屬；留空則不寫入。",
++    "allowed_models_label": "Model whitelist (allowed_models)",
++    "allowed_models_hint": "Optional: one exact upstream model ID per line. Empty allows all supported models. Only listed models and their aliases can use this account; exclusions still apply. New models stay blocked.",
+     "excluded_models_label": "排除模型（excluded_models）",
+     "headers_label": "自訂請求標頭（headers）",
+     "headers_placeholder": "{\n  \"Header-Name\": \"value\"\n}",
+diff --git a/src/services/api/authFiles.ts b/src/services/api/authFiles.ts
+index 52a54b9..45cb0af 100644
+--- a/src/services/api/authFiles.ts
++++ b/src/services/api/authFiles.ts
+@@ -47,6 +47,7 @@ export type AuthFileFieldsPatch = {
+   using_api?: boolean;
+   use_siwc?: boolean;
+   note?: string;
++  allowed_models?: string[];
+   excluded_models?: string[];
+   'excluded-models'?: string[];
+   expired?: string;
+diff --git a/tests/authFileWeight.test.ts b/tests/authFileWeight.test.ts
+index bb9d08d..3a871b1 100644
+--- a/tests/authFileWeight.test.ts
++++ b/tests/authFileWeight.test.ts
+@@ -37,6 +37,8 @@ const makeEditor = (json: Record<string, unknown>, weight: string): PrefixProxyE
+   usingApiTouched: false,
+   note: '',
+   noteTouched: false,
++  allowedModelsText: '',
++  allowedModelsTouched: false,
+   excludedModelsText: '',
+   excludedModelsTouched: false,
+   headersText: '',
+@@ -180,7 +182,9 @@ describe('auth-file excluded models patch', () => {
+       buildAuthFileFieldsPatch(
+         {
+           ...makeEditor(original, ''),
+-          excludedModelsText: '',
++          allowedModelsText: '',
++  allowedModelsTouched: false,
++  excludedModelsText: '',
+           excludedModelsTouched: true,
+         },
+         resolveError
+@@ -200,3 +204,18 @@ describe('Keeper email privacy', () => {
+     expect(json.access_token).toBe('fixture-token');
+   });
+ });
++
++describe('account model whitelist', () => {
++ test('saves exact models while preserving other account fields', () => {
++  const original = { access_token: 'synthetic-only', note: 'keep', excluded_models: ['gpt-6-sol'] };
++  const editor = { ...makeEditor(original, ''), allowedModelsText: ' gpt-6-astra\nGPT-6-ASTRA ', allowedModelsTouched: true };
++  expect(buildAuthFileFieldsPatch(editor, resolveError)).toEqual({ allowed_models: ['gpt-6-astra'] });
++  expect(original.note).toBe('keep');
++  expect(buildAuthFileFieldsPatch({ ...editor, allowedModelsTouched: false }, resolveError)).toEqual({});
++ });
++ test('clears the whitelist and preserves unchanged values', () => {
++  const editor = { ...makeEditor({ allowed_models: ['gpt-6-astra'] }, ''), allowedModelsTouched: true };
++  expect(buildAuthFileFieldsPatch(editor, resolveError)).toEqual({ allowed_models: [] });
++  expect(buildAuthFileFieldsPatch({ ...editor, allowedModelsText: 'gpt-6-astra' }, resolveError)).toEqual({});
++ });
++});

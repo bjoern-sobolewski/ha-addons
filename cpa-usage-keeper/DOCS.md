@@ -26,6 +26,15 @@ Copy CPA's management secret into `management_key`. Set a separate `login_passwo
 
 Keeper's SQLite database is `/data/app.db`; logs and automatic database backups also stay under `/data`. Daily backup and log retention defaults to seven days, adjustable in options. Home Assistant backups stop the app to capture a consistent database.
 
+The shared **Range** selector offers Hours, Days, Weeks and Months alongside
+Today, Yesterday and Custom. Weeks cover 7 days each and months cover 30 days
+each, including today in the configured server timezone. Overview and Analysis
+support up to 52 weeks or 12 months using daily summaries; Request Events is
+limited to 12 weeks or 3 months because its normal event table retains 90 days.
+Switching to Request Events temporarily caps a longer overview selection;
+returning to Overview restores that selection. Application log and backup
+retention does not limit the lifetime of daily usage summaries.
+
 Keeper probes CPA's built-in Redis/RESP interface and falls back to the HTTP usage queue if that interface is unavailable. No separate Redis server is needed. Usage history starts with new requests after the apps are running; CPA's earlier in-memory usage is not guaranteed to be recoverable. Keep one Keeper collector per CPA to avoid competing consumers.
 
 Keep the full dashboard on port 8080 (default LAN mapping 8081) on your trusted LAN/VPN. Authentication over the default LAN HTTP endpoint is unencrypted, so use a trusted network or HTTPS.

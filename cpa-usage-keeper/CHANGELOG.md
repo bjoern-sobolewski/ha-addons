@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.10
+
+- Add Weeks (1–52) and Months (1–12) to the shared time-range slider and retain the saved Overview/Analysis selection across reloads.
+- Use seven-day weeks and thirty-day months including today, backed by daily summaries. Keep Request Events within its 90-day window (up to 12 weeks or 3 months).
+
 ## 0.2.9
 
 - Preserve the browser's reset request ID through the API handler so Codex and Claude quota resets reach the shared CPA reset service.

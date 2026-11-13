@@ -1,0 +1,779 @@
+diff --git a/internal/api/test/usage_period_range_test.go b/internal/api/test/usage_period_range_test.go
+new file mode 100644
+index 00000000..bd2dbf3c
+--- /dev/null
++++ b/internal/api/test/usage_period_range_test.go
+@@ -0,0 +1,59 @@
++package test
++
++import (
++	"context"
++	"net/http"
++	"testing"
++
++	. "cpa-usage-keeper/internal/api"
++	servicedto "cpa-usage-keeper/internal/service/dto"
++)
++
++type usagePeriodReportsStub struct{ usageEventsStub }
++
++func (s *usagePeriodReportsStub) GetAnalysis(_ context.Context, filter servicedto.UsageFilter) (*servicedto.AnalysisSnapshot, error) {
++	s.lastFilter = filter
++	return nil, nil
++}
++
++func (s *usagePeriodReportsStub) GetUsageActivity(_ context.Context, filter servicedto.UsageFilter) (*servicedto.UsageActivitySnapshot, error) {
++	s.lastFilter = filter
++	return nil, nil
++}
++
++func TestUsagePeriodPresetsReachScopedDailyReports(t *testing.T) {
++	for _, route := range []string{"/api/v1/usage/overview", "/api/v1/usage/analysis", "/api/v1/usage/activity"} {
++		t.Run(route, func(t *testing.T) {
++			provider := &usagePeriodReportsStub{}
++			router := NewRouter(nil, nil, provider, nil, AuthConfig{}, nil, "")
++			response := serveAPIGet(router, route+"?range=12mo&api_key_id=42")
++			if response.Code != http.StatusOK {
++				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
++			}
++			filter := provider.lastFilter
++			if filter.APIKeyID != "42" || filter.Range != "custom" || filter.CustomUnit != "day" || filter.RangeCount != 360 || !filter.EndExclusive {
++				t.Fatalf("unexpected daily filter: %+v", filter)
++			}
++		})
++	}
++	provider := &usageEventsStub{}
++	router, cookie := newUsageViewerRouter(t, provider)
++	response := serveAPIGet(router, "/api/v1/key-overview?range=52w&api_key_id=999", cookie)
++	if response.Code != http.StatusOK || provider.lastFilter.APIKeyID != "42" || provider.lastFilter.RangeCount != 364 {
++		t.Fatalf("viewer scope/range status=%d filter=%+v", response.Code, provider.lastFilter)
++	}
++}
++
++func TestUsagePeriodPresetsKeepEventsWithinHotStorage(t *testing.T) {
++	for _, sample := range []struct {
++		value  string
++		status int
++	}{{"12w", 200}, {"3mo", 200}, {"13w", 400}, {"4mo", 400}} {
++		provider := &usageEventsStub{}
++		router := NewRouter(nil, nil, provider, nil, AuthConfig{}, nil, "")
++		response := serveAPIGet(router, "/api/v1/usage/events?range="+sample.value)
++		if response.Code != sample.status {
++			t.Fatalf("%s: status=%d body=%s", sample.value, response.Code, response.Body.String())
++		}
++	}
++}
+diff --git a/internal/api/test/usage_range_test.go b/internal/api/test/usage_range_test.go
+index 2b98009f..2c847595 100644
+--- a/internal/api/test/usage_range_test.go
++++ b/internal/api/test/usage_range_test.go
+@@ -41,7 +41,7 @@ func TestUsageRoutesAcceptBoundedRollingRanges(t *testing.T) {
+ }
+ 
+ func TestUsageRoutesRejectOutOfBoundsRollingRanges(t *testing.T) {
+-	for _, rangeVal := range []string{"0h", "1h", "4h", "25h", "0d", "31d", "01h", "1w"} {
++	for _, rangeVal := range []string{"0h", "1h", "4h", "25h", "0d", "31d", "01h", "0w", "53w", "0mo", "13mo", "01w"} {
+ 		t.Run(rangeVal, func(t *testing.T) {
+ 			provider := &usageEventsStub{}
+ 			router := NewRouter(nil, nil, provider, nil, AuthConfig{}, nil, "")
+diff --git a/internal/timeutil/test/usage_period_range_test.go b/internal/timeutil/test/usage_period_range_test.go
+new file mode 100644
+index 00000000..aefc49da
+--- /dev/null
++++ b/internal/timeutil/test/usage_period_range_test.go
+@@ -0,0 +1,43 @@
++package test
++
++import (
++	"testing"
++	"time"
++
++	"cpa-usage-keeper/internal/timeutil"
++)
++
++func TestUsagePeriodPresetsUseCalendarDaysAcrossDST(t *testing.T) {
++	location := useTimezone(t, "Europe/Berlin")
++	anchor := time.Date(2026, 10, 27, 12, 0, 0, 0, location)
++	for _, sample := range []struct {
++		value string
++		days  int
++	}{{"1w", 7}, {"52w", 364}, {"1mo", 30}, {"12mo", 360}} {
++		result, err := timeutil.ParseUsageQueryRangeWithOptions(sample.value, "", "", "", anchor, timeutil.UsageQueryRangeOptions{MaxCustomDayRangeDays: 365})
++		if err != nil {
++			t.Fatalf("%s: %v", sample.value, err)
++		}
++		start := time.Date(2026, 10, 27, 0, 0, 0, 0, location).AddDate(0, 0, 1-sample.days)
++		end := time.Date(2026, 10, 28, 0, 0, 0, 0, location)
++		if result.Range != "custom" || result.Unit != timeutil.UsageQueryUnitDay || result.Count != sample.days || !result.EndExclusive || !result.StartTime.Equal(start) || !result.EndTime.Equal(end) {
++			t.Fatalf("%s: got %+v, want %s..%s", sample.value, result, start, end)
++		}
++	}
++}
++
++func TestUsagePeriodPresetsRespectRouteLimits(t *testing.T) {
++	location := useTimezone(t, "Europe/Berlin")
++	anchor := time.Date(2026, 11, 12, 12, 0, 0, 0, location)
++	options := timeutil.UsageQueryRangeOptions{MaxCustomDayRangeDays: 90}
++	for _, value := range []string{"12w", "3mo"} {
++		if _, err := timeutil.ParseUsageQueryRangeWithOptions(value, "", "", "", anchor, options); err != nil {
++			t.Fatalf("%s: %v", value, err)
++		}
++	}
++	for _, value := range []string{"13w", "4mo", "0w", "53w", "0mo", "13mo", "01w", "1m", "-1mo"} {
++		if _, err := timeutil.ParseUsageQueryRangeWithOptions(value, "", "", "", anchor, options); err == nil {
++			t.Fatalf("accepted %s", value)
++		}
++	}
++}
+diff --git a/internal/timeutil/usage_query_range.go b/internal/timeutil/usage_query_range.go
+index 4e71a990..9b557a15 100644
+--- a/internal/timeutil/usage_query_range.go
++++ b/internal/timeutil/usage_query_range.go
+@@ -3,6 +3,7 @@ package timeutil
+ import (
+ 	"errors"
+ 	"fmt"
++	"strconv"
+ 	"strings"
+ 	"time"
+ )
+@@ -68,6 +69,11 @@ func ParseUsageQueryRangeWithOptions(rangeValue, unitValue, startValue, endValue
+ 		return UsageQueryRange{}, fmt.Errorf("usage range anchor is required")
+ 	}
+ 
++	if days, ok := parseUsagePeriodDays(rangeValue); ok {
++		today := DateOf(NormalizeStorageTime(anchor))
++		return parseCustomUsageDayRange(today.AddDays(1-days).String(), today.String(), anchor, usageDayRangeLimit(options))
++	}
++
+ 	switch rangeValue {
+ 	case "today", "yesterday":
+ 		localAnchor := NormalizeStorageTime(anchor)
+@@ -108,6 +114,30 @@ func ParseUsageQueryRangeWithOptions(rangeValue, unitValue, startValue, endValue
+ 	}
+ }
+ 
++// Period presets include today and use the same bounded daily aggregates as custom ranges.
++func parseUsagePeriodDays(value string) (int, bool) {
++	suffix, daysPerPeriod, maximum := "w", 7, 52
++	if strings.HasSuffix(value, "mo") {
++		suffix, daysPerPeriod, maximum = "mo", 30, 12
++	}
++	if !strings.HasSuffix(value, suffix) {
++		return 0, false
++	}
++	numberText := strings.TrimSuffix(value, suffix)
++	amount, err := strconv.Atoi(numberText)
++	if err != nil || strconv.Itoa(amount) != numberText || amount < 1 || amount > maximum {
++		return 0, false
++	}
++	return amount * daysPerPeriod, true
++}
++
++func usageDayRangeLimit(options UsageQueryRangeOptions) int {
++	if options.MaxCustomDayRangeDays > 0 {
++		return options.MaxCustomDayRangeDays
++	}
++	return defaultCustomDayRangeMaxDays
++}
++
+ func parseCustomUsageQueryRange(unitValue, startValue, endValue string, anchor time.Time, options UsageQueryRangeOptions) (UsageQueryRange, error) {
+ 	startValue = strings.TrimSpace(startValue)
+ 	endValue = strings.TrimSpace(endValue)
+@@ -119,11 +149,7 @@ func parseCustomUsageQueryRange(unitValue, startValue, endValue string, anchor t
+ 		return UsageQueryRange{}, err
+ 	}
+ 	if unit == UsageQueryUnitDay {
+-		maxDays := options.MaxCustomDayRangeDays
+-		if maxDays <= 0 {
+-			maxDays = defaultCustomDayRangeMaxDays
+-		}
+-		return parseCustomUsageDayRange(startValue, endValue, anchor, maxDays)
++		return parseCustomUsageDayRange(startValue, endValue, anchor, usageDayRangeLimit(options))
+ 	}
+ 	return parseCustomUsageHourRange(startValue, endValue, anchor)
+ }
+diff --git a/web/src/components/usage/TimeRangeControl.module.scss b/web/src/components/usage/TimeRangeControl.module.scss
+index 18001a85..4b2a15a6 100644
+--- a/web/src/components/usage/TimeRangeControl.module.scss
++++ b/web/src/components/usage/TimeRangeControl.module.scss
+@@ -171,7 +171,7 @@
+ 
+ .modeSelector {
+   display: grid;
+-  grid-template-columns: repeat(5, max-content);
++  grid-template-columns: repeat(4, minmax(0, 1fr));
+   justify-content: space-between;
+   gap: 4px;
+   padding: 4px;
+@@ -180,11 +180,16 @@
+   background: var(--bg-secondary);
+ }
+ 
++.periodHint {
++  color: var(--text-secondary);
++  font-size: 10px;
++}
++
+ .modeButton,
+ .modeButtonActive {
+   box-sizing: border-box;
+   width: auto;
+-  min-width: max-content;
++  min-width: 0;
+   min-height: 36px;
+   padding: 0 7px;
+   border: 0;
+diff --git a/web/src/components/usage/TimeRangeControl.tsx b/web/src/components/usage/TimeRangeControl.tsx
+index 66e4430b..bf669b24 100644
+--- a/web/src/components/usage/TimeRangeControl.tsx
++++ b/web/src/components/usage/TimeRangeControl.tsx
+@@ -8,33 +8,39 @@ import { IconChevronDown, IconTimer } from '@/components/ui/icons';
+ import { DEFAULT_CUSTOM_DAY_RANGE_MAX_DAYS, formatCustomRangeLabel, normalizeCustomRange } from '@/utils/usage/customRange';
+ import {
+   buildRollingUsageRange,
++  isRollingUsageMode,
++  ROLLING_USAGE_UNITS,
++  rollingUsageMaximum,
++  type RollingUsageUnit,
+   parseSelectableUsageRange,
+   type UsageTimeRangeMode,
+ } from '@/utils/usage/rangeQuery';
+ import { CustomRangePanel } from './CustomRangePanel';
+ import styles from './TimeRangeControl.module.scss';
+ 
+-type RollingUnit = Extract<UsageTimeRangeMode, 'hour' | 'day'>;
++type RollingUnit = RollingUsageUnit;
+ 
+ const MODE_OPTIONS: ReadonlyArray<{ value: UsageTimeRangeMode; labelKey: string }> = [
+   { value: 'hour', labelKey: 'usage_stats.range_unit_hour' },
+   { value: 'day', labelKey: 'usage_stats.range_unit_day' },
++  { value: 'week', labelKey: 'usage_stats.range_unit_week' },
++  { value: 'month', labelKey: 'usage_stats.range_unit_month' },
+   { value: 'today', labelKey: 'usage_stats.range_today' },
+   { value: 'yesterday', labelKey: 'usage_stats.range_yesterday' },
+   { value: 'custom', labelKey: 'usage_stats.range_custom' },
+ ];
+ 
+-const DEFAULT_ROLLING_VALUES: Record<RollingUnit, number> = { hour: 8, day: 7 };
++const DEFAULT_ROLLING_VALUES: Record<RollingUnit, number> = { hour: 8, day: 7, week: 4, month: 3 };
+ const MOBILE_BREAKPOINT_PX = 768;
+ const RANGE_DIALOG_FOCUSABLE_SELECTOR = 'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+ 
+-const getRollingMinimum = (unit: RollingUnit) => unit === 'hour' ? 5 : 1;
++const getRollingMinimum = (unit: RollingUnit) => ROLLING_USAGE_UNITS[unit].minimum;
+ 
+-const getRollingMaximum = (unit: RollingUnit) => unit === 'hour' ? 24 : 30;
++const getRollingMaximum = rollingUsageMaximum;
+ 
+-const getRollingTicks = (unit: RollingUnit) => unit === 'hour'
+-  ? [5, 8, 12, 18, 24]
+-  : [1, 7, 14, 21, 30];
++const getRollingTicks = (unit: RollingUnit, maximum: number): number[] => (
++  [...new Set([...ROLLING_USAGE_UNITS[unit].ticks.filter(tick => tick <= maximum), maximum])]
++);
+ 
+ type LiquidParticleMotion = 'a' | 'b' | 'c';
+ 
+@@ -111,14 +117,14 @@ function TimeRangePanel({
+   onCustomCancel,
+ }: RangePanelProps) {
+   const { t } = useTranslation();
+-  const isRolling = mode === 'hour' || mode === 'day';
+-  const rollingUnit: RollingUnit = mode === 'day' ? 'day' : 'hour';
++  const isRolling = isRollingUsageMode(mode);
++  const rollingUnit: RollingUnit = isRolling ? mode : 'hour';
+   const rollingValue = rollingValues[rollingUnit];
+   const minimum = getRollingMinimum(rollingUnit);
+-  const maximum = getRollingMaximum(rollingUnit);
++  const maximum = getRollingMaximum(rollingUnit, maxCustomDayRangeDays);
+   const progress = ((rollingValue - minimum) / (maximum - minimum)) * 100;
+   const sliderStyle = { '--range-progress': `${progress}%` } as CSSProperties;
+-  const ticks = getRollingTicks(rollingUnit);
++  const ticks = getRollingTicks(rollingUnit, maximum);
+ 
+   const commitKeyboardValue = (event: KeyboardEvent<HTMLInputElement>) => {
+     if (event.key.startsWith('Arrow') || event.key === 'Home' || event.key === 'End' || event.key === 'PageUp' || event.key === 'PageDown') {
+@@ -150,7 +156,7 @@ function TimeRangePanel({
+             <span>{t('usage_stats.range_recent_window')}</span>
+             <strong>
+               {rollingValue}
+-              <small>{t(rollingUnit === 'hour' ? 'usage_stats.range_value_hour' : 'usage_stats.range_value_day', { count: rollingValue })}</small>
++              <small>{t(`usage_stats.range_value_${rollingUnit}`, { count: rollingValue })}</small>
+             </strong>
+           </div>
+           <div className={styles.sliderControl} style={sliderStyle}>
+@@ -193,7 +199,7 @@ function TimeRangePanel({
+               step={1}
+               value={rollingValue}
+               aria-label={t(
+-                rollingUnit === 'hour' ? 'usage_stats.range_last_hours' : 'usage_stats.range_last_days',
++                `usage_stats.range_last_${rollingUnit}s`,
+                 { count: rollingValue },
+               )}
+               onPointerDown={(event) => {
+@@ -207,6 +213,7 @@ function TimeRangePanel({
+               onBlur={(event) => onRollingValueCommit(rollingUnit, Number(event.currentTarget.value))}
+             />
+           </div>
++          {(mode === 'week' || mode === 'month') && <small className={styles.periodHint}>{t(`usage_stats.range_${mode}_hint`)}</small>}
+           <div className={styles.rangeTicks} aria-hidden="true">
+             {ticks.map((tick) => <span key={tick}>{tick}</span>)}
+           </div>
+@@ -269,7 +276,7 @@ export function TimeRangeControl({
+   }));
+   const [rollingValues, setRollingValues] = useState<Record<RollingUnit, number>>(() => ({
+     ...DEFAULT_ROLLING_VALUES,
+-    ...(appliedMode === 'hour' || appliedMode === 'day' ? { [appliedMode]: parsedRange.value ?? DEFAULT_ROLLING_VALUES[appliedMode] } : {}),
++    ...(isRollingUsageMode(appliedMode) ? { [appliedMode]: parsedRange.value ?? DEFAULT_ROLLING_VALUES[appliedMode] } : {}),
+   }));
+   const [draftingUnit, setDraftingUnit] = useState<RollingUnit | null>(null);
+   const [desktopOpen, setDesktopOpen] = useState(false);
+@@ -298,7 +305,7 @@ export function TimeRangeControl({
+ 
+   const displayedRollingValues: Record<RollingUnit, number> = {
+     ...rollingValues,
+-    ...(appliedMode === 'hour' || appliedMode === 'day') && draftingUnit !== appliedMode
++    ...(isRollingUsageMode(appliedMode)) && draftingUnit !== appliedMode
+       ? { [appliedMode]: parsedRange.value ?? DEFAULT_ROLLING_VALUES[appliedMode] }
+       : {},
+   };
+@@ -317,7 +324,7 @@ export function TimeRangeControl({
+         ? formatCustomRangeLabel(customRange, { locale: i18n?.language, timeZone })
+         : t('usage_stats.range_custom');
+     }
+-    return t(appliedMode === 'hour' ? 'usage_stats.range_last_hours' : 'usage_stats.range_last_days', {
++    return t(`usage_stats.range_last_${appliedMode}s`, {
+       count: displayedRollingValues[appliedMode],
+     });
+   };
+@@ -333,7 +340,7 @@ export function TimeRangeControl({
+   }, [customRange, maxCustomDayRangeDays, timeZone]);
+ 
+   const handleModeChange = (nextMode: UsageTimeRangeMode) => {
+-    if (appliedMode === 'hour' || appliedMode === 'day') {
++    if (isRollingUsageMode(appliedMode)) {
+       setRollingValues((current) => ({ ...current, [appliedMode]: displayedRollingValues[appliedMode] }));
+     }
+     setDraftingUnit(null);
+@@ -348,7 +355,7 @@ export function TimeRangeControl({
+       onChange(nextMode);
+       return;
+     }
+-    onChange(buildRollingUsageRange(nextMode, displayedRollingValues[nextMode]));
++    onChange(buildRollingUsageRange(nextMode, Math.min(displayedRollingValues[nextMode], getRollingMaximum(nextMode, maxCustomDayRangeDays))));
+   };
+ 
+   const handleRollingValueChange = (unit: RollingUnit, nextValue: number) => {
+@@ -413,7 +420,7 @@ export function TimeRangeControl({
+       }));
+       return;
+     }
+-    if (appliedMode !== 'hour' && appliedMode !== 'day') return;
++    if (!isRollingUsageMode(appliedMode)) return;
+     const appliedValue = parsedRange.value ?? DEFAULT_ROLLING_VALUES[appliedMode];
+     latestRollingValuesRef.current = { ...latestRollingValuesRef.current, [appliedMode]: appliedValue };
+     setRollingValues((current) => current[appliedMode] === appliedValue ? current : { ...current, [appliedMode]: appliedValue });
+diff --git a/web/src/components/usage/test/TimeRangeControl.test.tsx b/web/src/components/usage/test/TimeRangeControl.test.tsx
+index 090b07f7..16f34968 100644
+--- a/web/src/components/usage/test/TimeRangeControl.test.tsx
++++ b/web/src/components/usage/test/TimeRangeControl.test.tsx
+@@ -47,6 +47,34 @@ describe('TimeRangeControl', () => {
+     await act(async () => button.click());
+   };
+ 
++  it.each([
++    { mode: 'week', range: '4w' as const, maximum: '52', next: '26', expected: '26w' },
++    { mode: 'month', range: '3mo' as const, maximum: '12', next: '12', expected: '12mo' },
++  ])('selects $mode windows and commits only after keyboard interaction', async ({mode, range, maximum, next, expected}) => {
++    const onChange = vi.fn();
++    await renderControl('30d', onChange);
++    await click('[data-time-range-trigger="desktop"]');
++    await click(`[data-time-range-mode="${mode}"]`);
++    expect(onChange).toHaveBeenCalledWith(range);
++    await renderControl(range, onChange);
++    const slider = document.querySelector<HTMLInputElement>('[data-time-range-slider]')!;
++    expect(slider.max).toBe(maximum);
++    expect(document.querySelector(`[data-time-range-mode="${mode}"]`)?.getAttribute('aria-pressed')).toBe('true');
++    onChange.mockClear();
++    await act(async () => { slider.value = next; slider.dispatchEvent(new Event('input', {bubbles: true})); });
++    expect(onChange).not.toHaveBeenCalled();
++    await act(async () => slider.dispatchEvent(new KeyboardEvent('keyup', {key: 'End', bubbles: true})));
++    expect(onChange).toHaveBeenCalledExactlyOnceWith(expected);
++  });
++
++  it.each([['week', '12w', '12'], ['month', '3mo', '3']] as const)('limits %s selection on 90-day event pages', async (mode, expected, maximum) => {
++    const {onChange} = await renderControl('today', vi.fn(), undefined, 'Europe/Berlin', 90);
++    await click('[data-time-range-trigger="mobile"]');
++    await click(`[data-time-range-mode="${mode}"]`);
++    await renderControl(expected, onChange, undefined, 'Europe/Berlin', 90);
++    expect(document.querySelector<HTMLInputElement>('[data-time-range-slider]')?.max).toBe(maximum);
++  });
++
+   it('renders labeled double-pill shells for desktop and mobile triggers', async () => {
+     await renderControl('8h');
+ 
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index ac62349a..f486860c 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -339,6 +339,22 @@ const resources = {
+         range_custom_now: 'Now',
+         range_unit_hour: 'Hours',
+         range_unit_day: 'Days',
++        range_unit_week: 'Weeks',
++        range_value_week: 'Weeks',
++        range_value_week_one: 'Week',
++        range_value_week_other: 'Weeks',
++        range_last_weeks: 'Last {{count}} weeks',
++        range_last_weeks_one: 'Last {{count}} week',
++        range_last_weeks_other: 'Last {{count}} weeks',
++        range_week_hint: '1 week = 7 days, including today.',
++        range_unit_month: 'Months',
++        range_value_month: 'Months',
++        range_value_month_one: 'Month',
++        range_value_month_other: 'Months',
++        range_last_months: 'Last {{count}} months',
++        range_last_months_one: 'Last {{count}} month',
++        range_last_months_other: 'Last {{count}} months',
++        range_month_hint: '1 month = 30 days, including today.',
+         range_value_hour_one: 'Hour',
+         range_value_hour_other: 'Hours',
+         range_value_day_one: 'Day',
+@@ -1438,6 +1454,22 @@ const resources = {
+         range_custom_now: '当前',
+         range_unit_hour: '小时',
+         range_unit_day: '天',
++        range_unit_week: '周',
++        range_value_week: '周',
++        range_value_week_one: '周',
++        range_value_week_other: '周',
++        range_last_weeks: '最近 {{count}} 周',
++        range_last_weeks_one: '最近 {{count}} 周',
++        range_last_weeks_other: '最近 {{count}} 周',
++        range_week_hint: '1 周为 7 天，包含今天。',
++        range_unit_month: '月',
++        range_value_month: '月',
++        range_value_month_one: '月',
++        range_value_month_other: '月',
++        range_last_months: '最近 {{count}} 个月',
++        range_last_months_one: '最近 {{count}} 个月',
++        range_last_months_other: '最近 {{count}} 个月',
++        range_month_hint: '1 个月为 30 天，包含今天。',
+         range_value_hour_one: '小时',
+         range_value_hour_other: '小时',
+         range_value_day_one: '天',
+@@ -2537,6 +2569,22 @@ const resources = {
+         range_custom_now: '目前',
+         range_unit_hour: '小時',
+         range_unit_day: '天',
++        range_unit_week: '週',
++        range_value_week: '週',
++        range_value_week_one: '週',
++        range_value_week_other: '週',
++        range_last_weeks: '最近 {{count}} 週',
++        range_last_weeks_one: '最近 {{count}} 週',
++        range_last_weeks_other: '最近 {{count}} 週',
++        range_week_hint: '1 週為 7 天，包含今天。',
++        range_unit_month: '月',
++        range_value_month: '月',
++        range_value_month_one: '月',
++        range_value_month_other: '月',
++        range_last_months: '最近 {{count}} 個月',
++        range_last_months_one: '最近 {{count}} 個月',
++        range_last_months_other: '最近 {{count}} 個月',
++        range_month_hint: '1 個月為 30 天，包含今天。',
+         range_value_hour_one: '小時',
+         range_value_hour_other: '小時',
+         range_value_day_one: '天',
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index bc426e7b..8f924270 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -1070,7 +1070,7 @@ export type UsageRollingHourTimeRange = `${number}h`
+ 
+ export type UsageRollingDayTimeRange = `${number}d`
+ 
+-export type KeyOverviewTimeRange = UsageRollingHourTimeRange | UsageRollingDayTimeRange | 'today' | 'yesterday'
++export type KeyOverviewTimeRange = UsageRollingHourTimeRange | UsageRollingDayTimeRange | `${number}w` | `${number}mo` | 'today' | 'yesterday'
+ 
+ export type UsageTimeRange = KeyOverviewTimeRange | 'custom'
+ 
+diff --git a/web/src/pages/ReadOnlyReportingPage.tsx b/web/src/pages/ReadOnlyReportingPage.tsx
+index 8e8e0480..5ffbff5e 100644
+--- a/web/src/pages/ReadOnlyReportingPage.tsx
++++ b/web/src/pages/ReadOnlyReportingPage.tsx
+@@ -94,7 +94,7 @@ export function ReadOnlyReportingPage({page,selectedApiKeyId,keyFilter,onNavigat
+  const pagination={reportingOnly:true,total:accounts?.total_count??0,page:number,totalPages:accounts?.total_pages??1,pageSize:size,activeOnly:active,sort,loading,
+   onPageChange:setNumber,onPageSizeChange:(value:number)=>{setSize(value);setNumber(1);},onActiveOnlyChange:(value:boolean)=>{setActive(value);setNumber(1);},onSortChange:(value:UsageIdentityPageSort)=>{setSort(value);setNumber(1);}};
+  return <KeyViewerShell activePage={page} readOnly onNavigate={onNavigate} onAuthRequired={onAuthRequired} onRefresh={()=>setRevision(value=>value+1)} refreshing={loading}
+-  filters={page==='events'?[keyFilter,<TimeRangeControl key="range" value={range} customRange={custom} ariaLabel={t('usage_stats.range_filter')} labelInsideTrigger onChange={(value,next)=>{setRange(value);setCustom(next);}}/>]:[<Select key="provider" value={provider} options={[{value:'',label:t('usage_stats.api_key_filter_all')},...(accounts?.type_counts??[]).map(item=>({value:item.type,label:item.type}))]} ariaLabel="Provider" onChange={value=>{setProvider(value);setNumber(1);}}/>]}>
++  filters={page==='events'?[keyFilter,<TimeRangeControl key="range" maxCustomDayRangeDays={90} value={range} customRange={custom} ariaLabel={t('usage_stats.range_filter')} labelInsideTrigger onChange={(value,next)=>{setRange(value);setCustom(next);}}/>]:[<Select key="provider" value={provider} options={[{value:'',label:t('usage_stats.api_key_filter_all')},...(accounts?.type_counts??[]).map(item=>({value:item.type,label:item.type}))]} ariaLabel="Provider" onChange={value=>{setProvider(value);setNumber(1);}}/>]}>
+   {error&&<p role="alert">{error}</p>}
+   {page==='events'&&<RequestEventsDetailsCard events={events?.events??[]} loading={loading&&!events} totalCount={events?.total_count??0} modelOptions={options.models} sourceOptions={options.sources}
+    modelFilter={model} sourceFilter={source} resultFilter={result} onModelFilterChange={setModel} onSourceFilterChange={setSource} onResultFilterChange={setResult}
+diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
+index f4b0169d..7d31e3ba 100644
+--- a/web/src/pages/UsagePage.tsx
++++ b/web/src/pages/UsagePage.tsx
+@@ -54,7 +54,7 @@ import {
+   type RequestEventColumnId,
+ } from '@/components/usage/RequestEventsDetailsCard';
+ import { clampCustomRangeToCurrentBounds, clampStoredUsageRangeStateToCurrentBounds, parseLegacyCustomRange, parseStoredUsageRangeState, resolveUsageRangeRecoveryTimeZone, serializeUsageRangeState, type StoredUsageRangeState } from '@/utils/usage/customRange';
+-import { buildUsageRangeQuery } from '@/utils/usage/rangeQuery';
++import { clampUsageRangeToDayLimit, buildUsageRangeQuery } from '@/utils/usage/rangeQuery';
+ import type { Theme } from '@/types';
+ import { BrandLink } from '@/components/BrandLink';
+ import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
+@@ -754,7 +754,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+   const [loadedTimeRange] = useState(loadTimeRange);
+   const pendingLegacyCustomRangeRef = useRef(loadedTimeRange.pendingLegacyCustomRange);
+   const [timeRangeState, setTimeRangeState] = useState<StoredUsageRangeState>(loadedTimeRange.state);
+-  const { range: timeRange, customRange } = timeRangeState;
++  const { customRange } = timeRangeState;
++  const timeRange = activeTab === 'events' ? clampUsageRangeToDayLimit(timeRangeState.range, REQUEST_EVENTS_CUSTOM_DAY_RANGE_MAX_DAYS) : timeRangeState.range;
+   const [realtimeWindow, setRealtimeWindow] = useState<OverviewRealtimeWindow>(loadRealtimeWindow);
+   const [selectedApiKeyId, setSelectedApiKeyId] = useState(loadSelectedApiKeyId);
+   const [apiKeyOptions, setApiKeyOptions] = useState<CpaApiKeyOption[]>([]);
+diff --git a/web/src/pages/test/UsagePage.styles.test.ts b/web/src/pages/test/UsagePage.styles.test.ts
+index 8036f9e0..ec28ae9b 100644
+--- a/web/src/pages/test/UsagePage.styles.test.ts
++++ b/web/src/pages/test/UsagePage.styles.test.ts
+@@ -81,13 +81,13 @@ describe('UsagePage responsive layout and accessibility', () => {
+     expect(mobileToolbarBlock).toMatch(/\.apiKeySelectControl\s*\{[\s\S]*?width:\s*100%;/)
+   })
+ 
+-  it('keeps all five range modes fully visible with consistent content-aware spacing', () => {
++  it('keeps all seven range modes visible in a compact two-row selector', () => {
+     const modeSelector = styleRuleBlock(timeRangeControlStyles, '.modeSelector')
+     const modeButton = styleRuleBlock(timeRangeControlStyles, '.modeButton,')
+ 
+-    expect(modeSelector).toContain('grid-template-columns: repeat(5, max-content);')
++    expect(modeSelector).toContain('grid-template-columns: repeat(4, minmax(0, 1fr));')
+     expect(modeSelector).toContain('justify-content: space-between;')
+-    expect(modeButton).toContain('min-width: max-content;')
++    expect(modeButton).toContain('min-width: 0;')
+     expect(modeButton).toContain('width: auto;')
+     expect(modeButton).toContain('white-space: nowrap;')
+     expect(modeButton).not.toContain('text-overflow: ellipsis;')
+diff --git a/web/src/utils/usage.ts b/web/src/utils/usage.ts
+index 86b2d127..12903ed0 100644
+--- a/web/src/utils/usage.ts
++++ b/web/src/utils/usage.ts
+@@ -149,6 +149,15 @@ export function resolveUsageFilterWindow(
+   }
+ 
+   const rollingRange = parseSelectableUsageRange(requestRange);
++  if (rollingRange.mode === 'week' || rollingRange.mode === 'month') {
++    const days = (rollingRange.value ?? 1) * (rollingRange.mode === 'week' ? 7 : 30);
++    const start = new Date(fallbackNow);
++    start.setHours(0, 0, 0, 0);
++    start.setDate(start.getDate() - days + 1);
++    const end = new Date(fallbackNow);
++    end.setHours(24, 0, 0, 0);
++    return { startMs: start.getTime(), endMs: end.getTime() - 1, windowMinutes: (end.getTime() - start.getTime()) / 60_000 };
++  }
+   const windowHours = (rollingRange.value ?? 8) * (rollingRange.mode === 'day' ? 24 : 1);
+   const endMs = fallbackNow;
+   const startMs = endMs - windowHours * 60 * 60 * 1000;
+diff --git a/web/src/utils/usage/overview.ts b/web/src/utils/usage/overview.ts
+index a1eb5628..f83ed0be 100644
+--- a/web/src/utils/usage/overview.ts
++++ b/web/src/utils/usage/overview.ts
+@@ -37,7 +37,7 @@ export const isDailyAverageRange = ({
+     return false;
+   }
+   if (rangeQuery.range !== 'custom') {
+-    return parseSelectableUsageRange(rangeQuery.range).mode === 'day';
++    return ['day', 'week', 'month'].includes(parseSelectableUsageRange(rangeQuery.range).mode);
+   }
+   return rangeQuery.unit === 'day' && Boolean(rangeQuery.start && rangeQuery.end && rangeQuery.start < rangeQuery.end);
+ };
+diff --git a/web/src/utils/usage/rangeQuery.ts b/web/src/utils/usage/rangeQuery.ts
+index 1d5115c2..76de70e3 100644
+--- a/web/src/utils/usage/rangeQuery.ts
++++ b/web/src/utils/usage/rangeQuery.ts
+@@ -1,6 +1,23 @@
+ import type { KeyOverviewTimeRange, UsageCustomRangeUnit, UsageRangeRequest, UsageTimeRange } from '@/lib/types';
+ 
+-export type UsageTimeRangeMode = 'hour' | 'day' | 'today' | 'yesterday' | 'custom';
++export type RollingUsageUnit = 'hour' | 'day' | 'week' | 'month';
++export type UsageTimeRangeMode = RollingUsageUnit | 'today' | 'yesterday' | 'custom';
++
++export const ROLLING_USAGE_UNITS = {
++  hour: { suffix: 'h', minimum: 5, maximum: 24, days: 0, ticks: [5, 8, 12, 18, 24] },
++  day: { suffix: 'd', minimum: 1, maximum: 30, days: 1, ticks: [1, 7, 14, 21, 30] },
++  week: { suffix: 'w', minimum: 1, maximum: 52, days: 7, ticks: [1, 13, 26, 39, 52] },
++  month: { suffix: 'mo', minimum: 1, maximum: 12, days: 30, ticks: [1, 3, 6, 9, 12] },
++} as const;
++
++export const isRollingUsageMode = (mode: UsageTimeRangeMode): mode is RollingUsageUnit => (
++  mode === 'hour' || mode === 'day' || mode === 'week' || mode === 'month'
++);
++
++export const rollingUsageMaximum = (unit: RollingUsageUnit, maxDays = 365): number => {
++  const settings = ROLLING_USAGE_UNITS[unit];
++  return settings.days ? Math.min(settings.maximum, Math.floor(maxDays / settings.days)) : settings.maximum;
++};
+ 
+ export interface ParsedSelectableUsageRange {
+   mode: UsageTimeRangeMode;
+@@ -11,15 +28,14 @@ export interface UsageRangeQuery extends UsageRangeRequest {
+   valid: boolean;
+ }
+ 
+-const parseRollingUsageRange = (value: unknown): { unit: 'hour' | 'day'; value: number } | null => {
++const parseRollingUsageRange = (value: unknown): { unit: RollingUsageUnit; value: number } | null => {
+   if (typeof value !== 'string') return null;
+-  const match = /^(\d+)([hd])$/.exec(value);
++  const match = /^(\d+)(h|d|w|mo)$/.exec(value);
+   if (!match) return null;
+   const amount = Number(match[1]);
+   if (!Number.isInteger(amount) || String(amount) !== match[1]) return null;
+-  const unit = match[2] === 'h' ? 'hour' : 'day';
+-  const minimum = unit === 'hour' ? 5 : 1;
+-  const maximum = unit === 'hour' ? 24 : 30;
++  const unit = (Object.keys(ROLLING_USAGE_UNITS) as RollingUsageUnit[]).find(key => ROLLING_USAGE_UNITS[key].suffix === match[2])!;
++  const { minimum, maximum } = ROLLING_USAGE_UNITS[unit];
+   if (amount < minimum || amount > maximum) return null;
+   return { unit, value: amount };
+ };
+@@ -50,11 +66,17 @@ export const parseSelectableUsageRange = (value: string): ParsedSelectableUsageR
+   return rolling ? { mode: rolling.unit, value: rolling.value } : { mode: 'hour', value: 8 };
+ };
+ 
+-export const buildRollingUsageRange = (unit: 'hour' | 'day', value: number): KeyOverviewTimeRange => {
+-  const minimum = unit === 'hour' ? 5 : 1;
+-  const maximum = unit === 'hour' ? 24 : 30;
++export const buildRollingUsageRange = (unit: RollingUsageUnit, value: number): KeyOverviewTimeRange => {
++  const { minimum, maximum } = ROLLING_USAGE_UNITS[unit];
+   const amount = Math.min(maximum, Math.max(minimum, Math.round(Number.isFinite(value) ? value : minimum)));
+-  return `${amount}${unit === 'hour' ? 'h' : 'd'}`;
++  return `${amount}${ROLLING_USAGE_UNITS[unit].suffix}` as KeyOverviewTimeRange;
++};
++
++// Preserve the stored overview selection while narrower event pages use their own limit.
++export const clampUsageRangeToDayLimit = (range: UsageTimeRange, maxDays: number): UsageTimeRange => {
++  const parsed = parseSelectableUsageRange(range);
++  if (parsed.mode !== 'week' && parsed.mode !== 'month') return range;
++  return buildRollingUsageRange(parsed.mode, Math.min(parsed.value ?? 1, rollingUsageMaximum(parsed.mode, maxDays)));
+ };
+ 
+ const parseCustomDateParam = (value: string | undefined): { value: string; timestampMs: number } | undefined => {
+diff --git a/web/src/utils/usage/test/periodRanges.test.ts b/web/src/utils/usage/test/periodRanges.test.ts
+new file mode 100644
+index 00000000..915e218d
+--- /dev/null
++++ b/web/src/utils/usage/test/periodRanges.test.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it } from 'vitest';
++import { buildUsageRangeQuery, clampUsageRangeToDayLimit, parseSelectableUsageRange } from '../rangeQuery';
++import { parseStoredUsageRangeState, serializeUsageRangeState } from '../customRange';
++import { isDailyAverageRange } from '../overview';
++
++describe('week and month range presets', () => {
++  it.each([['2w', 'week', 2], ['12mo', 'month', 12]] as const)('keeps %s selectable, queryable and persistent', (range, mode, value) => {
++    expect(parseSelectableUsageRange(range)).toEqual({ mode, value });
++    expect(buildUsageRangeQuery({ range })).toEqual({ valid: true, range });
++    expect(parseStoredUsageRangeState(serializeUsageRangeState({ range }), { nowMs: Date.now() })).toEqual({ range });
++    expect(isDailyAverageRange({ range })).toBe(true);
++  });
++
++  it('clamps event views without changing the stored overview choice', () => {
++    expect(clampUsageRangeToDayLimit('52w', 90)).toBe('12w');
++    expect(clampUsageRangeToDayLimit('12mo', 90)).toBe('3mo');
++    expect(clampUsageRangeToDayLimit('12mo', 365)).toBe('12mo');
++    expect(clampUsageRangeToDayLimit('custom', 90)).toBe('custom');
++  });
++});
+diff --git a/web/src/utils/usage/test/timeRange.test.ts b/web/src/utils/usage/test/timeRange.test.ts
+index 046a3ceb..124c76ca 100644
+--- a/web/src/utils/usage/test/timeRange.test.ts
++++ b/web/src/utils/usage/test/timeRange.test.ts
+@@ -14,7 +14,7 @@ describe('usage rolling time ranges', () => {
+   });
+ 
+   it('rejects out-of-bounds and non-canonical rolling ranges', () => {
+-    for (const value of ['0h', '1h', '4h', '25h', '0d', '31d', '01h', '1w']) {
++    for (const value of ['0h', '1h', '4h', '25h', '0d', '31d', '01h', '0w', '53w', '0mo', '13mo', '01w']) {
+       expect(rangeQuery.normalizeUsageRange(value)).toBe('8h');
+     }
+   });
+diff --git a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
+index b789488f..3a8a57c9 100644
+--- a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
++++ b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
+@@ -35,6 +35,7 @@ vi.mock('@/lib/api', async (importOriginal) => ({
+   ...api, apiFetch:vi.fn(),
+   fetchStatus: async () => ({ timezone: 'UTC' }),
+   fetchVersion: async () => ({ version: 'test' }),
++  fetchAdminProviderQuota: async () => ({ accounts: [] }),
+   fetchUsageEventModelFilterOptions: async () => ({ models: ['gpt-5'] }),
+   fetchUsageEventSourceFilterOptions: async () => ({ sources: [{ value: 'source-1', label: 'Team source' }] }),
+ }));
+@@ -335,4 +336,65 @@ describe('UsagePage top API Key request event filter', () => {
+     expect(api.fetchUsageEvents.mock.lastCall![2].apiKeyId).toBe('');
+     expect(localStorage.getItem(TOP_KEY_STORAGE)).toBe('');
+   });
++
++  it.each([
++    { mode: 'week', maximum: '52', overviewRange: '52w', eventsRange: '12w' },
++    { mode: 'month', maximum: '12', overviewRange: '12mo', eventsRange: '3mo' },
++  ])('caps $mode event queries and exports without replacing the saved Overview range across reloads', async ({ mode, maximum, overviewRange, eventsRange }) => {
++    window.history.replaceState(null, '', '/overview');
++    await render();
++    const rangeTrigger = () => container.querySelector<HTMLButtonElement>('[data-time-range-trigger="desktop"]')!;
++    const storedRange = () => JSON.parse(localStorage.getItem('cli-proxy-usage-time-range-v1')!).range;
++    const navigate = async (path: string) => {
++      await act(async () => container.querySelector<HTMLAnchorElement>(`[data-dashboard-toolbar] a[href="${path}"]`)!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })));
++      expect(window.location.pathname).toBe(path);
++    };
++
++    await act(async () => rangeTrigger().click());
++    await act(async () => document.querySelector<HTMLButtonElement>(`[data-time-range-mode="${mode}"]`)!.click());
++    const slider = document.querySelector<HTMLInputElement>('[data-time-range-slider]')!;
++    expect(slider.max).toBe(maximum);
++    await act(async () => {
++      slider.value = maximum;
++      slider.dispatchEvent(new Event('input', { bubbles: true }));
++    });
++    await act(async () => slider.dispatchEvent(new KeyboardEvent('keyup', { key: 'End', bubbles: true })));
++    await act(async () => rangeTrigger().click());
++    expect(api.fetchUsageOverview).toHaveBeenLastCalledWith(expect.objectContaining({ range: overviewRange }), expect.any(AbortSignal), '11');
++    expect(storedRange()).toBe(overviewRange);
++
++    await navigate('/request-events');
++    expect(api.fetchUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.any(AbortSignal), expect.objectContaining({ apiKeyId: '11' }));
++    expect(api.fetchUsageEvents.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
++    await act(async () => topKey().click());
++    await act(async () => topKey().click());
++    expect(api.fetchCpaApiKeyOptions.mock.calls.filter(call => call[1]).at(-1)![1]).toMatchObject({ scope: 'request-events', range: { range: eventsRange } });
++    expect(storedRange()).toBe(overviewRange);
++    await act(async () => button('Export').click());
++    await act(async () => button('Export CSV').click());
++    expect(api.exportUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), 'csv', expect.objectContaining({ apiKeyId: '11' }));
++
++    api.fetchUsageEvents.mockClear();
++    await act(async () => root.unmount());
++    root = createRoot(container);
++    await render();
++    expect(window.location.pathname).toBe('/request-events');
++    expect(api.fetchUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.any(AbortSignal), expect.objectContaining({ apiKeyId: '11' }));
++    expect(api.fetchUsageEvents.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
++    expect(storedRange()).toBe(overviewRange);
++    await act(async () => button('Export').click());
++    await act(async () => button('Export JSON').click());
++    expect(api.exportUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), 'json', expect.objectContaining({ apiKeyId: '11' }));
++
++    const overviewRequestsBeforeReturn = api.fetchUsageOverview.mock.calls.length;
++    await navigate('/overview');
++    expect(api.fetchUsageOverview.mock.calls.length).toBeGreaterThan(overviewRequestsBeforeReturn);
++    expect(api.fetchUsageOverview).toHaveBeenLastCalledWith(expect.objectContaining({ range: overviewRange }), expect.any(AbortSignal), '11');
++    await act(async () => topKey().click());
++    await act(async () => topKey().click());
++    expect(api.fetchCpaApiKeyOptions.mock.calls.filter(call => call[1]).at(-1)![1]).toMatchObject({ scope: 'overview', range: { range: overviewRange } });
++    expect(storedRange()).toBe(overviewRange);
++    await act(async () => rangeTrigger().click());
++    expect(document.querySelector<HTMLInputElement>('[data-time-range-slider]')?.value).toBe(maximum);
++  });
+ });

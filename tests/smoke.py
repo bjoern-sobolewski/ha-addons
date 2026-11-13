@@ -226,6 +226,25 @@ def main():
                 assert name_report[0] == 200 and 'Shared Team' in name_report[1].decode(), report
                 assert key.encode() not in name_report[1]
             key_id = next(item['id'] for item in json.loads(request(shared_keys_url, opener=read_only_opener)[1])['keys'] if item['label'] == 'Shared Team ✓')
+            reporting_api = viewer_gateway + viewer_path + '/api/v1'
+            for report_base, report_opener, report_paths in (
+                (keeper + '/api/v1', opener, ('usage/overview', 'usage/analysis')),
+                (reporting_api, viewer_opener, ('key-overview', 'key-analysis')),
+                (reporting_api, read_only_opener, ('read-only/key-overview', 'read-only/key-analysis')),
+            ):
+                for report_path in report_paths:
+                    for period in ('52w', '12mo'):
+                        report_status, report_body = request(f'{report_base}/{report_path}?range={period}', opener=report_opener)
+                        assert report_status == 200, (report_path, period, report_status)
+                        assert key.encode() not in report_body
+            for events_base, events_opener in (
+                (keeper + '/api/v1/usage/events', opener),
+                (reporting_api + '/read-only/events', read_only_opener),
+            ):
+                for period, expected_status in (('12w', 200), ('3mo', 200), ('13w', 400), ('4mo', 400)):
+                    assert request(f'{events_base}?range={period}', opener=events_opener)[0] == expected_status, period
+            assert request(reporting_api + '/read-only/events?range=12w', opener=viewer_opener)[0] == 403
+            print('PASS: packaged week/month reports across all roles and enforced event retention bounds', flush=True)
             alias_url = keeper + '/api/v1/usage/api-keys/' + key_id
             alias_headers = {'X-CPA-Usage-Keeper-Request':'fetch'}
             assert request(alias_url, alias_headers, body={'keyAlias':'Keeper Team'}, method='PATCH', opener=direct_read_only)[0] == 403

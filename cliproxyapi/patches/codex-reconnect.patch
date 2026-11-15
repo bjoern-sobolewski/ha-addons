@@ -12,10 +12,10 @@ index ddecf8ce..8f62d27b 100644
  		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
  		return
 diff --git a/internal/api/handlers/management/auth_files_fields.go b/internal/api/handlers/management/auth_files_fields.go
-index 698ed934..47168ba9 100644
+index f2f89ae8..abd265ba 100644
 --- a/internal/api/handlers/management/auth_files_fields.go
 +++ b/internal/api/handlers/management/auth_files_fields.go
-@@ -1107,6 +1107,9 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
+@@ -1130,6 +1130,9 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
  				}
  			}
  		}
@@ -26,10 +26,10 @@ index 698ed934..47168ba9 100644
  			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
  		}
 diff --git a/internal/api/handlers/management/auth_files_provider_oauth.go b/internal/api/handlers/management/auth_files_provider_oauth.go
-index c0bc67de..b40421b3 100644
+index 0d057981..40084a01 100644
 --- a/internal/api/handlers/management/auth_files_provider_oauth.go
 +++ b/internal/api/handlers/management/auth_files_provider_oauth.go
-@@ -208,6 +208,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
+@@ -256,6 +256,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
  }
  
  func (h *Handler) RequestCodexToken(c *gin.Context) {
@@ -40,7 +40,7 @@ index c0bc67de..b40421b3 100644
  	ctx := context.Background()
  	ctx = PopulateAuthContext(ctx, c)
  
-@@ -244,6 +248,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
+@@ -292,6 +296,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
  
  	RegisterOAuthSessionWithProxy(state, "codex", sessionProxyURL)
  	sessionTarget, hasSessionTarget := oauthSessionTargetFromContext(c)
@@ -51,33 +51,52 @@ index c0bc67de..b40421b3 100644
  	if hasSessionTarget {
  		SetOAuthSessionTarget(state, sessionTarget)
  	}
-@@ -382,9 +390,24 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
- 		if errGuard := claimOAuthSessionCommit(state, "codex"); errGuard != nil {
+@@ -402,7 +410,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
+ 				"plan_type": planType,
+ 			},
+ 		}
+-		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "codex", sessionProxyURL, record, "Failed to save authentication tokens", true)
++		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "codex", sessionProxyURL, record, "Failed to save authentication tokens", true, reconnect)
+ 		if !okSaved {
  			return
  		}
--		savedPath, errSave := h.saveTokenRecord(ctx, record)
-+		var savedPath string
-+		var errSave error
-+		if reconnect != nil {
-+			savedPath, errSave = h.saveCodexReconnect(ctx, state, reconnect, record)
-+		} else {
-+			savedPath, errSave = h.saveTokenRecord(ctx, record)
+@@ -533,7 +541,7 @@ func applyOAuthRecoveryTargetToRecord(target oauthRecoveryTarget, record *coreau
+ 	return true
+ }
+ 
+-func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, state, sessionProvider, sessionProxyURL string, record *coreauth.Auth, failSaveMessage string, alwaysTrackOutcome bool) (string, bool) {
++func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, state, sessionProvider, sessionProxyURL string, record *coreauth.Auth, failSaveMessage string, alwaysTrackOutcome bool, reconnectTargets ...*codexReconnectTarget) (string, bool) {
+ 	if record == nil {
+ 		SetOAuthSessionError(state, failSaveMessage)
+ 		return "", false
+@@ -567,10 +575,24 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
+ 	}
+ 
+ 	applySessionProxyToAuthRecord(record, sessionProxyURL)
+-	if errGuard := claimOAuthSessionCommit(state, sessionProvider); errGuard != nil {
+-		return "", false
++	if len(reconnectTargets) == 0 || reconnectTargets[0] == nil {
++		if errGuard := claimOAuthSessionCommit(state, sessionProvider); errGuard != nil {
++			return "", false
 +		}
- 		if errSave != nil && strings.TrimSpace(savedPath) == "" {
--			FailOAuthSessionCommit(state, "Failed to save authentication tokens")
-+			message := "Failed to save authentication tokens"
-+			if reconnect != nil {
-+				message = "Reconnect failed; the existing credential was retained"
-+				if errors.Is(errSave, errCodexReconnectAccount) || errors.Is(errSave, errCodexReconnectChanged) {
-+					message = errSave.Error()
-+				} else if savedPath != "" {
-+					message = "Credentials saved, but runtime synchronization failed; reload the credential list"
-+				}
++	}
++	var savedPath string
++	var errSave error
++	if len(reconnectTargets) > 0 && reconnectTargets[0] != nil {
++		savedPath, errSave = h.saveCodexReconnect(ctx, state, reconnectTargets[0], record)
++		if errSave != nil {
++			failSaveMessage = "Reconnect failed; the existing credential was retained"
++			if errors.Is(errSave, errCodexReconnectAccount) || errors.Is(errSave, errCodexReconnectChanged) {
++				failSaveMessage = errSave.Error()
 +			}
-+			FailOAuthSessionCommit(state, message)
- 			log.Errorf("Failed to save authentication tokens: %v", errSave)
- 			return
- 		}
++		}
++	} else {
++		savedPath, errSave = h.saveTokenRecord(ctx, record)
+ 	}
+-	savedPath, errSave := h.saveTokenRecord(ctx, record)
+ 	if !alwaysTrackOutcome && !isTargeted {
+ 		if errSave != nil {
+ 			log.Errorf("%s: %v", failSaveMessage, errSave)
 diff --git a/internal/api/handlers/management/auth_files_reconnect.go b/internal/api/handlers/management/auth_files_reconnect.go
 new file mode 100644
 index 00000000..3c8fef03
@@ -518,10 +537,10 @@ index 00000000..f67dd5b9
 +	}
 +}
 diff --git a/internal/api/handlers/management/oauth_sessions.go b/internal/api/handlers/management/oauth_sessions.go
-index deadf188..8b5925a9 100644
+index 28ff2375..b364a228 100644
 --- a/internal/api/handlers/management/oauth_sessions.go
 +++ b/internal/api/handlers/management/oauth_sessions.go
-@@ -72,6 +72,7 @@ type oauthSession struct {
+@@ -73,6 +73,7 @@ type oauthSession struct {
  	Completed       bool
  	CreatedAt       time.Time
  	ExpiresAt       time.Time
@@ -529,7 +548,7 @@ index deadf188..8b5925a9 100644
  }
  
  type oauthSessionStore struct {
-@@ -403,7 +404,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
+@@ -404,7 +405,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
  	if !ok {
  		return false
  	}
@@ -538,7 +557,7 @@ index deadf188..8b5925a9 100644
  		return false
  	}
  	if provider == "" {
-@@ -425,7 +426,7 @@ func (s *oauthSessionStore) claimCommit(state, provider string) bool {
+@@ -426,7 +427,7 @@ func (s *oauthSessionStore) claimCommit(state, provider string) bool {
  
  	s.purgeExpiredLocked(now)
  	session, ok := s.sessions[state]
@@ -548,10 +567,10 @@ index deadf188..8b5925a9 100644
  	}
  	if provider != "" && !strings.EqualFold(session.Provider, provider) {
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index 22514aef..ba1f836b 100644
+index 48e2ec7c..c4ea8a83 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
-@@ -54,6 +54,7 @@ func (s *Server) registerManagementV8Routes() {
+@@ -55,6 +55,7 @@ func (s *Server) registerManagementV8Routes() {
  	v8.PATCH("/credentials/fields", s.mgmt.PatchAuthFileFields)
  	v8.POST("/credentials/refresh", s.mgmt.RefreshAuthFiles)
  	v8.POST("/credentials/verify", s.mgmt.VerifyAuthFileV8)
@@ -560,10 +579,10 @@ index 22514aef..ba1f836b 100644
  	v8.GET("/oauth/auth-url", s.mgmt.StartOAuthV8)
  	v8.POST("/oauth/auth-url", s.mgmt.StartOAuthV8)
 diff --git a/internal/api/server_management_v8_test.go b/internal/api/server_management_v8_test.go
-index b59ad2b0..dc9eeaf9 100644
+index 2aa5e44a..ae894b5a 100644
 --- a/internal/api/server_management_v8_test.go
 +++ b/internal/api/server_management_v8_test.go
-@@ -45,7 +45,7 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
+@@ -48,7 +48,7 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
  			s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
  			s.managementRoutesEnabled.Store(tc.enabled)
  			s.registerManagementRoutes()
@@ -572,7 +591,7 @@ index b59ad2b0..dc9eeaf9 100644
  				req := httptest.NewRequest(http.MethodGet, route, nil)
  				req.RemoteAddr = "127.0.0.1:1234"
  				if tc.authorized {
-@@ -53,8 +53,13 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
+@@ -56,8 +56,13 @@ func TestManagementV8RoutesShareAccessControl(t *testing.T) {
  				}
  				recorder := httptest.NewRecorder()
  				s.engine.ServeHTTP(recorder, req)
@@ -588,7 +607,7 @@ index b59ad2b0..dc9eeaf9 100644
  				}
  			}
  		})
-@@ -90,6 +95,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
+@@ -93,6 +98,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
  		"GET /v8/management/observability/logs", "GET /v8/management/observability/usage/queue",
  		"GET /v8/management/credentials", "POST /v8/management/credentials", "POST /v8/management/credentials/verify",
  		"GET /v8/management/oauth/auth-url", "POST /v8/management/oauth/auth-url", "POST /v8/management/oauth/import", "POST /v8/management/oauth/callback",

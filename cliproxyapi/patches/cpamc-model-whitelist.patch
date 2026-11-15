@@ -86,10 +86,10 @@ index 9731bbc..5446b6b 100644
          return {
            ...prev,
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 2ea29de..555a86c 100644
+index 798f592..a86b29c 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -450,6 +450,8 @@
+@@ -451,6 +451,8 @@
      "note_label": "Note",
      "note_placeholder": "Enter a note, e.g.: John's account",
      "note_hint": "Optional. Used to describe the purpose or owner of this credential; leave empty to omit.",
@@ -99,10 +99,10 @@ index 2ea29de..555a86c 100644
      "headers_label": "Custom Headers (headers)",
      "headers_placeholder": "{\n  \"Header-Name\": \"value\"\n}",
 diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
-index 5392cf0..298dbe5 100644
+index aa18dd5..e301850 100644
 --- a/src/i18n/locales/ko.json
 +++ b/src/i18n/locales/ko.json
-@@ -447,6 +447,8 @@
+@@ -448,6 +448,8 @@
      "note_label": "메모",
      "note_placeholder": "메모를 입력하세요(예: John의 계정)",
      "note_hint": "선택 사항입니다. 이 자격 증명의 용도나 소유자를 설명하는 데 사용되며, 생략하려면 비워 두세요.",
@@ -112,10 +112,10 @@ index 5392cf0..298dbe5 100644
      "headers_label": "사용자 정의 헤더 (headers)",
      "headers_placeholder": "{\n  \"Header-Name\": \"value\"\n}",
 diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
-index a23c189..be5bfba 100644
+index 4db20af..575b0c8 100644
 --- a/src/i18n/locales/ru.json
 +++ b/src/i18n/locales/ru.json
-@@ -459,6 +459,8 @@
+@@ -460,6 +460,8 @@
      "note_label": "Заметка (note)",
      "note_placeholder": "Введите заметку, например: аккаунт Ивана",
      "note_hint": "Необязательно. Используется для описания назначения или владельца учётных данных; оставьте пустым, чтобы не записывать.",
@@ -125,10 +125,10 @@ index a23c189..be5bfba 100644
      "prefix_proxy_invalid_json": "Этот файл авторизации не является JSON-объектом, поэтому поля нельзя редактировать.",
      "prefix_proxy_html_challenge": "Скачанное содержимое является HTML-страницей проверки, а не JSON-объектом авторизации. Повторно авторизуйтесь или замените файл перед редактированием полей.",
 diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
-index 1f5370a..2025ca6 100644
+index bacf376..d7aa6a1 100644
 --- a/src/i18n/locales/tr.json
 +++ b/src/i18n/locales/tr.json
-@@ -429,6 +429,8 @@
+@@ -430,6 +430,8 @@
      "note_label": "Not",
      "note_placeholder": "Bir Not Gir, Ör.: John'un Hesabı",
      "note_hint": "İsteğe Bağlı. Bu Kimlik Bilgisinin Amacını veya Sahibini Anlatmak için Kullanılır. Atlamak için Boş Bırak.",
@@ -138,10 +138,10 @@ index 1f5370a..2025ca6 100644
      "headers_label": "Özel Üst Bilgiler (headers)",
      "headers_placeholder": "{\n\"Header-Name\": \"value\"\n}",
 diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
-index 2a54630..23f634b 100644
+index 0e59cba..3710702 100644
 --- a/src/i18n/locales/vi.json
 +++ b/src/i18n/locales/vi.json
-@@ -380,6 +380,8 @@
+@@ -381,6 +381,8 @@
      "note_label": "Ghi chú",
      "note_placeholder": "Nhập ghi chú, ví dụ: Tài khoản của John",
      "note_hint": "Tùy chọn. Dùng để mô tả mục đích hoặc chủ sở hữu của credential này; để trống nếu không cần.",
@@ -151,10 +151,10 @@ index 2a54630..23f634b 100644
      "headers_label": "Header tùy chỉnh (headers)",
      "headers_placeholder": "{\n  \"Header-Name\": \"value\"\n}",
 diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
-index d1adb62..dc60810 100644
+index c1210b1..d565949 100644
 --- a/src/i18n/locales/zh-CN.json
 +++ b/src/i18n/locales/zh-CN.json
-@@ -448,6 +448,8 @@
+@@ -449,6 +449,8 @@
      "note_label": "备注（note）",
      "note_placeholder": "输入备注信息，例如：张三的账号",
      "note_hint": "可选，用于标记凭证用途或归属；留空则不写入。",
@@ -164,10 +164,10 @@ index d1adb62..dc60810 100644
      "headers_label": "自定义请求头（headers）",
      "headers_placeholder": "{\n  \"Header-Name\": \"value\"\n}",
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index a0a7570..922fa77 100644
+index db8a246..a62e1a3 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -448,6 +448,8 @@
+@@ -449,6 +449,8 @@
      "note_label": "備註（note）",
      "note_placeholder": "輸入備註資訊，例如：張三的帳號",
      "note_hint": "選填，用於標記憑證用途或歸屬；留空則不寫入。",

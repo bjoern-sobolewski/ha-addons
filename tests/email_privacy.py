@@ -3,6 +3,9 @@ from pathlib import Path
 import http.cookiejar
 import json
 import os
+import queue
+import socket
+import threading
 import secrets
 import tempfile
 import time
@@ -10,6 +13,48 @@ import urllib.request
 from smoke import docker, request, eventually
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class RequestEventStream:
+    """Read native admin frames with bounded waits, including clean closure."""
+
+    def __init__(self, url, opener):
+        self.frames = queue.Queue()
+        self.response = opener.open(url, timeout=25)
+        assert self.response.status == 200
+        assert self.response.headers['Content-Type'].startswith('text/event-stream')
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        kind = ''
+        try:
+            for line in self.response:
+                if line.startswith(b'event:'):
+                    kind = line[6:].decode().strip()
+                elif line.startswith(b'data:'):
+                    self.frames.put((kind, json.loads(line[5:])))
+        except (OSError, ValueError) as error:
+            self.frames.put(('error', str(error)))
+        finally:
+            self.frames.put(('closed', None))
+
+    def wait(self, kind, timeout=35):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            event, payload = self.frames.get(timeout=max(.01, deadline-time.monotonic()))
+            if event == kind:
+                return payload
+            assert event not in ('error', 'closed'), (event, payload)
+        raise AssertionError('Missing native request-event frame: ' + kind)
+
+    def close(self):
+        try:
+            self.response.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+        except (OSError, AttributeError):
+            pass
+        self.response.close()
+        self.thread.join(timeout=2)
 
 
 def main():
@@ -77,6 +122,50 @@ def main():
                                     {'name': filename, 'hide_email_in_keeper': invalid}, method='PATCH')
                 assert status == 400
             set_hidden(True)
+
+            def insert_event():
+                # Only the disposable fixture database is mutated. Native polling
+                # discovers the committed ID on its existing heartbeat cadence.
+                docker('exec', names['keeper'], 'python3', '-c', r'''
+import json, sqlite3, sys
+from datetime import datetime, timezone
+email, identity_id, event_key = json.loads(sys.argv[1])
+c = sqlite3.connect('/data/app.db', timeout=10)
+auth_index = c.execute('SELECT identity FROM usage_identities WHERE id=?', (identity_id,)).fetchone()[0]
+stamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f000Z')
+c.execute('INSERT INTO usage_events (event_key,api_group_key,provider,auth_type,auth_index,model,source,timestamp,input_tokens,output_tokens,total_tokens,failed,generate,stream,latency_ms,cost_usd,cost_available) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          (event_key,'synthetic-privacy-client','codex','oauth',auth_index,'privacy-test-model',email,stamp,1,1,2,0,1,1,100,0.125,1))
+c.commit()
+''', json.dumps([email, identity_id, secrets.token_hex(16)]))
+
+            stream_url = keeper + '/api/v1/usage/events/live?range=24h&model=privacy-test-model'
+            assert request(stream_url)[0] == 401
+            for role, login in [('read-only', {'password': 'synthetic-read-only-password'}),
+                                ('api-key', {'apiKey': 'synthetic-privacy-client'})]:
+                viewer = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+                assert request(keeper + '/api/v1/auth/' + role + '-login', headers, login, viewer)[0] == 204
+                assert request(stream_url, opener=viewer)[0] == 403
+            gateway = endpoint('keeper', 8082) + '/privacy-viewer/api/v1'
+            assert request(gateway + '/usage/events/live?range=24h', opener=session)[0] == 404
+            assert request(gateway + '/read-only/events/live?range=24h', opener=session)[0] == 404
+            insert_event()
+            stream = RequestEventStream(stream_url, session)
+            def assert_masked_frame(kind):
+                payload = json.dumps(stream.wait(kind))
+                assert email not in payload and masked in payload, (kind, payload)
+            try:
+                assert_masked_frame('snapshot')
+                insert_event()
+                assert_masked_frame('append')
+                set_hidden(False)
+                insert_event()
+                assert email in json.dumps(stream.wait('append'))
+                set_hidden(True)
+                insert_event()
+                assert_masked_frame('append')
+            finally:
+                stream.close()
+            print('PASS: native admin stream masks snapshots/appends, follows visibility changes, and denies both viewer roles and public gateways', flush=True)
             row = next(i for i in identities() if i['id'] == identity_id)
             assert row['name'] == masked and email not in json.dumps(row)
             assert row['file_name'].startswith('private-credential-')
@@ -112,7 +201,15 @@ def main():
             private, keeper = endpoint('cpa', 8317), endpoint('keeper', 8080)
             eventually(lambda: detail()[0] == 200)
             assert email not in detail()[1].decode() and masked in detail()[1].decode()
-            docker('stop', '-t', '20', names['cpa'])
+            stream = RequestEventStream(keeper + '/api/v1/usage/events/live?range=24h&model=privacy-test-model', session)
+            try:
+                assert_masked_frame('snapshot')
+                docker('stop', '-t', '20', names['cpa'])
+                # Policy verification on the next heartbeat must close the
+                # established stream before delivering any unverified payload.
+                assert stream.wait('closed', timeout=25) is None
+            finally:
+                stream.close()
             assert detail()[0] == 503 and email not in detail()[1].decode()
             assert request(keeper + '/healthz')[0] == 200
             print('PASS: disabling is explicit, immediate deletion cannot expose history, restarts retain masking, and CPA outage fails closed', flush=True)

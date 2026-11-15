@@ -1568,7 +1568,7 @@ index b9f9bc25..7361a61b 100644
  			return
  		}
 diff --git a/internal/api/router.go b/internal/api/router.go
-index 49ddde0f..77a595b8 100644
+index 775bad59..f25ec4c0 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
 @@ -16,6 +16,7 @@ import (
@@ -1583,30 +1583,30 @@ index 49ddde0f..77a595b8 100644
  }
  
  type OptionalProviders struct {
-+	Ranking            rankinghttpapi.Provider
-+	LocalRanking       rankinghttpapi.LocalProvider
- 	CostReadGate       *service.CostReadGate
- 	UsageIdentity      service.UsageIdentityProvider
- 	ErrorEvents        service.ErrorEventProvider
-@@ -111,6 +114,8 @@ func NewRouter(
- 	var credentialStatusProvider service.CredentialStatusProvider
++	Ranking rankinghttpapi.Provider
++	LocalRanking rankinghttpapi.LocalProvider
+ 	CostReadGate           *service.CostReadGate
+ 	UsageEventsLive        *service.UsageEventsNotifier
+ 	UsageEventsLiveContext context.Context
+@@ -117,6 +120,8 @@ func NewRouter(
  	var credentialPriorityProvider service.CredentialPriorityProvider
  	var requestLogProvider service.RequestLogProvider
+ 	var modelsProvider service.ModelsFetcher
 +	var rankingProvider rankinghttpapi.Provider
 +	var localRankingProvider rankinghttpapi.LocalProvider
  	var statusConfig StatusRouteConfig
  	if len(optionalProviders) > 0 {
  		usageIdentityProvider = optionalProviders[0].UsageIdentity
-@@ -122,6 +127,8 @@ func NewRouter(
- 		credentialStatusProvider = optionalProviders[0].CredentialStatus
+@@ -131,6 +136,8 @@ func NewRouter(
  		credentialPriorityProvider = optionalProviders[0].CredentialPriority
  		requestLogProvider = optionalProviders[0].RequestLogs
+ 		modelsProvider = optionalProviders[0].Models
 +		rankingProvider = optionalProviders[0].Ranking
 +		localRankingProvider = optionalProviders[0].LocalRanking
  		statusConfig = optionalProviders[0].Status
  	}
  	authHandler.setCPAAPIKeyProvider(cpaAPIKeyProvider)
-@@ -130,9 +137,17 @@ func NewRouter(
+@@ -139,9 +146,17 @@ func NewRouter(
  	registerUsageEventRequestLogDownloadTokenRoutes(apiV1, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
  
  	versionProtected := apiV1.Group("")
@@ -1625,9 +1625,9 @@ index 49ddde0f..77a595b8 100644
  	adminProtected := apiV1.Group("")
  	adminProtected.Use(authHandler.adminMiddleware())
  	adminProtected.Use(costReadMiddleware(costReadGate, basePath))
-@@ -151,15 +166,31 @@ func NewRouter(
- 	registerCPAAPIKeyRoutes(adminProtected, cpaAPIKeyProvider, usageProvider)
+@@ -162,15 +177,31 @@ func NewRouter(
  	registerPricingRoutes(adminProtected, pricingProvider)
+ 	registerModelsRoutes(adminProtected, modelsProvider)
  	registerQuotaRoutes(adminProtected, quotaProvider)
 +	registerViewerQuotaRoute(adminProtected, "/usage/provider-quota", usageIdentityProvider, quotaProvider)
 +	if rankingProvider != nil {
@@ -2858,7 +2858,7 @@ index 4e17d6cf..881ce889 100644
  }
  
 diff --git a/internal/app/app.go b/internal/app/app.go
-index 9652ed94..f9b0c26e 100644
+index 7183d66f..c0793bc2 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
 @@ -2,12 +2,14 @@ package app
@@ -2891,9 +2891,9 @@ index 9652ed94..f9b0c26e 100644
  	BackupMaintenance *DatabaseBackupRunner
  	RecentUsageCache  *repository.UsageRecentEventCache
  	CostReadGate      *service.CostReadGate
-@@ -135,10 +140,28 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
- 	// 单个 App 共享一把费用读取许可，供 HTTP 费用请求和后续手动重算协调。
+@@ -136,10 +141,28 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  	costReadGate := service.NewCostReadGate()
+ 	usageEventsLive := service.NewUsageEventsNotifier()
  
 +	rankingService, err := ranking.NewService(ranking.NewStore(db), ranking.NewAggregator(db), ranking.NewClient())
 +	if err != nil {
@@ -2922,7 +2922,7 @@ index 9652ed94..f9b0c26e 100644
  	})
  	prepared := false
  	defer func() {
-@@ -210,7 +233,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+@@ -212,7 +235,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  	usageIdentityService := service.NewUsageIdentityServiceWithOptions(db, recentUsageCache, service.UsageIdentityServiceOptions{
  		OnDisplayNameChanged: quotaService.UpdateUsageIdentityDisplayNameSnapshot,
  	})
@@ -2931,7 +2931,7 @@ index 9652ed94..f9b0c26e 100644
  	// 单条凭证开关成功后立即与 CPA 对齐；runner 自带合并窗口和 nil 保护。
  	credentialMutationLocks := &service.CredentialMutationLocks{}
  	credentialsManagementService := service.NewCredentialsManagementService(cpaClient, metadataSyncRunner, credentialMutationLocks, credentialMetadata)
-@@ -256,11 +279,14 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+@@ -258,11 +281,14 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  		RedisProcess:      redisProcessRunner,
  		CPAErrors:         redisErrorIngestRunner,
  		UsageAggregation:  usageAggregationRunner,
@@ -2946,16 +2946,16 @@ index 9652ed94..f9b0c26e 100644
  		BackupMaintenance: backupMaintenance,
  		RecentUsageCache:  recentUsageCache,
  		CostReadGate:      costReadGate,
-@@ -286,6 +312,8 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
- 				CredentialStatus:   credentialStatusService,
+@@ -291,6 +317,8 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  				CredentialPriority: credentialPriorityService,
  				RequestLogs:        requestLogService,
+ 				Models:             cpaClient,
 +				Ranking:            rankingService,
 +				LocalRanking:       localRankingService,
  				Status: api.StatusRouteConfig{
  					CPAPublicURL:               cfg.CPAPublicURL,
  					CPARequestLogAccessEnabled: cfg.CPARequestLogAccessEnabled,
-@@ -300,12 +328,15 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+@@ -305,12 +333,15 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  // appAuthConfig 让启动外壳和完整路由使用同一 BasePath、TLS 页面祖先及认证约束。
  func appAuthConfig(cfg config.Config) api.AuthConfig {
  	return api.AuthConfig{
@@ -2977,7 +2977,7 @@ index 9652ed94..f9b0c26e 100644
  	}
  }
  
-@@ -435,6 +466,7 @@ func (a *App) startReadyBackgroundTasks(ctx context.Context) {
+@@ -440,6 +471,7 @@ func (a *App) startReadyBackgroundTasks(ctx context.Context) {
  			}
  		})
  	}
@@ -2985,7 +2985,7 @@ index 9652ed94..f9b0c26e 100644
  	if a.Maintenance != nil {
  		a.startBackgroundTask(func() {
  			if err := a.Maintenance.Run(ctx); err != nil {
-@@ -449,17 +481,7 @@ func (a *App) startReadyBackgroundTasks(ctx context.Context) {
+@@ -454,17 +486,7 @@ func (a *App) startReadyBackgroundTasks(ctx context.Context) {
  			}
  		})
  	}
@@ -3004,7 +3004,7 @@ index 9652ed94..f9b0c26e 100644
  	if a.BackupMaintenance != nil {
  		a.startBackgroundTask(func() {
  			if err := a.BackupMaintenance.Run(ctx); err != nil {
-@@ -492,3 +514,43 @@ func (a *App) stopBackgroundTasks() {
+@@ -497,3 +519,43 @@ func (a *App) stopBackgroundTasks() {
  	}
  	a.backgroundWG.Wait()
  }
@@ -4882,7 +4882,7 @@ index 73d726a9..2969b711 100644
  	// raw 响应与当前 quota 同生命周期；同 auth_index 的下一次刷新会整体覆盖任务记录。
  	task.UpstreamResponses = cloneUpstreamResponses(upstreamResponses)
 diff --git a/internal/quota/service.go b/internal/quota/service.go
-index 45ecab89..fe9172bd 100644
+index 725488fb..0b3be8cc 100644
 --- a/internal/quota/service.go
 +++ b/internal/quota/service.go
 @@ -9,6 +9,7 @@ import (
@@ -4893,7 +4893,7 @@ index 45ecab89..fe9172bd 100644
  	"cpa-usage-keeper/internal/entities"
  	"cpa-usage-keeper/internal/repository"
  
-@@ -140,7 +141,8 @@ func NewServiceWithOptions(db *gorm.DB, caller ManagementClient, options Service
+@@ -141,7 +142,8 @@ func NewServiceWithOptions(db *gorm.DB, caller ManagementClient, options Service
  	if options.QuotaUpstreamResponsesEnabled {
  		caller = upstreamResponseRecordingCaller{ManagementClient: caller}
  	}
@@ -4903,7 +4903,7 @@ index 45ecab89..fe9172bd 100644
  }
  
  // NewServiceWithRegistry 注入上游 provider 注册表，历史费用仍由存储事实提供。
-@@ -308,6 +310,7 @@ func (s *Service) checkWithUpstreamResponses(ctx context.Context, request CheckR
+@@ -309,6 +311,7 @@ func (s *Service) checkWithUpstreamResponses(ctx context.Context, request CheckR
  }
  
  func (s *Service) check(ctx context.Context, request CheckRequest, beforeSubscriptionDone func(CheckResponse) CheckResponse) (CheckResponse, bool, error) {
@@ -5382,7 +5382,7 @@ index 00000000..9aa3c4f7
 +	}
 +}
 diff --git a/internal/quota/types.go b/internal/quota/types.go
-index 0c8115ca..fe404e4f 100644
+index 84b60527..058a9517 100644
 --- a/internal/quota/types.go
 +++ b/internal/quota/types.go
 @@ -2,6 +2,7 @@ package quota
@@ -14389,7 +14389,7 @@ index 00000000..700b8fe8
 +	}
 +}
 diff --git a/internal/repository/usage.go b/internal/repository/usage.go
-index 384bbaa8..e89c7169 100644
+index b999d911..d1e96303 100644
 --- a/internal/repository/usage.go
 +++ b/internal/repository/usage.go
 @@ -17,7 +17,7 @@ import (
@@ -14513,7 +14513,7 @@ index fe6b5565..f5fe9196 100644
  		ReasoningEffort:     event.ReasoningEffort,
  		Endpoint:            event.Endpoint,
 diff --git a/internal/service/cpa_api_keys_service.go b/internal/service/cpa_api_keys_service.go
-index 46700e7f..cac7a987 100644
+index 586a8cd5..728f8592 100644
 --- a/internal/service/cpa_api_keys_service.go
 +++ b/internal/service/cpa_api_keys_service.go
 @@ -21,8 +21,16 @@ type CPAAPIKeyProvider interface {
@@ -18617,10 +18617,10 @@ index 00000000..1df42e21
 +  );
 +}
 diff --git a/web/src/components/dashboard/DashboardToolbar.module.scss b/web/src/components/dashboard/DashboardToolbar.module.scss
-index a3975932..caea2110 100644
+index 535c1887..a97d0ac2 100644
 --- a/web/src/components/dashboard/DashboardToolbar.module.scss
 +++ b/web/src/components/dashboard/DashboardToolbar.module.scss
-@@ -129,11 +129,11 @@
+@@ -131,11 +131,11 @@
  .filter [data-dashboard-filter-value], .filter [data-time-range-value] { flex: 0 1 auto; min-width: 0; white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.4; font-weight: 600; color: var(--text-primary); }
  
  .host[data-flow='split'] {
@@ -18634,7 +18634,7 @@ index a3975932..caea2110 100644
    .filters {
      grid-area: filters;
      display: grid;
-@@ -177,9 +177,11 @@
+@@ -179,9 +179,11 @@
    .collapse { display: none; }
    .filter [data-time-range-trigger] > svg:not(:last-child) { display: none; }
    .filters { gap: 8px; }
@@ -19143,7 +19143,7 @@ index 00000000..70b83a85
 +  );
 +}
 diff --git a/web/src/components/usage/RequestEventsDetailsCard.tsx b/web/src/components/usage/RequestEventsDetailsCard.tsx
-index b2bdebdc..6ae73a71 100644
+index 8ad914f4..cb2cea89 100644
 --- a/web/src/components/usage/RequestEventsDetailsCard.tsx
 +++ b/web/src/components/usage/RequestEventsDetailsCard.tsx
 @@ -33,7 +33,7 @@ import { useScrollBoundaryContainment } from '@/hooks/useScrollBoundaryContainme
@@ -19168,7 +19168,7 @@ index b2bdebdc..6ae73a71 100644
    requestType: string;
    endpoint: string;
    sourceRaw: string;
-@@ -451,17 +457,51 @@ const truncateRequestEventMetadata = (value: string, maxLength: number): string
+@@ -456,17 +462,51 @@ const truncateRequestEventMetadata = (value: string, maxLength: number): string
      : `${characters.slice(0, maxLength).join('')}...`;
  };
  
@@ -19227,7 +19227,7 @@ index b2bdebdc..6ae73a71 100644
  
  const formatRequestEventMetricTooltipLine = (
    label: string,
-@@ -644,6 +684,15 @@ export function RequestEventsDetailsCard({
+@@ -859,6 +899,15 @@ export function RequestEventsDetailsCard({
        const requestTier = String(event.service_tier ?? '').trim();
        const effectiveTier = String(event.effective_service_tier ?? '').trim();
        const responseTier = String(event.response_service_tier ?? '').trim();
@@ -19243,7 +19243,7 @@ index b2bdebdc..6ae73a71 100644
        const endpointFields = parseRequestEndpoint(event.endpoint);
        const timestampLabels = formatRequestEventTimestamp(timestamp);
        const inputTokens = Math.max(toNumber(event.tokens?.input_tokens), 0);
-@@ -666,7 +715,7 @@ export function RequestEventsDetailsCard({
+@@ -881,7 +930,7 @@ export function RequestEventsDetailsCard({
          ? t('usage_stats.credentials_detail_pricing_style_claude')
          : event.pricing_style === 'openai'
            ? t('usage_stats.credentials_detail_pricing_style_openai')
@@ -19252,7 +19252,7 @@ index b2bdebdc..6ae73a71 100644
  
        return {
          event,
-@@ -682,12 +731,14 @@ export function RequestEventsDetailsCard({
+@@ -897,12 +946,14 @@ export function RequestEventsDetailsCard({
          modelAlias: modelDisplay.modelAlias,
          modelTooltip,
          reasoningEffort,
@@ -19273,7 +19273,7 @@ index b2bdebdc..6ae73a71 100644
          requestType: endpointFields.requestType,
          endpoint: endpointFields.endpoint,
          sourceRaw: sourceRaw || '-',
-@@ -976,7 +1027,7 @@ export function RequestEventsDetailsCard({
+@@ -1153,7 +1204,7 @@ export function RequestEventsDetailsCard({
                onFocus={(event) => handleRequestEventsTooltipFocus(tooltipLines, event.currentTarget)}
                onBlur={(event) => handleRequestEventsTooltipBlur(event.currentTarget)}
              >
@@ -19860,7 +19860,7 @@ index 759e45c1..9946f6c7 100644
          {actions && <div className={styles.credentialSectionActions}>{actions}</div>}
        </div>
 diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
-index f9bdcef0..ad953615 100644
+index d47b1c99..5596bbf2 100644
 --- a/web/src/components/usage/credentials/CredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/CredentialsSection.tsx
 @@ -11,6 +11,7 @@ import { PortalTooltip, usePortalTooltip } from '@/components/ui/PortalTooltip'
@@ -19871,7 +19871,7 @@ index f9bdcef0..ad953615 100644
  import { formatCredentialTimestamp, type CredentialRow, type DisplayQuota } from './credentialViewModels'
  import { deleteCredentials, fetchClaudeResetGrants, fetchQuotaAutoRefreshSettings, fetchUsageQuotaResetCredits, setCredentialsDisabled, updateQuotaAutoRefreshSettings, type UsageIdentityPageSort } from '@/lib/api'
  import type { ClaudeResetGrantsResponse, QuotaAutoRefreshScheduleUnit, QuotaAutoRefreshSettings, UsageQuotaInspectionResult, UsageQuotaInspectionResultStatus, UsageQuotaInspectionStatusResponse, UsageQuotaResetCreditsResponse, UsageQuotaResetResponse } from '@/lib/types'
-@@ -95,6 +96,7 @@ const AUTO_REFRESH_SCHEDULE_UNITS: QuotaAutoRefreshScheduleUnit[] = ['minute', '
+@@ -97,6 +98,7 @@ const AUTO_REFRESH_SCHEDULE_UNITS: QuotaAutoRefreshScheduleUnit[] = ['minute', '
  const AUTO_REFRESH_WEEKDAYS = [1, 2, 3, 4, 5, 6, 7] as const
  
  interface CredentialsSectionProps {
@@ -19879,7 +19879,7 @@ index f9bdcef0..ad953615 100644
    rows: CredentialRow[]
    timeZone?: string
    total: number
-@@ -130,7 +132,7 @@ interface CredentialsSectionProps {
+@@ -132,7 +134,7 @@ interface CredentialsSectionProps {
    onAfterInvalidAccountAction?: () => Promise<void>
  }
  
@@ -19888,7 +19888,7 @@ index f9bdcef0..ad953615 100644
    const { t } = useTranslation()
    const [inspectionOpen, setInspectionOpen] = useState(false)
    const [quotaUsageMode, setQuotaUsageMode] = useState<QuotaUsageMode>('current')
-@@ -198,7 +200,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
+@@ -200,7 +202,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
      <>
        <CredentialSectionShell
          title={t('usage_stats.credentials_title')}
@@ -19897,7 +19897,7 @@ index f9bdcef0..ad953615 100644
          titleExtra={(
            <div className={styles.credentialsTitleControls}>
              <label className={styles.credentialActiveOnlySwitch}>
-@@ -211,7 +213,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
+@@ -213,7 +215,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
              {total !== 0 && <QuotaUsageModeSwitch label={t('usage_stats.credentials_quota_usage_mode_label')} mode={quotaUsageMode} onChange={setQuotaUsageMode} />}
            </div>
          )}
@@ -19906,7 +19906,7 @@ index f9bdcef0..ad953615 100644
            <div className={styles.credentialSectionActionButtons}>
              <MainActionButton
                type="button"
-@@ -266,7 +268,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
+@@ -268,7 +270,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
                    displayName={row.displayName}
                    disabled={row.identity.disabled}
                    pending={statusPendingIdentityIds?.has(row.identity.id || row.identity.identity) ?? false}
@@ -19915,7 +19915,7 @@ index f9bdcef0..ad953615 100644
                    onToggle={(disabled) => onToggleStatus?.(row.identity.id || row.identity.identity, row.identity.identity, disabled)}
                  />
                )
-@@ -318,7 +320,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
+@@ -320,7 +322,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
                  <CredentialPriorityEditor
                    priority={row.identity.priority}
                    displayName={row.displayName}
@@ -19924,7 +19924,7 @@ index f9bdcef0..ad953615 100644
                    onSave={onSavePriority ? (priority) => onSavePriority(row.identity.id || row.identity.identity, row.identity.identity, priority) : undefined}
                  />
                </span>
-@@ -334,7 +336,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
+@@ -336,7 +338,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
              )}
              health={<CredentialHealthPanel variant="compact" showCompactMeta displayName={row.displayName} health={row.credentialHealth} lastUsedAt={row.identity.last_used_at} windowCacheReadRate={row.windowCacheReadRate} />}
              quota={<CredentialQuotaPanel variant="compact" row={row} quotaUsageMode={quotaUsageMode} timeZone={timeZone} />}
@@ -19933,7 +19933,7 @@ index f9bdcef0..ad953615 100644
                <>
                    {onEdit && <CredentialEditButton identityId={row.identity.id} disabled={row.identity.is_deleted} onEdit={() => onEdit(row)} />}
                    <button
-@@ -404,7 +406,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
+@@ -406,7 +408,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
              document.body,
            )
          : null}
@@ -19942,7 +19942,7 @@ index f9bdcef0..ad953615 100644
          open={inspectionOpen}
          status={quotaInspectionStatus}
          loading={quotaInspectionLoading}
-@@ -414,7 +416,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
+@@ -416,7 +418,7 @@ export function CredentialsSection({ rows, timeZone, total, page, totalPages, pa
          onStart={onStartInspection}
          onRefreshStatus={onRefreshInspectionStatus}
          onAfterInvalidAccountAction={onAfterInvalidAccountAction}
@@ -19951,7 +19951,7 @@ index f9bdcef0..ad953615 100644
      </>
    )
  }
-@@ -2001,6 +2003,7 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
+@@ -2003,6 +2005,7 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
                ? <QuotaResetCountdown duration={resetDuration} resetLabel={resetLabel} />
                : <span className={styles.credentialQuotaResetDuration}>{resetDuration}</span>)}
              {percentLabel && <strong>{percentLabel}</strong>}
@@ -20736,7 +20736,7 @@ index 00000000..462a0f2c
 +  expect(api.fetchAdminProviderQuota).not.toHaveBeenCalled();
 +});
 diff --git a/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx b/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx
-index 898683e5..7cce858e 100644
+index d54c8437..8496b706 100644
 --- a/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx
 +++ b/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx
 @@ -107,7 +107,7 @@ describe('credential compact card data', () => {
@@ -21668,10 +21668,10 @@ index 00000000..85947576
 +  await act(async()=>button('Retry').click());expect(element.querySelector('[role="img"]')).not.toBeNull()
 +})
 diff --git a/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
-index fd3cd391..b3a13712 100644
+index f9f5fc09..583e2d59 100644
 --- a/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
 +++ b/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
-@@ -74,19 +74,21 @@ describe('RequestEventsDetailsCard', () => {
+@@ -76,19 +76,21 @@ describe('RequestEventsDetailsCard', () => {
    });
  
    it.each([
@@ -28826,7 +28826,7 @@ index 00000000..e8bc7eb1
 +  overall_weights: Record<string, number>;
 +}
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index 8f18899b..ab2b42e3 100644
+index 569d9ebd..4efcf08a 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -20,6 +20,9 @@ const getInitialLanguage = (): SupportedLanguage => {
@@ -28994,7 +28994,7 @@ index 8f18899b..ab2b42e3 100644
          title: 'Usage',
          costs_busy: 'Cost statistics are being updated. Please refresh shortly.',
          refresh: 'Refresh',
-@@ -259,6 +395,11 @@ const resources = {
+@@ -275,6 +411,11 @@ const resources = {
          speed_mode: 'Speed Mode',
          effective_speed_mode: 'Effective Speed Mode',
          response_speed_mode: 'Response Speed Mode',
@@ -29006,7 +29006,7 @@ index 8f18899b..ab2b42e3 100644
          speed_mode_auto: 'Auto',
          speed_mode_standard: 'Standard',
          speed_mode_fast: 'Fast',
-@@ -544,7 +685,6 @@ const resources = {
+@@ -560,7 +701,6 @@ const resources = {
          credentials_error_next_retry: 'Credential next retry',
          credentials_error_model_next_retry: 'Model next retry',
          credentials_quota_refresh_current_page: 'Update Quotas',
@@ -29014,7 +29014,7 @@ index 8f18899b..ab2b42e3 100644
          credentials_quota_reset_button: 'Reset quota, {{count}} available',
          credentials_quota_reset_title: 'Reset Codex quota',
          credentials_quota_reset_tooltip_suffix: 'reset credits available',
-@@ -585,6 +725,7 @@ const resources = {
+@@ -601,6 +741,7 @@ const resources = {
          credentials_quota_remaining: '{{count}} left',
          credentials_quota_percent_used: '{{percent}} used',
          credentials_refresh_status: 'Refresh',
@@ -29022,7 +29022,7 @@ index 8f18899b..ab2b42e3 100644
          credentials_refresh_status_queued: 'Queued',
          credentials_refresh_status_running: 'Running',
          credentials_refresh_status_completed: 'Completed',
-@@ -974,6 +1115,9 @@ const resources = {
+@@ -991,6 +1132,9 @@ const resources = {
    },
    zh: {
      translation: {
@@ -29032,7 +29032,7 @@ index 8f18899b..ab2b42e3 100644
        common: {
          loading: '加载中...',
          save: '保存',
-@@ -1020,6 +1164,9 @@ const resources = {
+@@ -1037,6 +1181,9 @@ const resources = {
        },
        auth: {
          login_title: 'CPA USAGE KEEPER',
@@ -29042,7 +29042,7 @@ index 8f18899b..ab2b42e3 100644
          login_subtitle: '万千流转，皆有迹可循。',
          console_kicker: '访问控制',
          console_title: '选择访问方式',
-@@ -1051,6 +1198,16 @@ const resources = {
+@@ -1068,6 +1215,16 @@ const resources = {
          api_key_login_failed: '当前无法打开 API Key 看板',
          session_expired: '登录状态已失效，请重新登录。'
        },
@@ -29059,7 +29059,7 @@ index 8f18899b..ab2b42e3 100644
        key_overview: {
          eyebrow: 'API Key 概览',
          title: 'API Key 用量概览',
-@@ -1066,7 +1223,127 @@ const resources = {
+@@ -1083,7 +1240,127 @@ const resources = {
          latency_load_failed: '无法加载 API Key 延迟诊断',
          costs_busy: '费用统计正在更新，请稍后刷新。'
        },
@@ -29187,7 +29187,7 @@ index 8f18899b..ab2b42e3 100644
          title: '用量',
          costs_busy: '费用统计正在更新，请稍后刷新。',
          refresh: '刷新',
-@@ -1213,6 +1490,11 @@ const resources = {
+@@ -1246,6 +1523,11 @@ const resources = {
          speed_mode: '速度模式',
          effective_speed_mode: '有效速度模式',
          response_speed_mode: '响应速度模式',
@@ -29199,7 +29199,7 @@ index 8f18899b..ab2b42e3 100644
          speed_mode_auto: '自动',
          speed_mode_standard: '标准',
          speed_mode_fast: '快速',
-@@ -1928,6 +2210,9 @@ const resources = {
+@@ -1962,6 +2244,9 @@ const resources = {
    },
    'zh-TW': {
      translation: {
@@ -29209,7 +29209,7 @@ index 8f18899b..ab2b42e3 100644
        common: {
          loading: '載入中...',
          save: '儲存',
-@@ -1974,6 +2259,9 @@ const resources = {
+@@ -2008,6 +2293,9 @@ const resources = {
        },
        auth: {
          login_title: 'CPA USAGE KEEPER',
@@ -29219,7 +29219,7 @@ index 8f18899b..ab2b42e3 100644
          login_subtitle: '萬千流轉，皆有跡可循。',
          console_kicker: '存取控制',
          console_title: '選擇存取方式',
-@@ -2005,6 +2293,16 @@ const resources = {
+@@ -2039,6 +2327,16 @@ const resources = {
          api_key_login_failed: '目前無法開啟 API Key 看板',
          session_expired: '登入狀態已失效，請重新登入。'
        },
@@ -29236,7 +29236,7 @@ index 8f18899b..ab2b42e3 100644
        key_overview: {
          eyebrow: 'API Key 總覽',
          title: 'API Key 用量總覽',
-@@ -2020,7 +2318,127 @@ const resources = {
+@@ -2054,7 +2352,127 @@ const resources = {
          latency_load_failed: '無法載入 API Key 延遲診斷',
          costs_busy: '費用統計正在更新，請稍後重新整理。'
        },
@@ -29364,7 +29364,7 @@ index 8f18899b..ab2b42e3 100644
          title: '用量',
          costs_busy: '費用統計正在更新，請稍後重新整理。',
          refresh: '重新整理',
-@@ -2167,6 +2585,11 @@ const resources = {
+@@ -2217,6 +2635,11 @@ const resources = {
          speed_mode: '速度模式',
          effective_speed_mode: '有效速度模式',
          response_speed_mode: '回應速度模式',
@@ -29377,7 +29377,7 @@ index 8f18899b..ab2b42e3 100644
          speed_mode_standard: '標準',
          speed_mode_fast: '快速',
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index 49e307d1..b17a8e56 100644
+index 922687b4..5a127c8f 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
 @@ -3,6 +3,25 @@ import type { DeletePricingModelResponse, ModelPricingConfig, PricingErrorRespon
@@ -29406,7 +29406,7 @@ index 49e307d1..b17a8e56 100644
  export class ApiError extends Error {
    status: number
    code?: string
-@@ -45,6 +64,7 @@ const EMBED_SESSION_HEADER = 'X-CPA-Usage-Keeper-Embed-Session'
+@@ -46,6 +65,7 @@ const EMBED_SESSION_HEADER = 'X-CPA-Usage-Keeper-Embed-Session'
  declare global {
    interface Window {
      __APP_BASE_PATH__?: string
@@ -29414,7 +29414,7 @@ index 49e307d1..b17a8e56 100644
    }
  }
  
-@@ -105,6 +125,8 @@ function normalizeOverviewRealtimeBlock(
+@@ -106,6 +126,8 @@ function normalizeOverviewRealtimeBlock(
  }
  
  export interface FetchKeyOverviewRealtimeOptions {
@@ -29423,7 +29423,7 @@ index 49e307d1..b17a8e56 100644
    window?: OverviewRealtimeWindow
    signal?: AbortSignal
  }
-@@ -272,7 +294,7 @@ async function activateEmbedSessionFallback(response: Response): Promise<void> {
+@@ -273,7 +295,7 @@ async function activateEmbedSessionFallback(response: Response): Promise<void> {
    }
  }
  
@@ -29432,7 +29432,7 @@ index 49e307d1..b17a8e56 100644
    if (isCPAMCEmbed()) {
      clearEmbedSessionToken()
    }
-@@ -281,7 +303,7 @@ export async function login(password: string): Promise<void> {
+@@ -282,7 +304,7 @@ export async function login(password: string): Promise<void> {
      headers: {
        'Content-Type': 'application/json',
      },
@@ -29441,7 +29441,7 @@ index 49e307d1..b17a8e56 100644
    })
    if (!response.ok) {
      await parseApiError(response, `Failed to login: ${response.status}`)
-@@ -289,7 +311,32 @@ export async function login(password: string): Promise<void> {
+@@ -290,7 +312,32 @@ export async function login(password: string): Promise<void> {
    await activateEmbedSessionFallback(response)
  }
  
@@ -29475,7 +29475,7 @@ index 49e307d1..b17a8e56 100644
    if (isCPAMCEmbed()) {
      clearEmbedSessionToken()
    }
-@@ -298,7 +345,7 @@ export async function loginWithCPAAPIKey(apiKey: string): Promise<void> {
+@@ -299,7 +346,7 @@ export async function loginWithCPAAPIKey(apiKey: string): Promise<void> {
      headers: {
        'Content-Type': 'application/json',
      },
@@ -29484,7 +29484,7 @@ index 49e307d1..b17a8e56 100644
    })
    if (!response.ok) {
      await parseApiError(response, `Failed to login with CPA API key: ${response.status}`)
-@@ -365,27 +412,30 @@ const buildUsageRangeParams = (request: UsageRangeRequest): URLSearchParams => {
+@@ -366,27 +413,30 @@ const buildUsageRangeParams = (request: UsageRangeRequest): URLSearchParams => {
    return params
  }
  
@@ -29521,7 +29521,7 @@ index 49e307d1..b17a8e56 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to load key analysis latency: ${response.status}`)
    }
-@@ -394,6 +444,7 @@ export async function fetchKeyAnalysisLatency(request: UsageRangeRequest, signal
+@@ -395,6 +445,7 @@ export async function fetchKeyAnalysisLatency(request: UsageRangeRequest, signal
  
  export interface FetchUsageActivityOptions {
    request: UsageActivityRequest
@@ -29529,7 +29529,7 @@ index 49e307d1..b17a8e56 100644
    apiKeyId?: string
    signal?: AbortSignal
  }
-@@ -408,9 +459,10 @@ const buildUsageActivityParams = (request: UsageActivityRequest): URLSearchParam
+@@ -409,9 +460,10 @@ const buildUsageActivityParams = (request: UsageActivityRequest): URLSearchParam
    return buildUsageRangeParams(request)
  }
  
@@ -29542,7 +29542,7 @@ index 49e307d1..b17a8e56 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to load key activity: ${response.status}`)
    }
-@@ -418,13 +470,14 @@ export async function fetchKeyActivity({ request, signal }: FetchUsageActivityOp
+@@ -419,13 +471,14 @@ export async function fetchKeyActivity({ request, signal }: FetchUsageActivityOp
  }
  
  export async function fetchKeyOverviewRealtime(options: FetchKeyOverviewRealtimeOptions = {}): Promise<OverviewRealtimeBlock> {
@@ -29559,7 +29559,7 @@ index 49e307d1..b17a8e56 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to load key overview realtime: ${response.status}`)
    }
-@@ -448,11 +501,11 @@ export async function fetchUsageOverview(request: UsageRangeRequest, signal?: Ab
+@@ -449,11 +502,11 @@ export async function fetchUsageOverview(request: UsageRangeRequest, signal?: Ab
    return response.json()
  }
  
@@ -29573,7 +29573,7 @@ index 49e307d1..b17a8e56 100644
    const query = params.toString()
    const response = await apiFetch(`${apiPath(path)}${query ? `?${query}` : ''}`, { signal: options.signal })
    if (!response.ok) {
-@@ -496,6 +549,7 @@ export async function fetchUsageOverviewRealtime(options: FetchUsageOverviewReal
+@@ -497,6 +550,7 @@ export async function fetchUsageOverviewRealtime(options: FetchUsageOverviewReal
  }
  
  export interface FetchUsageEventsOptions {
@@ -29581,7 +29581,7 @@ index 49e307d1..b17a8e56 100644
    page?: number
    pageSize?: number
    cursorMode?: boolean
-@@ -581,7 +635,7 @@ export async function fetchUsageEventSourceFilterOptions(signal?: AbortSignal):
+@@ -601,7 +655,7 @@ export async function openUsageEventsLive(request: UsageRangeRequest, options: F
  export async function fetchUsageEvents(request: UsageRangeRequest | undefined, signal?: AbortSignal, options?: FetchUsageEventsOptions): Promise<UsageEventsResponse> {
    const params = buildUsageEventsParams(request, options)
    const query = params.toString()
@@ -29590,7 +29590,7 @@ index 49e307d1..b17a8e56 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to load usage events: ${response.status}`)
    }
-@@ -626,7 +680,7 @@ export async function exportUsageEvents(request: UsageRangeRequest, format: Usag
+@@ -646,7 +700,7 @@ export async function exportUsageEvents(request: UsageRangeRequest, format: Usag
    const params = buildUsageEventsParams(request, options, false)
    params.set('format', format)
    const query = params.toString()
@@ -29599,7 +29599,7 @@ index 49e307d1..b17a8e56 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to export usage events: ${response.status}`)
    }
-@@ -734,7 +788,10 @@ export async function fetchUsageQuotaCache(authIndexes: string[], signal?: Abort
+@@ -754,7 +808,10 @@ export async function fetchUsageQuotaCache(authIndexes: string[], signal?: Abort
  }
  
  export interface FetchCodexQuotaHistoryOptions {
@@ -29610,7 +29610,7 @@ index 49e307d1..b17a8e56 100644
  }
  
  export async function fetchCodexQuotaHistory(
-@@ -744,8 +801,11 @@ export async function fetchCodexQuotaHistory(
+@@ -764,8 +821,11 @@ export async function fetchCodexQuotaHistory(
  ): Promise<CodexQuotaHistoryResponse> {
    const params = new URLSearchParams()
    if (options.windowRole) params.set('window_role', options.windowRole)
@@ -29623,7 +29623,7 @@ index 49e307d1..b17a8e56 100644
    if (!response.ok) {
      await parseApiError(response, `Failed to load quota history: ${response.status}`)
    }
-@@ -1128,3 +1188,24 @@ export async function applyPricingSync(request: PricingSyncApplyRequest, signal?
+@@ -1162,3 +1222,24 @@ export async function applyPricingSync(request: PricingSyncApplyRequest, signal?
    }
    return response.json()
  }
@@ -29958,7 +29958,7 @@ index d53a58d4..7935e943 100644
 +export interface PerformanceGroup { model: string; mode: string; requests: number; failed: number; raw: PerformanceStats; matched: PerformanceStats; coverage: number; days: PerformanceDay[] }
 +export interface PerformanceReport { generated_at: string; range_start: string; metric: string; models: string[]; efforts: string[]; groups: PerformanceGroup[]; common_cells: number; comparison_groups: number; min_samples: number; min_cell_samples: number; min_daily_samples: number; min_daily_cell_samples: number }
 diff --git a/web/src/lib/usageNavigation.ts b/web/src/lib/usageNavigation.ts
-index dc347507..6c170837 100644
+index df237886..e0782cc5 100644
 --- a/web/src/lib/usageNavigation.ts
 +++ b/web/src/lib/usageNavigation.ts
 @@ -2,6 +2,7 @@ export const USAGE_TAB_OPTIONS = [
@@ -29969,7 +29969,7 @@ index dc347507..6c170837 100644
    'events',
    'credentials',
    'ai-provider',
-@@ -15,6 +16,7 @@ const USAGE_TAB_PATHS: Record<UsageTab, string> = {
+@@ -16,6 +17,7 @@ const USAGE_TAB_PATHS: Record<UsageTab, string> = {
    overview: '/overview',
    realtime: '/realtime',
    analysis: '/analysis',
@@ -30816,10 +30816,10 @@ index 00000000..640dae1f
 + </KeyViewerShell>;
 +}
 diff --git a/web/src/pages/UsagePage.module.scss b/web/src/pages/UsagePage.module.scss
-index 99c3e441..71e43bbf 100644
+index cb5b79d1..97957745 100644
 --- a/web/src/pages/UsagePage.module.scss
 +++ b/web/src/pages/UsagePage.module.scss
-@@ -4125,3 +4125,19 @@
+@@ -4164,3 +4164,19 @@
    }
    @media (max-width: 360px) { padding-inline: 16px; }
  }
@@ -30840,7 +30840,7 @@ index 99c3e441..71e43bbf 100644
 +.overviewRpm { display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; color: var(--text-secondary); font-size: 12px; }
 +.overviewRpm strong { font-size: 22px; color: var(--text-primary); }
 diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
-index 248958bb..4d1b9d50 100644
+index cfc74646..fe07d2b9 100644
 --- a/web/src/pages/UsagePage.tsx
 +++ b/web/src/pages/UsagePage.tsx
 @@ -1,3 +1,4 @@
@@ -30848,7 +30848,7 @@ index 248958bb..4d1b9d50 100644
  import { ChartLifecycleProvider, useChartRefresh, type ChartRefreshSignal } from '@/components/usage/charts/chartLifecycle';
  import { CredentialEditModal } from '@/components/usage/credentials/CredentialEditModal';
  import { UsageComparisonCharts } from '@/components/usage/UsageComparisonCharts';
-@@ -52,11 +53,11 @@ import {
+@@ -56,11 +57,11 @@ import {
  } from '@/components/usage/RequestEventsDetailsCard';
  import { clampCustomRangeToCurrentBounds, clampStoredUsageRangeStateToCurrentBounds, parseLegacyCustomRange, parseStoredUsageRangeState, resolveUsageRangeRecoveryTimeZone, serializeUsageRangeState, type StoredUsageRangeState } from '@/utils/usage/customRange';
  import { buildUsageRangeQuery } from '@/utils/usage/rangeQuery';
@@ -30861,7 +30861,7 @@ index 248958bb..4d1b9d50 100644
  import { cpamcEmbedSearch, isCPAMCEmbed } from '@/embed/cpamcEmbed';
  import styles from './UsagePage.module.scss';
  
-@@ -77,6 +78,7 @@ const USAGE_TAB_LABEL_KEYS: Record<UsageTab, string> = {
+@@ -81,6 +82,7 @@ const USAGE_TAB_LABEL_KEYS: Record<UsageTab, string> = {
    overview: 'usage_stats.tab_overview',
    realtime: 'usage_stats.tab_realtime',
    analysis: 'usage_stats.tab_analysis',
@@ -30869,16 +30869,16 @@ index 248958bb..4d1b9d50 100644
    events: 'usage_stats.tab_events',
    'credentials': 'usage_stats.tab_credentials',
    'ai-provider': 'usage_stats.tab_ai_provider',
-@@ -142,7 +144,7 @@ export const getCredentialSectionVisibility = (tab: UsageTab) => ({
+@@ -147,7 +149,7 @@ export const getCredentialSectionVisibility = (tab: UsageTab) => ({
    showAiProvider: tab === 'ai-provider',
  });
  
--export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'realtime' && tab !== 'settings' && !getCredentialSectionVisibility(tab).enabled;
-+export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'realtime' && tab !== 'ranking' && tab !== 'settings' && !getCredentialSectionVisibility(tab).enabled;
+-export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'realtime' && tab !== 'settings' && tab !== 'models' && !getCredentialSectionVisibility(tab).enabled;
++export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'realtime' && tab !== 'ranking' && tab !== 'settings' && tab !== 'models' && !getCredentialSectionVisibility(tab).enabled;
  
  export const shouldShowApiKeyFilter = (tab: UsageTab) => tab === 'realtime' || shouldShowRangeControls(tab);
  
-@@ -650,8 +652,9 @@ export { normalizeUsageTabValue } from '@/lib/usageNavigation';
+@@ -605,8 +607,9 @@ export { normalizeUsageTabValue } from '@/lib/usageNavigation';
  
  export const getUsageTabOptions = (
    translate: Translate,
@@ -30889,17 +30889,17 @@ index 248958bb..4d1b9d50 100644
      value,
      label: translate(USAGE_TAB_LABEL_KEYS[value]),
    }));
-@@ -742,7 +745,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -697,7 +700,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
    const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
    const setTheme = useThemeStore((state) => state.setTheme);
    const isDark = resolvedTheme === 'dark';
 -  const [activeTab, setActiveTab] = useState<UsageTab>(loadUsageTab);
 +  const rankingRef = useRef<AdminRankingHandle>(null);
 +  const [activeTab, setActiveTab] = useState<UsageTab>(() => { const tab = loadUsageTab(); return isEmbeddedInCPAMC && tab === 'ranking' ? 'overview' : tab; });
+   const modelCatalog = useModelCatalogData({ enabled: activeTab === 'models', onAuthRequired });
+   const modelPricing = useModelPricingData({ enabled: activeTab === 'models', onAuthRequired });
    const pricingSettingsRef = useRef<PricingSettingsHandle | null>(null);
-   const [loadedTimeRange] = useState(loadTimeRange);
-   const pendingLegacyCustomRangeRef = useRef(loadedTimeRange.pendingLegacyCustomRange);
-@@ -810,7 +814,6 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -768,7 +772,6 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
  
    const {
      usage,
@@ -30907,7 +30907,7 @@ index 248958bb..4d1b9d50 100644
      loading,
      error,
      loadUsage
-@@ -1004,7 +1007,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -961,7 +964,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
    const analysisRequestControllerRef = useRef<AbortController | null>(null);
  
    const tabOptions = useMemo(
@@ -30916,15 +30916,15 @@ index 248958bb..4d1b9d50 100644
      [t],
    );
    const apiKeySelectOptions = useMemo(
-@@ -1765,6 +1768,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
-       await loadAnalysis(true);
+@@ -1596,6 +1599,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+       await Promise.all([modelCatalogRef.current?.refresh(), pricingSettingsRef.current?.refresh()]);
        return;
      }
 +    if (activeTab === 'ranking') { await rankingRef.current?.refresh(); return; }
      if (activeTab === 'settings') {
-       await Promise.all([loadAuthSessions(), loadApiKeySettings(), pricingSettingsRef.current?.refresh()]);
+       await Promise.all([loadAuthSessions(), loadApiKeySettings()]);
        return;
-@@ -1868,11 +1872,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -1692,11 +1696,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
      }
    }, [onAuthRequired, showTopNotice, t]);
  
@@ -30937,7 +30937,7 @@ index 248958bb..4d1b9d50 100644
  
  	  useHeaderRefresh(refreshActiveTab);
  
-@@ -1998,16 +1998,9 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -1800,16 +1800,9 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
      tpmSparkline,
      cacheReadRateSparkline,
      costSparkline
@@ -30955,7 +30955,7 @@ index 248958bb..4d1b9d50 100644
  
    return (
      <div className={`${styles.pageShell} ${!isEmbeddedInCPAMC ? styles.standalone : ''}`.trim()} data-keeper-page="usage">
-@@ -2191,6 +2184,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -1993,6 +1986,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                          </>
                        )}
                      </MainActionButton>
@@ -30963,7 +30963,7 @@ index 248958bb..4d1b9d50 100644
                    </div>
                  </div>
                </div>
-@@ -2217,6 +2211,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2019,6 +2013,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                ] : []}
                onRefresh={() => void handleManualRefresh().catch(() => {})}
                refreshing={manualRefreshLoading}
@@ -30971,7 +30971,7 @@ index 248958bb..4d1b9d50 100644
              />}
  
              {activeTab === 'overview' && (error || comparisonsError) && <div className={styles.errorBox}>{(error || comparisonsError) === 'AUTH_REQUIRED' ? t('auth.session_expired') : (error || comparisonsError)}</div>}
-@@ -2226,12 +2221,10 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2028,12 +2023,10 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
  
              {activeTab === 'overview' && (
                <>
@@ -30985,7 +30985,7 @@ index 248958bb..4d1b9d50 100644
                    sparklines={{
                      requests: requestsSparkline,
                      tokens: tokensSparkline,
-@@ -2242,8 +2235,10 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2044,8 +2037,10 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                    }}
                  />
                  </ChartLifecycleProvider>
@@ -30998,7 +30998,7 @@ index 248958bb..4d1b9d50 100644
                    activity={activity}
                    loading={activityLoading}
                    error={activityError}
-@@ -2252,9 +2247,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2054,9 +2049,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                    requestIdentity={activityRequestIdentity}
                    onWindowChange={setActivityWindow}
                  />
@@ -31009,7 +31009,7 @@ index 248958bb..4d1b9d50 100644
                </>
              )}
  
-@@ -2294,6 +2287,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2096,6 +2089,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                </>
              )}
  
@@ -31017,7 +31017,7 @@ index 248958bb..4d1b9d50 100644
 +
              {activeTab === 'events' && (
                <>
-                 {eventsError && <div className={styles.errorBox}>{eventsError === 'COSTS_BUSY' ? t('usage_stats.costs_busy') : eventsError}</div>}
+                 {eventsFeed.error && <div className={styles.errorBox}>{eventsFeed.error === 'COSTS_BUSY' ? t('usage_stats.costs_busy') : eventsFeed.error}</div>}
 diff --git a/web/src/pages/test/KeyOverviewPage.tabs.test.tsx b/web/src/pages/test/KeyOverviewPage.tabs.test.tsx
 index f44a04df..dd019bd8 100644
 --- a/web/src/pages/test/KeyOverviewPage.tabs.test.tsx
@@ -31235,10 +31235,10 @@ index 00000000..8cc5b0fe
 + }finally{await act(async()=>root.unmount());element.remove();click.mockRestore();vi.unstubAllGlobals();}
 +});
 diff --git a/web/src/pages/test/UsagePage.logic.test.ts b/web/src/pages/test/UsagePage.logic.test.ts
-index 41609f4f..fa70bb2e 100644
+index cdc12b85..65de8a9a 100644
 --- a/web/src/pages/test/UsagePage.logic.test.ts
 +++ b/web/src/pages/test/UsagePage.logic.test.ts
-@@ -823,6 +823,7 @@ describe('UsagePage tab labels', () => {
+@@ -750,6 +750,7 @@ describe('UsagePage tab labels', () => {
        'translated:usage_stats.tab_overview',
        'translated:usage_stats.tab_realtime',
        'translated:usage_stats.tab_analysis',

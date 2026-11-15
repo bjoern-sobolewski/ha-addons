@@ -129,7 +129,7 @@ index 9ec1ee6..95c8cf1 100644
    const usageByProvider =
      usageState.cache === cache ? usageState.value : cache.cachedUsageByProvider;
 diff --git a/src/features/authFiles/AuthFilesPage.tsx b/src/features/authFiles/AuthFilesPage.tsx
-index 81c04fd..c6a3579 100644
+index e932595..1811b5e 100644
 --- a/src/features/authFiles/AuthFilesPage.tsx
 +++ b/src/features/authFiles/AuthFilesPage.tsx
 @@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
@@ -141,7 +141,7 @@ index 81c04fd..c6a3579 100644
  import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
  import { useRevealOnScroll } from '@/hooks/motion';
  import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
-@@ -385,12 +385,7 @@ export function AuthFilesPage() {
+@@ -388,12 +388,7 @@ export function AuthFilesPage() {
      loadModelAlias();
    }, [isCurrentLayer, loadFiles, loadExcluded, loadModelAlias]);
  
@@ -225,10 +225,10 @@ index 0000000..7d56142
 + useEffect(() => { if (!enabled) return; return startLiveRefresh(async () => current.current(), key.split(',') as LiveTopic[], false); }, [enabled, key]);
 +}
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 7477ed4..64a303e 100644
+index b804c19..363148f 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -1012,7 +1012,9 @@
+@@ -1045,7 +1045,9 @@
    "status_bar": {
      "success_short": "✓",
      "failure_short": "✗",
@@ -240,10 +240,10 @@ index 7477ed4..64a303e 100644
    "logs": {
      "preview_too_large": "This request log exceeds the 2 MiB preview limit. Download it to view.",
 diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
-index b516606..be90c22 100644
+index 5a0ce45..6a6f9a8 100644
 --- a/src/i18n/locales/ko.json
 +++ b/src/i18n/locales/ko.json
-@@ -1012,7 +1012,9 @@
+@@ -1045,7 +1045,9 @@
    "status_bar": {
      "success_short": "✓",
      "failure_short": "✗",
@@ -255,10 +255,10 @@ index b516606..be90c22 100644
    "logs": {
      "preview_too_large": "이 요청 로그는 2 MiB 미리보기 제한을 초과합니다. 다운로드하여 확인하세요.",
 diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
-index 9b1d990..280e74d 100644
+index e579cff..7b2bd15 100644
 --- a/src/i18n/locales/ru.json
 +++ b/src/i18n/locales/ru.json
-@@ -1015,7 +1015,9 @@
+@@ -1058,7 +1058,9 @@
    "status_bar": {
      "success_short": "✓",
      "failure_short": "✗",
@@ -270,10 +270,10 @@ index 9b1d990..280e74d 100644
    "logs": {
      "preview_too_large": "Журнал запроса превышает лимит предпросмотра в 2 МиБ. Скачайте его для просмотра.",
 diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
-index be13040..7bd2557 100644
+index e7cdf73..b0d0c2c 100644
 --- a/src/i18n/locales/tr.json
 +++ b/src/i18n/locales/tr.json
-@@ -1012,7 +1012,9 @@
+@@ -1045,7 +1045,9 @@
    "status_bar": {
      "success_short": "✓",
      "failure_short": "✗",
@@ -285,10 +285,10 @@ index be13040..7bd2557 100644
    "logs": {
      "preview_too_large": "Bu İstek Günlüğü 2 MiB Önizleme Sınırını Aşıyor. Görmek için İndir.",
 diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
-index 4107e18..5f4119c 100644
+index 243640e..0c94745 100644
 --- a/src/i18n/locales/vi.json
 +++ b/src/i18n/locales/vi.json
-@@ -968,7 +968,9 @@
+@@ -1001,7 +1001,9 @@
    "status_bar": {
      "success_short": "✓",
      "failure_short": "✗",
@@ -300,7 +300,7 @@ index 4107e18..5f4119c 100644
    "logs": {
      "title": "Trình xem Log",
 diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
-index 63f943a..20ebf54 100644
+index 59d3923..d1caf4b 100644
 --- a/src/i18n/locales/zh-CN.json
 +++ b/src/i18n/locales/zh-CN.json
 @@ -581,7 +581,6 @@
@@ -311,7 +311,7 @@ index 63f943a..20ebf54 100644
      "reset_success": "已重置 \"{{name}}\" 的 Codex 额度",
      "reset_failed": "重置 \"{{name}}\" 的 Codex 额度失败：{{message}}",
      "plan_plus": "Plus",
-@@ -1011,7 +1010,9 @@
+@@ -1039,7 +1038,9 @@
    "status_bar": {
      "success_short": "✓",
      "failure_short": "✗",
@@ -323,7 +323,7 @@ index 63f943a..20ebf54 100644
    "logs": {
      "preview_too_large": "报文超过 2 MiB 预览限制，请下载查看",
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index a3c32e6..1df37a2 100644
+index 17857f3..51e361e 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
 @@ -581,7 +581,6 @@
@@ -334,7 +334,7 @@ index a3c32e6..1df37a2 100644
      "reset_success": "已重置「{{name}}」的 Codex 配額",
      "reset_failed": "重置「{{name}}」的 Codex 配額失敗：{{message}}",
      "plan_plus": "Plus",
-@@ -1039,7 +1038,9 @@
+@@ -1067,7 +1066,9 @@
    "status_bar": {
      "success_short": "✓",
      "failure_short": "✗",
@@ -346,10 +346,10 @@ index a3c32e6..1df37a2 100644
    "logs": {
      "preview_too_large": "封包超過 2 MiB 預覽限制，請下載查看",
 diff --git a/src/services/api/client.ts b/src/services/api/client.ts
-index 17c46ed..2a44c3a 100644
+index 4768151..b9ad179 100644
 --- a/src/services/api/client.ts
 +++ b/src/services/api/client.ts
-@@ -68,6 +68,13 @@ class ApiClient {
+@@ -69,6 +69,13 @@ class ApiClient {
      return client;
    }
  

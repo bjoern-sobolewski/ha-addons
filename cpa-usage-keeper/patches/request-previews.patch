@@ -48,13 +48,13 @@ index 00000000..79c4b0d5
 +	})
 +}
 diff --git a/internal/api/router.go b/internal/api/router.go
-index 8012d822..08ddf316 100644
+index 6f3b2e52..527c5d4f 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
-@@ -182,6 +182,7 @@ func NewRouter(
- 	registerUsageActivityRoute(adminProtected, usageProvider)
+@@ -192,6 +192,7 @@ func NewRouter(
  	registerUsageAnalysisRoute(adminProtected, usageProvider, cpaAPIKeyProvider)
  	registerUsageEventsRoute(adminProtected, usageProvider, usageIdentityProvider, cpaAPIKeyProvider, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
+ 	registerUsageEventsLiveRoute(adminProtected, usageProvider, usageIdentityProvider, cpaAPIKeyProvider, usageEventsLive, costReadGate, authHandler, usageEventsLiveContext)
 +	registerPromptPreviewRoute(adminProtected, usageProvider)
  	registerUsageIdentityRoutes(adminProtected, usageIdentityProvider)
  	registerErrorEventRoutes(adminProtected, errorEventProvider)
@@ -476,7 +476,7 @@ index 00000000..a0db5b34
 +  return <PromptPreviewContent preview={preview} />
 +}
 diff --git a/web/src/components/usage/RequestEventsDetailsCard.tsx b/web/src/components/usage/RequestEventsDetailsCard.tsx
-index 89479848..1d2558d1 100644
+index 17d00910..fd15e7ed 100644
 --- a/web/src/components/usage/RequestEventsDetailsCard.tsx
 +++ b/web/src/components/usage/RequestEventsDetailsCard.tsx
 @@ -60,6 +60,8 @@ import { RequestEventsColumnSettingsModal } from './RequestEventsColumnSettingsM
@@ -532,7 +532,7 @@ index 89479848..1d2558d1 100644
    );
  });
  
-@@ -407,6 +417,7 @@ export interface RequestEventsDetailsCardProps {
+@@ -412,6 +422,7 @@ export interface RequestEventsDetailsCardProps {
    onExport?: (format: RequestEventExportFormat) => void;
    onVisibleColumnIdsChange?: (columnIds: RequestEventColumnId[]) => void;
    onColumnOrderChange?: (columnIds: RequestEventColumnId[]) => void;
@@ -540,7 +540,79 @@ index 89479848..1d2558d1 100644
    requestLogAccessEnabled?: boolean;
    onRequestLogOpen?: (event: UsageEvent) => void;
    requestLogLoadingEventId?: string | null;
-@@ -635,6 +646,7 @@ export function RequestEventsDetailsCard({
+@@ -631,9 +642,10 @@ function RequestEventsViewport({
+   onStartReading,
+   onReturnToTop,
+   onTablePositionChange,
++  showPromptPreviews,
+ }: Pick<RequestEventsDetailsCardProps,
+   'totalCount' | 'loading' | 'loadingMore' | 'hasMore' | 'autoLoadMore' | 'reading' | 'restoring'
+-  | 'onLoadMore' | 'onStartReading' | 'onReturnToTop' | 'onTablePositionChange'
++  | 'onLoadMore' | 'onStartReading' | 'onReturnToTop' | 'onTablePositionChange' | 'showPromptPreviews'
+ > & { rows: RequestEventRow[]; columns: readonly RequestEventColumnDefinition[] }) {
+   const { t } = useTranslation();
+   const requestEventsTableWrapperRef = useRef<HTMLDivElement | null>(null);
+@@ -735,7 +747,7 @@ function RequestEventsViewport({
+     <>
+       <div
+         ref={requestEventsTableWrapperRef}
+-        className={styles.requestEventsTableWrapper}
++        className={`${styles.requestEventsTableWrapper} ${promptStyles.tableViewport}`}
+         data-virtualized={virtualizeRows}
+         data-loaded-row-count={rows.length}
+         onScroll={handleTableScroll}
+@@ -749,24 +761,26 @@ function RequestEventsViewport({
+         <table className={styles.table} aria-rowcount={totalCount + 1}>
+           <thead>
+             <tr>
++              {showPromptPreviews && <th className={promptStyles.toggleCell} aria-label="Prompt previews" />}
+               {columns.map((column) => (
+                 <React.Fragment key={column.id}>{column.header}</React.Fragment>
+               ))}
+             </tr>
+           </thead>
+-          <tbody>
++          <>
+             {virtualizeRows && virtualPaddingTop > 0 && (
+-              <tr
++              <tbody><tr
+                 className={styles.requestEventsVirtualSpacerRow}
+                 style={{ height: `${virtualPaddingTop}px` }}
+                 aria-hidden="true"
+               >
+-                <td colSpan={columns.length} />
+-              </tr>
++                <td colSpan={columns.length + Number(showPromptPreviews)} />
++              </tr></tbody>
+             )}
+             {displayedRows.map(({ key, index }) => (
+               <RequestEventTableRow
+                 key={key}
++                showPromptPreviews={showPromptPreviews}
+                 row={rows[index]}
+                 columns={columns}
+                 virtualIndex={index}
+@@ -774,15 +788,15 @@ function RequestEventsViewport({
+               />
+             ))}
+             {virtualizeRows && virtualPaddingBottom > 0 && (
+-              <tr
++              <tbody><tr
+                 className={styles.requestEventsVirtualSpacerRow}
+                 style={{ height: `${virtualPaddingBottom}px` }}
+                 aria-hidden="true"
+               >
+-                <td colSpan={columns.length} />
+-              </tr>
++                <td colSpan={columns.length + Number(showPromptPreviews)} />
++              </tr></tbody>
+             )}
+-          </tbody>
++          </>
+         </table>
+       </div>
+ 
+@@ -851,6 +865,7 @@ export function RequestEventsDetailsCard({
    onExport,
    onVisibleColumnIdsChange,
    onColumnOrderChange,
@@ -548,70 +620,14 @@ index 89479848..1d2558d1 100644
    requestLogAccessEnabled = false,
    onRequestLogOpen,
    requestLogLoadingEventId = null,
-@@ -1362,26 +1374,26 @@ export function RequestEventsDetailsCard({
+@@ -1539,6 +1554,7 @@ export function RequestEventsDetailsCard({
            />
          ) : (
-           <>
--            <div ref={requestEventsTableWrapperRef} className={styles.requestEventsTableWrapper} data-virtualized={virtualizeRows} data-loaded-row-count={rows.length} onScroll={handleTableScroll}>
-+            <div ref={requestEventsTableWrapperRef} className={`${styles.requestEventsTableWrapper} ${promptStyles.tableViewport}`} data-virtualized={virtualizeRows} data-loaded-row-count={rows.length} onScroll={handleTableScroll}>
-               <table className={styles.table} aria-rowcount={totalCount + 1}>
-                 <thead>
-                   <tr>
-+                    {showPromptPreviews && <th className={promptStyles.toggleCell} aria-label="Prompt previews" />}
-                     {visibleColumns.map((column) => (
-                       <React.Fragment key={column.id}>{column.header}</React.Fragment>
-                     ))}
-                   </tr>
-                 </thead>
--                <tbody>
-                   {virtualizeRows ? (
-                     <>
-                       {virtualPaddingTop > 0 && (
--                        <tr
-+                        <tbody><tr
-                           className={styles.requestEventsVirtualSpacerRow}
-                           style={{ height: `${virtualPaddingTop}px` }}
-                           aria-hidden="true"
-                         >
--                          <td colSpan={visibleColumns.length} />
--                        </tr>
-+                          <td colSpan={visibleColumns.length + Number(showPromptPreviews)} />
-+                        </tr></tbody>
-                       )}
-                       {virtualRows.map((virtualRow) => {
-                         const row = rows[virtualRow.index];
-@@ -1389,6 +1401,7 @@ export function RequestEventsDetailsCard({
-                           <RequestEventTableRow
-                             key={virtualRow.key}
-                             row={row}
-+                            showPromptPreviews={showPromptPreviews}
-                             columns={visibleColumns}
-                             virtualIndex={virtualRow.index}
-                             measureElement={eventRowVirtualizer.measureElement}
-@@ -1396,19 +1409,18 @@ export function RequestEventsDetailsCard({
-                         );
-                       })}
-                       {virtualPaddingBottom > 0 && (
--                        <tr
-+                        <tbody><tr
-                           className={styles.requestEventsVirtualSpacerRow}
-                           style={{ height: `${virtualPaddingBottom}px` }}
-                           aria-hidden="true"
-                         >
--                          <td colSpan={visibleColumns.length} />
--                        </tr>
-+                          <td colSpan={visibleColumns.length + Number(showPromptPreviews)} />
-+                        </tr></tbody>
-                       )}
-                     </>
-                   ) : rows.map((row) => (
--                    <RequestEventTableRow key={row.id} row={row} columns={visibleColumns} />
-+                    <RequestEventTableRow key={row.id} row={row} columns={visibleColumns} showPromptPreviews={showPromptPreviews} />
-                   ))}
--                </tbody>
-               </table>
-             </div>
- 
+           <RequestEventsViewport
++            showPromptPreviews={showPromptPreviews}
+             rows={rows}
+             columns={visibleColumns}
+             totalCount={totalCount}
 diff --git a/web/src/components/usage/test/PromptPreviews.test.tsx b/web/src/components/usage/test/PromptPreviews.test.tsx
 new file mode 100644
 index 00000000..218d4deb
@@ -671,10 +687,10 @@ index 00000000..218d4deb
 +  expect(container.textContent).not.toContain('private initial');
 +});
 diff --git a/web/src/components/usage/test/RequestEventsDetailsCardVirtualization.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCardVirtualization.test.tsx
-index 18e0877f..b318375d 100644
+index 195a7e8c..6bb1aa07 100644
 --- a/web/src/components/usage/test/RequestEventsDetailsCardVirtualization.test.tsx
 +++ b/web/src/components/usage/test/RequestEventsDetailsCardVirtualization.test.tsx
-@@ -50,6 +50,9 @@ describe('RequestEventsDetailsCard event table virtualization', () => {
+@@ -63,6 +63,9 @@ describe('RequestEventsDetailsCard event table virtualization', () => {
      });
      vi.stubGlobal('cancelAnimationFrame', () => undefined);
      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function getBoundingClientRect() {
@@ -775,17 +791,17 @@ index 1e2eb36e..4b7c6677 100644
   </section>
  }
 diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
-index 69b78ca1..f4b0169d 100644
+index 1e848698..2116b70c 100644
 --- a/web/src/pages/UsagePage.tsx
 +++ b/web/src/pages/UsagePage.tsx
-@@ -2298,6 +2298,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2101,6 +2101,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                <>
-                 {eventsError && <div className={styles.errorBox}>{eventsError === 'COSTS_BUSY' ? t('usage_stats.costs_busy') : eventsError}</div>}
+                 {eventsFeed.error && <div className={styles.errorBox}>{eventsFeed.error === 'COSTS_BUSY' ? t('usage_stats.costs_busy') : eventsFeed.error}</div>}
                  <RequestEventsDetailsCard
 +                  showPromptPreviews
-                   events={visibleEvents}
-                   loading={eventsLoading || (eventsError === 'COSTS_BUSY' && visibleEvents.length === 0)}
-                   totalCount={eventsScopeMatches ? eventsTotalCount : 0}
+                   events={eventsFeed.events}
+                   loading={eventsFeed.loading}
+                   totalCount={eventsFeed.totalCount}
 diff --git a/web/src/pages/test/LiveRoutingPage.test.tsx b/web/src/pages/test/LiveRoutingPage.test.tsx
 index 2834d543..c757e759 100644
 --- a/web/src/pages/test/LiveRoutingPage.test.tsx

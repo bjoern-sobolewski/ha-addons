@@ -71,7 +71,7 @@ index 1eabc9cd..9ed19b52 100644
  		mgmt.POST("/quota/fetch", s.mgmt.FetchCredentialQuota)
  		mgmt.POST("/quota/reset", s.mgmt.ResetCredentialQuota)
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index e73ad893..20db2dd6 100644
+index 2b4dee04..157f751f 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
 @@ -18,6 +18,7 @@ func (s *Server) registerManagementV8Routes() {
@@ -452,10 +452,10 @@ index 00000000..c1091fe1
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/logging_helpers.go b/internal/runtime/executor/helps/logging_helpers.go
-index cdf1264d..e11f9202 100644
+index 07388988..4c2f1056 100644
 --- a/internal/runtime/executor/helps/logging_helpers.go
 +++ b/internal/runtime/executor/helps/logging_helpers.go
-@@ -407,7 +407,9 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
+@@ -527,7 +527,9 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
  // AppendCodexAPIWebsocketResponse stores a codex upstream websocket response frame and merges any
  // quota event headers carried by the frame into the request log.
  func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
@@ -467,7 +467,7 @@ index cdf1264d..e11f9202 100644
  }
  
 diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
-index 8b2f8980..098aa347 100644
+index be4d5e43..54001ca3 100644
 --- a/sdk/cliproxy/auth/conductor_execution.go
 +++ b/sdk/cliproxy/auth/conductor_execution.go
 @@ -17,6 +17,7 @@ import (
@@ -478,9 +478,19 @@ index 8b2f8980..098aa347 100644
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
  	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
  	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
-@@ -25,7 +26,12 @@ import (
+@@ -25,15 +26,20 @@ import (
  	log "github.com/sirupsen/logrus"
  )
+ 
+-func (m *Manager) newUpstreamAttemptContext(ctx context.Context) context.Context {
++func (m *Manager) newUpstreamAttemptContext(ctx context.Context, selected ...*Auth) context.Context {
+ 	ctx = logging.WithFreshResponseHeadersHolder(ctx)
+ 	if RequestScopedErrorConfigFromContext(ctx) == nil {
+ 		ctx = WithRequestScopedErrorConfig(ctx, m.runtimeConfigSnapshot())
+ 	}
+-	return cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
++	return newUpstreamAttemptContext(ctx, selected...)
+ }
  
 -func newUpstreamAttemptContext(ctx context.Context) context.Context {
 +func newUpstreamAttemptContext(ctx context.Context, selected ...*Auth) context.Context {
@@ -492,25 +502,25 @@ index 8b2f8980..098aa347 100644
  	ctx = logging.WithFreshResponseHeadersHolder(ctx)
  	return cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
  }
-@@ -562,7 +568,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+@@ -707,7 +713,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
  		}
  		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
  		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
--		execCtx = newUpstreamAttemptContext(execCtx)
-+		execCtx = newUpstreamAttemptContext(execCtx, auth)
+-		execCtx = m.newUpstreamAttemptContext(execCtx)
++		execCtx = m.newUpstreamAttemptContext(execCtx, auth)
  
- 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+ 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, pickOpts.Headers)
  		if len(models) == 0 {
-@@ -588,7 +594,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+@@ -733,7 +739,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
  		var authErr error
  		didRefreshOnUnauthorized := false
  		for _, upstreamModel := range models {
--			execCtx = newUpstreamAttemptContext(execCtx)
-+			execCtx = newUpstreamAttemptContext(execCtx, auth)
+-			execCtx = m.newUpstreamAttemptContext(execCtx)
++			execCtx = m.newUpstreamAttemptContext(execCtx, auth)
  			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
  			execReq := req
  			execReq.Model = upstreamModel
-@@ -635,11 +641,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
+@@ -780,11 +786,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req
  				if errCtx := execCtx.Err(); errCtx != nil {
  					return cliproxyexecutor.Response{}, errCtx
  				}
@@ -519,30 +529,30 @@ index 8b2f8980..098aa347 100644
  				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
  					auth = refreshed
  					didRefreshOnUnauthorized = true
--					execCtx = newUpstreamAttemptContext(execCtx)
-+					execCtx = newUpstreamAttemptContext(execCtx, auth)
+-					execCtx = m.newUpstreamAttemptContext(execCtx)
++					execCtx = m.newUpstreamAttemptContext(execCtx, auth)
  					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
  					executionSeq = m.nextExecutionSeq()
  					startRetry := time.Now()
-@@ -780,7 +786,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+@@ -928,7 +934,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
  		}
  		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
  		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
--		execCtx = newUpstreamAttemptContext(execCtx)
-+		execCtx = newUpstreamAttemptContext(execCtx, auth)
+-		execCtx = m.newUpstreamAttemptContext(execCtx)
++		execCtx = m.newUpstreamAttemptContext(execCtx, auth)
  
- 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+ 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, pickOpts.Headers)
  		if len(models) == 0 {
-@@ -806,7 +812,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+@@ -954,7 +960,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
  		var authErr error
  		didRefreshOnUnauthorized := false
  		for _, upstreamModel := range models {
--			execCtx = newUpstreamAttemptContext(execCtx)
-+			execCtx = newUpstreamAttemptContext(execCtx, auth)
+-			execCtx = m.newUpstreamAttemptContext(execCtx)
++			execCtx = m.newUpstreamAttemptContext(execCtx, auth)
  			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
  			execReq := req
  			execReq.Model = upstreamModel
-@@ -853,11 +859,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
+@@ -1001,11 +1007,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
  				if errCtx := execCtx.Err(); errCtx != nil {
  					return cliproxyexecutor.Response{}, errCtx
  				}
@@ -551,61 +561,61 @@ index 8b2f8980..098aa347 100644
  				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
  					auth = refreshed
  					didRefreshOnUnauthorized = true
--					execCtx = newUpstreamAttemptContext(execCtx)
-+					execCtx = newUpstreamAttemptContext(execCtx, auth)
+-					execCtx = m.newUpstreamAttemptContext(execCtx)
++					execCtx = m.newUpstreamAttemptContext(execCtx, auth)
  					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
  					executionSeq = m.nextExecutionSeq()
  					startRetry := time.Now()
-@@ -1107,7 +1113,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
+@@ -1264,7 +1270,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
+ 				Reused: selection.Retained(), Model: routeModel, CredentialPolicy: credentialPolicyFromContext(ctx),
+ 			})
  		}
- 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
- 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
--		execCtx = newUpstreamAttemptContext(execCtx)
-+		execCtx = newUpstreamAttemptContext(execCtx, auth)
+-		execCtx = m.newUpstreamAttemptContext(execCtx)
++		execCtx = m.newUpstreamAttemptContext(execCtx, auth)
  		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
  		// Home owns dispatched credential availability; only local selections need state filtering.
  		if selection == nil {
-@@ -2291,7 +2297,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
+@@ -2457,7 +2463,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
  		Metadata:        map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: sessionID},
  	}
  
--	execCtx := newUpstreamAttemptContext(ctx)
-+	execCtx := newUpstreamAttemptContext(ctx, auth)
+-	execCtx := m.newUpstreamAttemptContext(ctx)
++	execCtx := m.newUpstreamAttemptContext(ctx, auth)
  	execCtx = syncMetadataSessionToContext(execCtx, opts.Metadata)
  	executionSeq := m.nextExecutionSeq()
  	accessToken := authAccessTokenForRequest(execCtx, auth, opts.Headers)
 diff --git a/sdk/cliproxy/auth/conductor_home_execution.go b/sdk/cliproxy/auth/conductor_home_execution.go
-index b790b4f4..dc40275f 100644
+index 11fcf62b..4b87e4c2 100644
 --- a/sdk/cliproxy/auth/conductor_home_execution.go
 +++ b/sdk/cliproxy/auth/conductor_home_execution.go
-@@ -135,7 +135,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
- 		clearSchedulerSelectionID(opts.Metadata)
- 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
- 		execCtx = coreusage.WithSelectionID(execCtx, "")
--		execCtx = newUpstreamAttemptContext(execCtx)
-+		execCtx = newUpstreamAttemptContext(execCtx, auth)
+@@ -138,7 +138,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
+ 		execCtx = coreusage.WithHomeSelection(execCtx, coreusage.HomeSelection{
+ 			Reused: selection.Retained(), Model: routeModel, CredentialPolicy: credentialPolicyFromContext(ctx),
+ 		})
+-		execCtx = m.newUpstreamAttemptContext(execCtx)
++		execCtx = m.newUpstreamAttemptContext(execCtx, auth)
  		if rt := m.roundTripperFor(auth); rt != nil {
  			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
  			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-@@ -174,7 +174,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
+@@ -177,7 +177,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
  			continue
  		}
  		for _, upstreamModel := range models {
--			execCtx = newUpstreamAttemptContext(execCtx)
-+			execCtx = newUpstreamAttemptContext(execCtx, auth)
+-			execCtx = m.newUpstreamAttemptContext(execCtx)
++			execCtx = m.newUpstreamAttemptContext(execCtx, auth)
  			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
  			execReq := req
  			execReq.Model = upstreamModel
 diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
-index be5c66cb..c1bc4d44 100644
+index 5b310acb..b79817cf 100644
 --- a/sdk/cliproxy/auth/conductor_stream.go
 +++ b/sdk/cliproxy/auth/conductor_stream.go
 @@ -412,7 +412,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
  	var upstreamErr error
  	didRefreshOnUnauthorized := false
  	for idx, execModel := range execModels {
--		ctx = newUpstreamAttemptContext(ctx)
-+		ctx = newUpstreamAttemptContext(ctx, auth)
+-		ctx = m.newUpstreamAttemptContext(ctx)
++		ctx = m.newUpstreamAttemptContext(ctx, auth)
  		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
  		execReq := req
  		execReq.Model = execModel
@@ -619,8 +629,8 @@ index be5c66cb..c1bc4d44 100644
  					auth = refreshed
  					publishSelectedAuthMetadata(execOpts.Metadata, auth)
  					didRefreshOnUnauthorized = true
--					ctx = newUpstreamAttemptContext(ctx)
-+					ctx = newUpstreamAttemptContext(ctx, auth)
+-					ctx = m.newUpstreamAttemptContext(ctx)
++					ctx = m.newUpstreamAttemptContext(ctx, auth)
  					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
  					executionSeq = m.nextExecutionSeq()
  					startRetry := time.Now()
@@ -635,8 +645,8 @@ index be5c66cb..c1bc4d44 100644
  					auth = refreshed
  					publishSelectedAuthMetadata(execOpts.Metadata, auth)
  					didRefreshOnUnauthorized = true
--					ctx = newUpstreamAttemptContext(ctx)
-+					ctx = newUpstreamAttemptContext(ctx, auth)
+-					ctx = m.newUpstreamAttemptContext(ctx)
++					ctx = m.newUpstreamAttemptContext(ctx, auth)
  					executionSeq = m.nextExecutionSeq()
  					startRetry := time.Now()
  					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)

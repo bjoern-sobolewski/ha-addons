@@ -1,66 +1,8 @@
-diff --git a/internal/runtime/executor/codex_executor_auth_test.go b/internal/runtime/executor/codex_executor_auth_test.go
-index 9e38b625..da0c03a1 100644
---- a/internal/runtime/executor/codex_executor_auth_test.go
-+++ b/internal/runtime/executor/codex_executor_auth_test.go
-@@ -746,7 +746,10 @@ func TestCodexExecutorUseSIWCExecuteAndStream(t *testing.T) {
- 	if got := gotHeaders.Get("User-Agent"); got != codexSIWCUserAgent(&customCfg) {
- 		t.Fatalf("custom User-Agent = %q, want %q", got, codexSIWCUserAgent(&customCfg))
- 	}
--	for _, forbidden := range []string{"max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
-+	if gotBody["max_output_tokens"] != float64(1024) {
-+		t.Fatal("SIWC must preserve the requested output ceiling")
-+	}
-+	for _, forbidden := range []string{"temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
- 		if _, exists := gotBody[forbidden]; exists {
- 			t.Fatalf("field %q should be omitted in SIWC mode, got %#v", forbidden, gotBody[forbidden])
- 		}
-@@ -781,7 +784,10 @@ func TestCodexExecutorUseSIWCExecuteAndStream(t *testing.T) {
- 	if gotBody["service_tier"] != "priority" {
- 		t.Fatalf("expected user payload rule to set service_tier=priority after SIWC body cleanup, got %v", gotBody["service_tier"])
- 	}
--	for _, forbidden := range []string{"max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
-+	if gotBody["max_output_tokens"] != float64(1024) {
-+		t.Fatal("SIWC must preserve the requested output ceiling")
-+	}
-+	for _, forbidden := range []string{"temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
- 		if _, exists := gotBody[forbidden]; exists {
- 			t.Fatalf("ExecuteStream field %q should be omitted in SIWC mode, got %#v", forbidden, gotBody[forbidden])
- 		}
-@@ -905,7 +911,10 @@ func TestCodexWebsocketsExecutorUseSIWCExecuteAndStream(t *testing.T) {
- 	if gotFrame["type"] != "response.create" || gotFrame["store"] != false || gotFrame["service_tier"] != "priority" {
- 		t.Fatalf("unexpected SIWC WebSocket frame: %#v", gotFrame)
- 	}
--	for _, forbidden := range []string{"stream", "background", "max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
-+	if gotFrame["max_output_tokens"] != float64(1024) {
-+		t.Fatal("SIWC WebSocket must preserve the requested output ceiling")
-+	}
-+	for _, forbidden := range []string{"stream", "background", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
- 		if _, exists := gotFrame[forbidden]; exists {
- 			t.Fatalf("field %q should be omitted in SIWC WebSocket frame: %#v", forbidden, gotFrame)
- 		}
-@@ -928,7 +937,10 @@ func TestCodexWebsocketsExecutorUseSIWCExecuteAndStream(t *testing.T) {
- 	if gotFrame["type"] != "response.create" || gotFrame["store"] != false || gotFrame["service_tier"] != "priority" {
- 		t.Fatalf("unexpected SIWC WebSocket stream frame: %#v", gotFrame)
- 	}
--	for _, forbidden := range []string{"stream", "background", "max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
-+	if gotFrame["max_output_tokens"] != float64(1024) {
-+		t.Fatal("SIWC WebSocket must preserve the requested output ceiling")
-+	}
-+	for _, forbidden := range []string{"stream", "background", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
- 		if _, exists := gotFrame[forbidden]; exists {
- 			t.Fatalf("ExecuteStream field %q should be omitted in SIWC WebSocket frame: %#v", forbidden, gotFrame)
- 		}
 diff --git a/internal/runtime/executor/codex_executor_compact_test.go b/internal/runtime/executor/codex_executor_compact_test.go
-index 1ca9b367..b9fa450e 100644
+index 04ff7b09..526e2aee 100644
 --- a/internal/runtime/executor/codex_executor_compact_test.go
 +++ b/internal/runtime/executor/codex_executor_compact_test.go
-@@ -147,11 +147,14 @@ func TestCodexExecutorCompactUseSIWCAppliesSIWCRulesBeforePayloadFinalizer(t *te
- 	if gotHeaders.Get("Chatgpt-Account-Id") != "" || gotHeaders.Get("Originator") != "" {
- 		t.Fatalf("unexpected Codex headers on SIWC compact request: %v", gotHeaders)
- 	}
--	for _, omitted := range []string{"instructions", "max_output_tokens", "prompt_cache_retention", "prompt_cache_options", "stream", "store"} {
-+	for _, omitted := range []string{"instructions", "prompt_cache_retention", "prompt_cache_options", "stream", "store"} {
- 		if gjson.GetBytes(gotBody, omitted).Exists() {
+@@ -158,6 +158,9 @@ func TestCodexExecutorCompactUseSIWCAppliesSIWCRulesBeforePayloadFinalizer(t *te
  			t.Fatalf("field %q should be omitted in SIWC compact body: %s", omitted, gotBody)
  		}
  	}
@@ -68,44 +10,8 @@ index 1ca9b367..b9fa450e 100644
 +		t.Fatalf("compact output ceiling = %d, want 512", cap)
 +	}
  	// PayloadFinalizer runs last and can override temperature after built-in SIWC stripping.
- 	if gotTemp := gjson.GetBytes(gotBody, "temperature").Float(); gotTemp != 0.25 {
+ 	if gotTemp := ojson.GetBytes(gotBody, "temperature").Float(); gotTemp != 0.25 {
  		t.Fatalf("PayloadFinalizer temperature override = %v, want 0.25; body=%s", gotTemp, gotBody)
-diff --git a/internal/runtime/executor/codex_executor_request.go b/internal/runtime/executor/codex_executor_request.go
-index 4c0ccb49..1e97eb3c 100644
---- a/internal/runtime/executor/codex_executor_request.go
-+++ b/internal/runtime/executor/codex_executor_request.go
-@@ -397,7 +397,6 @@ func stripCodexSIWCUnsupportedFields(body []byte, hasExplicitInstructions bool,
- 	body = thinking.CollapseConfigurationUpdates(body, len(opts) > 0 && opts[0].KeepTopLevelEffort)
- 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
- 	body, _ = sjson.DeleteBytes(body, "prompt_cache_options")
--	body, _ = sjson.DeleteBytes(body, "max_output_tokens")
- 	body, _ = sjson.DeleteBytes(body, "max_completion_tokens")
- 	body, _ = sjson.DeleteBytes(body, "temperature")
- 	if !hasExplicitInstructions {
-diff --git a/internal/runtime/executor/codex_executor_sse_events_test.go b/internal/runtime/executor/codex_executor_sse_events_test.go
-index 28309d07..576cc2c6 100644
---- a/internal/runtime/executor/codex_executor_sse_events_test.go
-+++ b/internal/runtime/executor/codex_executor_sse_events_test.go
-@@ -576,7 +576,7 @@ func TestCodexVerifyInferenceTranslatesPayloadAndRequiresCompletedEvent_Issue578
- 	}
- 	cfg.Codex.StreamBootstrapBuffering = false
- 
--	// 2. Real completed stream succeeds and translated upstream body strips max_output_tokens while setting stream=true.
-+	// 2. Real completed stream succeeds and translated upstream body preserves the bounded verification cap while setting stream=true.
- 	sseResponse = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r2\",\"model\":\"gpt-5.4\"}}\n\n" +
- 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"pong\"}\n\n" +
- 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"pong\"}]}]}}\n\n"
-@@ -594,8 +594,8 @@ func TestCodexVerifyInferenceTranslatesPayloadAndRequiresCompletedEvent_Issue578
- 	if upstreamJSON["stream"] != true || upstreamJSON["store"] != false {
- 		t.Fatalf("expected translated Codex body with stream=true and store=false, got: %s", string(capturedBody))
- 	}
--	if _, hasMaxOutput := upstreamJSON["max_output_tokens"]; hasMaxOutput {
--		t.Fatalf("translated Codex body must strip unsupported max_output_tokens, got: %s", string(capturedBody))
-+	if upstreamJSON["max_output_tokens"] != float64(16) {
-+		t.Fatalf("translated Codex verification cap must be 16, got: %s", string(capturedBody))
- 	}
- }
- 
 diff --git a/internal/runtime/executor/helps/codex_controls.go b/internal/runtime/executor/helps/codex_controls.go
 new file mode 100644
 index 00000000..54e2575a
@@ -244,10 +150,10 @@ index 00000000..cca92fe1
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/payload_finalizer.go b/internal/runtime/executor/helps/payload_finalizer.go
-index c12a5830..fcafba13 100644
+index b1d45f20..82191a59 100644
 --- a/internal/runtime/executor/helps/payload_finalizer.go
 +++ b/internal/runtime/executor/helps/payload_finalizer.go
-@@ -23,8 +23,13 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
+@@ -61,12 +61,17 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
  	if opts.Metadata != nil {
  		formatCallback, _ = opts.Metadata[cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey].(func(string))
  	}
@@ -255,11 +161,23 @@ index c12a5830..fcafba13 100644
 +	if protocol == "codex" {
 +		requestedControls = codexRequestControlCounts(req.Payload)
 +	}
- 	return func(body []byte) []byte {
- 		out := ApplyPayloadConfigWithRequestForExecutor(cfg, executor, model, protocol, opts.SourceFormat.String(), root, body, source, requestedModel, requestPath, headers)
+ 	fn := PayloadFinalizer(func(body []byte) []byte {
+ 		if len(body) == 0 && cap(body) == 1 {
+ 			key := &body[:1][0]
+ 			if v, ok := payloadDocProbes.LoadAndDelete(key); ok {
+ 				if doc, okDoc := v.(*ojson.Doc); okDoc && doc != nil {
+ 					applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, executor, model, protocol, opts.SourceFormat.String(), root, doc, source, requestedModel, requestPath, headers, auth)
++					warnOmittedCodexControls(requestedControls, doc.Bytes())
+ 					if formatCallback != nil {
+ 						formatCallback(strings.Clone(strings.TrimSpace(doc.Get(buildPayloadPath(root, "response_format")).String())))
+ 					}
+@@ -80,6 +85,7 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
+ 		if mutated {
+ 			out = doc.Bytes()
+ 		}
 +		warnOmittedCodexControls(requestedControls, out)
  		if formatCallback != nil {
- 			formatCallback(strings.TrimSpace(gjson.GetBytes(out, buildPayloadPath(root, "response_format")).String()))
+ 			formatCallback(strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(out, buildPayloadPath(root, "response_format")).String())))
  		}
 diff --git a/internal/translator/codex/openai/responses/codex_controls_test.go b/internal/translator/codex/openai/responses/codex_controls_test.go
 new file mode 100644
@@ -322,92 +240,59 @@ index 00000000..c64bd9f7
 +	}
 +}
 diff --git a/internal/translator/codex/openai/responses/codex_openai-responses_request.go b/internal/translator/codex/openai/responses/codex_openai-responses_request.go
-index 4a7ecf1b..9506847e 100644
+index a1ad3fa7..b22cdcad 100644
 --- a/internal/translator/codex/openai/responses/codex_openai-responses_request.go
 +++ b/internal/translator/codex/openai/responses/codex_openai-responses_request.go
-@@ -28,8 +28,14 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
- 		rawJSON = setCodexRequiredBool(rawJSON, "parallel_tool_calls", true)
+@@ -34,11 +34,11 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
+ 		setCodexRequiredBoolDoc(rawJSON, ensureDoc, "parallel_tool_calls", true)
  	}
- 	rawJSON = setCodexRequiredInclude(rawJSON)
--	// Codex Responses rejects token limit fields, so strip them out before forwarding.
--	rawJSON = deleteCodexRequestFields(rawJSON, "max_output_tokens", "max_completion_tokens", "temperature", "top_p")
-+	// Preserve generation ceilings, including invalid values for upstream validation.
-+	// Never raise a small ceiling or truncate a fractional legacy value.
-+	if cap := gjson.GetBytes(rawJSON, "max_output_tokens"); !cap.Exists() || cap.Type == gjson.Null {
-+		if legacy := gjson.GetBytes(rawJSON, "max_completion_tokens"); legacy.Exists() {
-+			rawJSON, _ = sjson.SetRawBytes(rawJSON, "max_output_tokens", []byte(legacy.Raw))
-+		}
-+	}
-+	rawJSON = deleteCodexRequestFields(rawJSON, "max_completion_tokens", "temperature", "top_p")
- 	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() {
- 		if serviceTier.Type == gjson.String {
- 			switch strings.ToLower(strings.TrimSpace(serviceTier.String())) {
-@@ -51,7 +57,6 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
+ 	setCodexRequiredIncludeDoc(rawJSON, ensureDoc)
+-	// Preserve max_output_tokens and fill it from legacy token limits when unset.
+-	if maxOutputTokens := ojson.GetBytesNoCopy(rawJSON, "max_output_tokens"); !maxOutputTokens.Exists() || maxOutputTokens.Type == ojson.Null {
++	// Preserve caller ceilings verbatim, including invalid values for upstream validation.
++	if cap := ojson.GetBytesNoCopy(rawJSON, "max_output_tokens"); !cap.Exists() || cap.Type == ojson.Null {
+ 		for _, path := range []string{"max_completion_tokens", "max_tokens"} {
+-			if v := ojson.GetBytesNoCopy(rawJSON, path); v.Type == ojson.Number {
+-				_ = ensureDoc().Set("max_output_tokens", v.Int())
++			if legacy := ojson.GetBytesNoCopy(rawJSON, path); legacy.Exists() {
++				_ = ensureDoc().SetRawBytes("max_output_tokens", []byte(legacy.Raw))
+ 				break
+ 			}
+ 		}
+@@ -65,7 +65,6 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
  
- 	rawJSON = deleteCodexRequestFields(rawJSON, "truncation", "prompt_cache_options", "prompt_cache_retention")
- 	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
--	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+ 	deleteCodexRequestFieldsDoc(rawJSON, ensureDoc, "truncation", "prompt_cache_options", "prompt_cache_retention")
+ 	inputResult = stripCodexResponsesCacheBreakpointsDoc(rawJSON, inputResult, ensureDoc)
+-	applyResponsesCompactionCompatibilityDoc(rawJSON, ensureDoc)
  
  	// Delete the user field as it is not supported by the Codex upstream.
- 	rawJSON = deleteCodexRequestFields(rawJSON, "user")
-@@ -169,6 +174,8 @@ func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
+ 	deleteCodexRequestFieldsDoc(rawJSON, ensureDoc, "user")
+@@ -168,6 +167,8 @@ func deleteCodexRequestFieldsDoc(rawJSON []byte, ensureDoc func() *ojson.Doc, pa
  // clients (e.g. GitHub Copilot CLI) attach this field per content item when
  // targeting the OpenAI Responses format. Codex Responses rejects it outright:
  // {"error":{"message":"prompt_cache_breakpoint is not supported on this model", ...}}.
 +// The ChatGPT Codex backend still rejects these controls in bounded HTTP/WS probes.
 +// Public Responses API documentation does not establish this authentication route's support.
  // The top-level prompt_cache_options strip above does not cover these nested cases.
- func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
+ func stripCodexResponsesCacheBreakpointsDoc(rawJSON []byte, input ojson.Result, ensureDoc func() *ojson.Doc) ojson.Result {
  	if !bytes.Contains(rawJSON, []byte(`"prompt_cache_breakpoint"`)) {
-@@ -255,23 +262,6 @@ func stripPromptCacheBreakpointFromContent(content gjson.Result) ([]byte, bool)
- 	return translatorcommon.JoinRawArray(rebuiltParts), true
- }
- 
--// applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction
--// for Codex upstream compatibility.
--//
--// Codex /responses currently rejects context_management with:
--// {"detail":"Unsupported parameter: context_management"}.
--//
--// Compatibility strategy:
--// 1) Remove context_management before forwarding to Codex upstream.
--func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
--	if !gjson.GetBytes(rawJSON, "context_management").Exists() {
--		return rawJSON
--	}
--
--	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
--	return rawJSON
--}
--
- // convertSystemRoleToDeveloper traverses the input array and converts any message items
- // with role "system" to role "developer". This is necessary because Codex API does not
- // accept "system" role in the input array.
 diff --git a/internal/translator/codex/openai/responses/codex_openai-responses_request_test.go b/internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
-index edacd153..2b6d78da 100644
+index 2769fa91..e25d62d5 100644
 --- a/internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
 +++ b/internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
-@@ -277,7 +277,6 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing
- 		t.Fatalf("input.0.role = %q, want developer", role)
- 	}
- 	for _, path := range []string{
--		"max_output_tokens",
- 		"max_completion_tokens",
- 		"temperature",
- 		"top_p",
-@@ -523,8 +522,8 @@ func TestContextManagementCompactionCompatibility(t *testing.T) {
+@@ -565,8 +565,8 @@ func TestContextManagementCompactionCompatibility(t *testing.T) {
  	output, _ := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
  	outputStr := string(output)
  
--	if gjson.Get(outputStr, "context_management").Exists() {
+-	if ojson.Get(outputStr, "context_management").Exists() {
 -		t.Fatalf("context_management should be removed for Codex compatibility")
-+	if !gjson.Get(outputStr, "context_management").Exists() {
++	if !ojson.Get(outputStr, "context_management").Exists() {
 +		t.Fatalf("context_management must survive Codex translation")
  	}
- 	if gjson.Get(outputStr, "truncation").Exists() {
+ 	if ojson.Get(outputStr, "truncation").Exists() {
  		t.Fatalf("truncation should be removed for Codex compatibility")
 diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
-index 098aa347..c33aa702 100644
+index 54001ca3..557daa6d 100644
 --- a/sdk/cliproxy/auth/conductor_execution.go
 +++ b/sdk/cliproxy/auth/conductor_execution.go
 @@ -16,8 +16,8 @@ import (
@@ -420,37 +305,3 @@ index 098aa347..c33aa702 100644
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
  	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
  	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
-@@ -2283,7 +2283,8 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
- 	}
- 
- 	sessionID := fmt.Sprintf("verify-%s-%d", auth.ID, time.Now().UTC().UnixNano())
--	payload := []byte(fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":1,"store":false}`, verifyModel))
-+	// Keep the internal Codex verification budget at its 16-token minimum.
-+	payload := []byte(fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":16,"store":false}`, verifyModel))
- 	req := cliproxyexecutor.Request{
- 		Model:   verifyModel,
- 		Payload: payload,
-diff --git a/sdk/cliproxy/auth/conductor_unauthorized_refresh_test.go b/sdk/cliproxy/auth/conductor_unauthorized_refresh_test.go
-index 9b3272b9..cf0e9945 100644
---- a/sdk/cliproxy/auth/conductor_unauthorized_refresh_test.go
-+++ b/sdk/cliproxy/auth/conductor_unauthorized_refresh_test.go
-@@ -1082,7 +1082,7 @@ func TestManager_CodexTerminalRenewalRecoveryLifecycle_Issue5783(t *testing.T) {
- 		t.Fatal("VerifyInference must fail when stream ends with response.incomplete")
- 	}
- 
--	// Operator-triggered VerifyInference pins to primary, uses an isolated session and minimal 1-token prompt, and marks InferenceVerified = true upon response.completed.
-+	// Operator-triggered VerifyInference pins to primary, uses an isolated session and minimal 16-token prompt, and marks InferenceVerified = true upon response.completed.
- 	executor.mu.Lock()
- 	executor.streamPayloads = nil
- 	executor.streamCalls = nil
-@@ -1102,8 +1102,8 @@ func TestManager_CodexTerminalRenewalRecoveryLifecycle_Issue5783(t *testing.T) {
- 	if gotSession := verifyOpts.Headers.Get("X-Session-Id"); gotSession == "" || len(gotSession) < 7 || gotSession[:7] != "verify-" {
- 		t.Fatalf("VerifyInference X-Session-Id = %q, want isolated verify-* session", gotSession)
- 	}
--	if !containsSubstr(string(verifyReq.Payload), `"max_output_tokens":1`) || !containsSubstr(string(verifyReq.Payload), `"store":false`) {
--		t.Fatalf("VerifyInference payload = %s, want minimal 1-token non-stored prompt", string(verifyReq.Payload))
-+	if !containsSubstr(string(verifyReq.Payload), `"max_output_tokens":16`) || !containsSubstr(string(verifyReq.Payload), `"store":false`) {
-+		t.Fatalf("VerifyInference payload = %s, want minimal 16-token non-stored prompt", string(verifyReq.Payload))
- 	}
- 	if !afterVerify.InferenceVerified || afterVerify.RecoveryStageAt(now) != RecoveryStageInferenceVerified {
- 		t.Fatalf("expected InferenceVerified=true and stage=inference_verified after VerifyInference, got %v / %q", afterVerify.InferenceVerified, afterVerify.RecoveryStageAt(now))

@@ -1,5 +1,5 @@
 diff --git a/internal/api/middleware/request_logging.go b/internal/api/middleware/request_logging.go
-index b9753813..2b3ea0f5 100644
+index 72c13855..e6b067a6 100644
 --- a/internal/api/middleware/request_logging.go
 +++ b/internal/api/middleware/request_logging.go
 @@ -45,7 +45,8 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
@@ -45,10 +45,10 @@ index 00000000..7ff4f448
 +	}
 +}
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
-index e2b039a8..f024b35d 100644
+index 004081a2..afd386d6 100644
 --- a/internal/api/server_routes.go
 +++ b/internal/api/server_routes.go
-@@ -80,7 +80,8 @@ func (s *Server) setupRoutes() {
+@@ -83,7 +83,8 @@ func (s *Server) setupRoutes() {
  		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
  		v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
  		v1.GET("/videos/:request_id", openaiHandlers.XAIVideosRetrieve)
@@ -1234,10 +1234,10 @@ index 998eb833..3e89fdcb 100644
  			if executor.refreshCalls.Load() != 0 {
  				t.Fatalf("refresh calls = %d, want 0", executor.refreshCalls.Load())
 diff --git a/internal/runtime/executor/codex_executor_request.go b/internal/runtime/executor/codex_executor_request.go
-index 0c86f526..4c0ccb49 100644
+index 1acd7d79..04f62ba9 100644
 --- a/internal/runtime/executor/codex_executor_request.go
 +++ b/internal/runtime/executor/codex_executor_request.go
-@@ -75,11 +75,12 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
+@@ -100,11 +100,12 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
  	}
  	apiKey, _ := codexCredsForRequest(req.Context(), auth, req.Header)
  	if codexUseSIWCForRequest(req.Context(), auth, req.Header) && req.URL != nil && req.URL.Scheme == "https" &&

@@ -1,0 +1,294 @@
+diff --git a/internal/api/test/usage_events_live_test.go b/internal/api/test/usage_events_live_test.go
+index 9c1db05e..bd4828f8 100644
+--- a/internal/api/test/usage_events_live_test.go
++++ b/internal/api/test/usage_events_live_test.go
+@@ -595,21 +595,27 @@ func TestUsageEventsLiveAdminEmbedLimitAndRevocation(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 	headers := http.Header{"X-Cpa-Usage-Keeper-Embed": {"cpamc"}, "X-Cpa-Usage-Keeper-Embed-Session": {token}}
+-	responses := make([]*http.Response, 0, 3)
++	responses := make([]*http.Response, 0, 64)
++	defer func() {
++		for _, resp := range responses {
++			resp.Body.Close()
++		}
++	}()
+ 	var readers []*bufio.Reader
+-	for i := 0; i < 3; i++ {
++	for i := 0; i < 64; i++ {
+ 		resp, reader := liveTestConnect(t, client, target, headers)
+ 		responses = append(responses, resp)
+ 		readers = append(readers, reader)
+ 		liveTestReadKind(t, reader, "snapshot")
+ 	}
+-	defer func() {
+-		for _, resp := range responses {
+-			resp.Body.Close()
+-		}
+-	}()
++	// 即使换一个管理员会话，全局容量也不能绕过。
++	otherToken, _, err := sessions.CreateWithSource(auth.SessionSourceEmbed)
++	if err != nil {
++		t.Fatal(err)
++	}
+ 	req, _ = http.NewRequest(http.MethodGet, target, nil)
+-	req.Header = headers
++	req.Header = headers.Clone()
++	req.Header.Set("X-Cpa-Usage-Keeper-Embed-Session", otherToken)
+ 	limited, err := client.Do(req)
+ 	if err != nil {
+ 		t.Fatal(err)
+@@ -618,10 +624,29 @@ func TestUsageEventsLiveAdminEmbedLimitAndRevocation(t *testing.T) {
+ 	if limited.StatusCode != http.StatusTooManyRequests || limited.Header.Get("Retry-After") == "" {
+ 		t.Fatalf("limit status=%d headers=%v", limited.StatusCode, limited.Header)
+ 	}
++	// 关闭一个连接后应能重新取得槽位，不要求取消瞬间同步释放。
++	responses[0].Body.Close()
++	deadline := time.Now().Add(2 * time.Second)
++	for {
++		replacement, err := client.Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if replacement.StatusCode == http.StatusOK {
++			responses = append(responses, replacement)
++			liveTestReadKind(t, bufio.NewReader(replacement.Body), "snapshot")
++			break
++		}
++		replacement.Body.Close()
++		if replacement.StatusCode != http.StatusTooManyRequests || time.Now().After(deadline) {
++			t.Fatalf("slot not released: status=%d", replacement.StatusCode)
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
+ 	sessions.Delete(token)
+ 	events := liveTestInsert(t, db, []entities.UsageEvent{{Timestamp: time.Now(), Model: "revoked"}})
+ 	notifier.NotifyUsageEventsCommitted(events)
+-	if _, err := readers[0].ReadString('\n'); err == nil {
++	if _, err := readers[1].ReadString('\n'); err == nil {
+ 		t.Fatal("revoked session received live data")
+ 	}
+ }
+diff --git a/internal/api/usage_events_live.go b/internal/api/usage_events_live.go
+index f607fbcf..73a5436e 100644
+--- a/internal/api/usage_events_live.go
++++ b/internal/api/usage_events_live.go
+@@ -19,14 +19,13 @@ import (
+ )
+ 
+ const (
+-	liveBatchSize          = 100
+-	liveReplayLimit        = 10000
+-	liveWriteTimeout       = 5 * time.Second
+-	liveHeartbeatInterval  = 15 * time.Second
+-	liveRetryInterval      = 2 * time.Second
+-	liveReplayTimeout      = 30 * time.Second
+-	liveGlobalConnections  = 64
+-	liveSessionConnections = 3
++	liveBatchSize         = 100
++	liveReplayLimit       = 10000
++	liveWriteTimeout      = 5 * time.Second
++	liveHeartbeatInterval = 15 * time.Second
++	liveRetryInterval     = 2 * time.Second
++	liveReplayTimeout     = 30 * time.Second
++	liveGlobalConnections = 64
+ )
+ 
+ var errLiveBusy = errors.New("costs busy")
+@@ -43,27 +42,21 @@ type usageEventsLiveBounds struct {
+ }
+ 
+ type usageEventsLiveSlots struct {
+-	mu        sync.Mutex
+-	total     int
+-	bySession map[string]int
++	mu    sync.Mutex
++	total int
+ }
+ 
+-func (s *usageEventsLiveSlots) acquire(key string) (func(), bool) {
++func (s *usageEventsLiveSlots) acquire() (func(), bool) {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+-	if s.total >= liveGlobalConnections || s.bySession[key] >= liveSessionConnections {
++	if s.total >= liveGlobalConnections {
+ 		return nil, false
+ 	}
+ 	s.total++
+-	s.bySession[key]++
+ 	return func() {
+ 		s.mu.Lock()
+ 		defer s.mu.Unlock()
+ 		s.total--
+-		s.bySession[key]--
+-		if s.bySession[key] == 0 {
+-			delete(s.bySession, key)
+-		}
+ 	}, true
+ }
+ 
+@@ -102,7 +95,7 @@ func liveSessionValid(c *gin.Context, handler *authHandler) bool {
+ }
+ 
+ func registerUsageEventsLiveRoute(router gin.IRoutes, usage service.UsageProvider, identities service.UsageIdentityProvider, keys service.CPAAPIKeyProvider, notifier *service.UsageEventsNotifier, gate *service.CostReadGate, handler *authHandler, lifecycleCtx context.Context) {
+-	slots := &usageEventsLiveSlots{bySession: make(map[string]int)}
++	slots := &usageEventsLiveSlots{}
+ 	router.GET("/usage/events/live", func(c *gin.Context) {
+ 		if lifecycleCtx != nil {
+ 			// 仅长连接跟随应用取消；客户端断开仍通过原请求 context 传播。
+@@ -126,11 +119,7 @@ func registerUsageEventsLiveRoute(router gin.IRoutes, usage service.UsageProvide
+ 			c.JSON(http.StatusBadRequest, gin.H{"error": "usage range is required"})
+ 			return
+ 		}
+-		sessionKey := c.GetString(authTokenContextKey)
+-		if sessionKey == "" {
+-			sessionKey = "anonymous:" + c.ClientIP()
+-		}
+-		releaseSlot, ok := slots.acquire(sessionKey)
++		releaseSlot, ok := slots.acquire()
+ 		if !ok {
+ 			c.Header("Retry-After", "5")
+ 			c.JSON(http.StatusTooManyRequests, gin.H{"code": "live_capacity"})
+diff --git a/web/src/components/usage/test/useRequestEventsFeed.test.tsx b/web/src/components/usage/test/useRequestEventsFeed.test.tsx
+index 56bb886e..94781979 100644
+--- a/web/src/components/usage/test/useRequestEventsFeed.test.tsx
++++ b/web/src/components/usage/test/useRequestEventsFeed.test.tsx
+@@ -61,6 +61,7 @@ describe('useRequestEventsFeed', () => {
+     await act(async () => root.unmount());
+     container.remove();
+     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
++    vi.useRealTimers();
+     vi.restoreAllMocks();
+   });
+ 
+@@ -227,6 +228,74 @@ describe('useRequestEventsFeed', () => {
+     expect(vi.mocked(openUsageEventsLive).mock.calls[1][1].model).toBe('other');
+   });
+ 
++  it.each([false, true])('delays capacity errors for three retries and resets after success (existing rows: %s)', async (existingRows) => {
++    if (existingRows) await emit(0, 'snapshot', snapshot([event('5')]));
++    const connect = vi.mocked(openUsageEventsLive).getMockImplementation()!;
++    const error = new ApiError('Live connection capacity is full', 429);
++    error.retryAfterMs = 5000;
++    vi.mocked(openUsageEventsLive).mockRejectedValue(error);
++    vi.useFakeTimers();
++    await act(async () => { void latest.refresh(); });
++    const initialCalls = vi.mocked(openUsageEventsLive).mock.calls.length;
++    expect(latest.error).toBe('');
++    expect(latest.loading).toBe(false);
++    for (let retry = 1; retry <= 4; retry++) {
++      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++      expect(openUsageEventsLive).toHaveBeenCalledTimes(initialCalls + retry);
++      expect(latest.error).toBe(retry < 3 ? '' : error.message);
++      expect(latest.events.map((row) => row.id)).toEqual(existingRows ? ['5'] : []);
++    }
++    // 已显示红框仍继续重试；成功快照清除红框及历史失败计数。
++    vi.mocked(openUsageEventsLive).mockImplementation(connect);
++    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    const index = streams.length - 1;
++    await act(async () => {
++      streams[index].enqueue(encoder.encode(`event: snapshot\ndata: ${JSON.stringify(snapshot([event('6')]))}\n\n`));
++    });
++    expect(latest.error).toBe('');
++    vi.mocked(openUsageEventsLive).mockRejectedValue(error);
++    await act(async () => { streams[index].error(error); });
++    expect(latest.error).toBe('');
++    for (let retry = 1; retry <= 3; retry++) {
++      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++      expect(latest.error).toBe(retry < 3 ? '' : error.message);
++    }
++    await act(async () => { void latest.refresh(); });
++    expect(latest.error).toBe('');
++  });
++
++  it.each(['query change', 'non-capacity failure'] as const)('starts a fresh capacity streak after %s', async (reset) => {
++    const capacityError = new ApiError('Live connection capacity is full', 429);
++    capacityError.retryAfterMs = 5000;
++    vi.mocked(openUsageEventsLive).mockRejectedValue(capacityError);
++    vi.spyOn(Math, 'random').mockReturnValue(0.5);
++    vi.useFakeTimers();
++    await act(async () => { void latest.refresh(); });
++    // 筛选重置必须从已显示错误开始，不能依赖先执行手动刷新。
++    const retries = reset === 'query change' ? 3 : 2;
++    for (let retry = 0; retry < retries; retry++) {
++      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++    }
++    expect(latest.error).toBe(reset === 'query change' ? capacityError.message : '');
++    if (reset === 'query change') {
++      await act(async () => { root.render(<Harness model="other" />); });
++      expect(vi.mocked(openUsageEventsLive).mock.lastCall?.[1].model).toBe('other');
++    } else {
++      // 三次 429 后的 500 仍立即显示，并使用原有网络错误退避。
++      vi.mocked(openUsageEventsLive).mockRejectedValueOnce(new ApiError('database failure', 500));
++      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++      expect(latest.error).toBe('database failure');
++      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
++    }
++    expect(latest.error).toBe('');
++    const calls = vi.mocked(openUsageEventsLive).mock.calls.length;
++    for (let retry = 1; retry <= 3; retry++) {
++      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
++      expect(openUsageEventsLive).toHaveBeenCalledTimes(calls + retry);
++      expect(latest.error).toBe(retry < 3 ? '' : capacityError.message);
++    }
++  });
++
+   it('reports an initial 500 until the existing retry receives a snapshot', async () => {
+     vi.spyOn(Math, 'random').mockReturnValue(0.5);
+     const error = new ApiError('live database failure', 500);
+diff --git a/web/src/components/usage/useRequestEventsFeed.ts b/web/src/components/usage/useRequestEventsFeed.ts
+index e8356aa0..e736393c 100644
+--- a/web/src/components/usage/useRequestEventsFeed.ts
++++ b/web/src/components/usage/useRequestEventsFeed.ts
+@@ -107,6 +107,7 @@ export function useRequestEventsFeed({ enabled, request, options, onAuthRequired
+   const liveRef = useRef<AbortController | null>(null);
+   const historyRef = useRef<AbortController | null>(null);
+   const attemptsRef = useRef(0);
++  const capacityFailuresRef = useRef(0);
+   const refreshRef = useRef<{ token: object; resolve: () => void } | null>(null);
+   const settleRefresh = useCallback((token?: object) => {
+     if (refreshRef.current && (!token || refreshRef.current.token === token)) {
+@@ -118,6 +119,7 @@ export function useRequestEventsFeed({ enabled, request, options, onAuthRequired
+ 
+   useEffect(() => {
+     attemptsRef.current = 0;
++    capacityFailuresRef.current = 0;
+     setState((current) => enabled && current.scope === scope ? current : emptyState(scope));
+     return () => { abortHistory(); settleRefresh(); };
+   }, [enabled, scope, abortHistory, settleRefresh]);
+@@ -188,6 +190,7 @@ export function useRequestEventsFeed({ enabled, request, options, onAuthRequired
+         if (typeof payload.total_count !== 'number') throw new Error('Invalid live snapshot');
+         const totalCount = payload.total_count;
+         receivedSnapshot = true;
++        capacityFailuresRef.current = 0;
+         attemptsRef.current = 0;
+         update((current) => ({
+           ...current, events, bounds, totalCount, atTop: !events.length || current.atTop, mode: 'latest',
+@@ -235,6 +238,10 @@ export function useRequestEventsFeed({ enabled, request, options, onAuthRequired
+         if (!disposed && !controller.signal.aborted) throw new Error('Live stream disconnected');
+       } catch (error) {
+         if (disposed || (controller.signal.aborted && !timedOut)) return;
++        // 仅延后容量错误的展示：首次失败加三次重试后才提示，不改变重试调度。
++        const capacity = error instanceof ApiError && error.status === 429;
++        capacityFailuresRef.current = capacity ? capacityFailuresRef.current + 1 : 0;
++        const hideCapacityError = capacity && capacityFailuresRef.current <= 3;
+         const conflict = callbacksRef.current.onRangeBoundsConflict?.(error);
+         const unauthorized = error instanceof ApiError && [401, 403].includes(error.status);
+         if (!conflict && unauthorized) callbacksRef.current.onAuthRequired?.();
+@@ -243,7 +250,7 @@ export function useRequestEventsFeed({ enabled, request, options, onAuthRequired
+         update((current) => ({
+           ...current, loading: !terminal && current.mode === 'restoring',
+           mode: terminal && current.mode === 'restoring' ? 'reading' : current.mode,
+-          error: handled ? current.error : isCostsBusy(error) ? 'COSTS_BUSY'
++          error: hideCapacityError ? '' : handled ? current.error : isCostsBusy(error) ? 'COSTS_BUSY'
+             : terminal || !receivedSnapshot ? error instanceof Error ? error.message : 'Failed to load usage events' : '',
+         }));
+         settleRefresh(token);
+@@ -288,6 +295,7 @@ export function useRequestEventsFeed({ enabled, request, options, onAuthRequired
+     if (!enabled) { resolve(); return; }
+     settleRefresh();
+     abortHistory();
++    capacityFailuresRef.current = 0;
+     const token = {};
+     refreshRef.current = { token, resolve };
+     setState((current) => ({

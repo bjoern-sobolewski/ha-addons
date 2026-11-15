@@ -91,10 +91,10 @@ index f96acf4..9731bbc 100644
          return { ...prev, websockets: Boolean(value), websocketsTouched: true };
        }
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index ca0d1ea..d6a117b 100644
+index a06620a..798f592 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -423,6 +423,8 @@
+@@ -424,6 +424,8 @@
      "disable_cooling_hint": "Skip failure cooldown and exponential backoff only for this credential; other credentials are unaffected.",
      "use_siwc_label": "Use SIWC (use_siwc)",
      "use_siwc_hint": "Use the bound SIWC credential when enabled. Turning this off only disables SIWC and preserves binding data. Complete binding before enabling.",
@@ -104,10 +104,10 @@ index ca0d1ea..d6a117b 100644
      "websockets_hint": "Enable Responses API websocket transport for this credential.",
      "using_api_label": "Use official API (using_api)",
 diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
-index f684bbb..c2de716 100644
+index 2203d15..aa18dd5 100644
 --- a/src/i18n/locales/ko.json
 +++ b/src/i18n/locales/ko.json
-@@ -420,6 +420,8 @@
+@@ -421,6 +421,8 @@
      "disable_cooling_hint": "이 자격 증명에 대해서만 실패 쿨다운 및 지수 백오프를 건너뜁니다. 다른 자격 증명에는 영향을 주지 않습니다.",
      "use_siwc_label": "SIWC 사용 (use_siwc)",
      "use_siwc_hint": "활성화하면 연결된 SIWC 자격 증명을 사용합니다. 끄면 SIWC만 비활성화되며 연결 데이터는 유지됩니다. 활성화하기 전에 연결을 완료하세요.",
@@ -117,10 +117,10 @@ index f684bbb..c2de716 100644
      "websockets_hint": "이 자격 증명에 대해 Responses API WebSocket 전송을 활성화합니다.",
      "using_api_label": "공식 API 사용 (using_api)",
 diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
-index 9c0686e..67ad014 100644
+index fab7cca..4db20af 100644
 --- a/src/i18n/locales/ru.json
 +++ b/src/i18n/locales/ru.json
-@@ -426,6 +426,8 @@
+@@ -427,6 +427,8 @@
      "disable_cooling_hint": "Отключает cooldown после ошибок и экспоненциальную задержку только для этих учётных данных; остальные не затрагиваются.",
      "use_siwc_label": "Использовать SIWC (use_siwc)",
      "use_siwc_hint": "Использовать привязанные учётные данные SIWC. Выключение отключает SIWC, сохраняя данные привязки. Перед включением выполните привязку.",
@@ -130,10 +130,10 @@ index 9c0686e..67ad014 100644
      "websockets_hint": "Включает websocket-транспорт Responses API для этих учётных данных.",
      "using_api_label": "Использовать официальный API (using_api)",
 diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
-index 86ced14..afadc4c 100644
+index 626fd65..bacf376 100644
 --- a/src/i18n/locales/tr.json
 +++ b/src/i18n/locales/tr.json
-@@ -402,6 +402,8 @@
+@@ -403,6 +403,8 @@
      "disable_cooling_hint": "Yalnızca Bu Kimlik Bilgisi için Hata Soğumasını ve Üstel Geri Çekilmeyi Atla. Diğer Kimlik Bilgileri Etkilenmez.",
      "use_siwc_label": "SIWC Kullan (use_siwc)",
      "use_siwc_hint": "Etkinleştirildiğinde Bağlı SIWC Kimlik Bilgisini Kullanır. Kapatmak Yalnızca SIWC'yi Devre Dışı Bırakır ve Bağlama Verilerini Korur. Etkinleştirmeden Önce Bağlamayı Tamamla.",
@@ -143,10 +143,10 @@ index 86ced14..afadc4c 100644
      "websockets_hint": "Bu Kimlik Bilgisi için Responses API WebSocket Taşımasını Etkinleştir.",
      "using_api_label": "Resmi API Kullan (using_api)",
 diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
-index cbe1ba0..96377aa 100644
+index ad25fb6..0e59cba 100644
 --- a/src/i18n/locales/vi.json
 +++ b/src/i18n/locales/vi.json
-@@ -371,6 +371,8 @@
+@@ -372,6 +372,8 @@
      "disable_cooling_hint": "Bỏ qua cooldown thất bại và backoff lũy thừa chỉ cho credential này; các credential khác không bị ảnh hưởng.",
      "use_siwc_label": "Sử dụng SIWC (use_siwc)",
      "use_siwc_hint": "Sử dụng thông tin xác thực SIWC đã liên kết khi bật. Tắt chỉ vô hiệu hóa SIWC và giữ nguyên dữ liệu liên kết. Hoàn tất liên kết trước khi bật.",
@@ -156,10 +156,10 @@ index cbe1ba0..96377aa 100644
      "websockets_hint": "Bật truyền tải websocket của Responses API cho credential này.",
      "using_api_label": "Dùng API chính thức (using_api)",
 diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
-index 0fe5673..c93d528 100644
+index 275fb9b..c1210b1 100644
 --- a/src/i18n/locales/zh-CN.json
 +++ b/src/i18n/locales/zh-CN.json
-@@ -421,6 +421,8 @@
+@@ -422,6 +422,8 @@
      "disable_cooling_hint": "开启后，仅当前凭证跳过失败后的冷却与指数退避；其他凭证不受影响。",
      "use_siwc_label": "使用 SIWC（use_siwc）",
      "use_siwc_hint": "启用后使用已绑定的 SIWC 凭证。关闭仅停用 SIWC，不会删除绑定数据；启用前请先完成绑定。",
@@ -169,10 +169,10 @@ index 0fe5673..c93d528 100644
      "websockets_hint": "为该凭证开启 Responses API 的 websocket 传输。",
      "using_api_label": "使用官方 API（using_api）",
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index a680343..bd51d9e 100644
+index 78ecc83..db8a246 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -421,6 +421,8 @@
+@@ -422,6 +422,8 @@
      "disable_cooling_hint": "開啟後，僅目前憑證會略過失敗後的冷卻與指數退避；其他憑證不受影響。",
      "use_siwc_label": "使用 SIWC（use_siwc）",
      "use_siwc_hint": "啟用後使用已綁定的 SIWC 憑證。關閉僅停用 SIWC，不會刪除綁定資料；啟用前請先完成綁定。",

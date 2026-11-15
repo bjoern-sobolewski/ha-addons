@@ -1,5 +1,5 @@
 diff --git a/internal/api/errors.go b/internal/api/errors.go
-index 4726ae2..2347767 100644
+index 4726ae2f..23477670 100644
 --- a/internal/api/errors.go
 +++ b/internal/api/errors.go
 @@ -1,6 +1,7 @@
@@ -22,7 +22,7 @@ index 4726ae2..2347767 100644
 +	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error", "error_source": details.Source, "error_status": details.Status, "error_reason": message + ". " + details.Reason})
  }
 diff --git a/internal/api/quota.go b/internal/api/quota.go
-index 83e8de3..35e0e2a 100644
+index 83e8de32..35e0e2a0 100644
 --- a/internal/api/quota.go
 +++ b/internal/api/quota.go
 @@ -7,6 +7,7 @@ import (
@@ -86,7 +86,7 @@ index 83e8de3..35e0e2a 100644
  		payload["detail"] = err.Error()
 diff --git a/internal/api/test/account_error_source_test.go b/internal/api/test/account_error_source_test.go
 new file mode 100644
-index 0000000..c5415fb
+index 00000000..c5415fb1
 --- /dev/null
 +++ b/internal/api/test/account_error_source_test.go
 @@ -0,0 +1,67 @@
@@ -159,7 +159,7 @@ index 0000000..c5415fb
 +}
 diff --git a/internal/api/test/quota_reset_request_test.go b/internal/api/test/quota_reset_request_test.go
 new file mode 100644
-index 0000000..a1fa8c7
+index 00000000..a1fa8c7d
 --- /dev/null
 +++ b/internal/api/test/quota_reset_request_test.go
 @@ -0,0 +1,77 @@
@@ -241,7 +241,7 @@ index 0000000..a1fa8c7
 +	}
 +}
 diff --git a/internal/api/test/quota_test.go b/internal/api/test/quota_test.go
-index 1d0f46b..10ecf1f 100644
+index 1d0f46b2..10ecf1f7 100644
 --- a/internal/api/test/quota_test.go
 +++ b/internal/api/test/quota_test.go
 @@ -390,7 +390,7 @@ func TestQuotaResetMapsServiceErrors(t *testing.T) {
@@ -254,7 +254,7 @@ index 1d0f46b..10ecf1f 100644
  	} {
  		t.Run(tc.name, func(t *testing.T) {
 diff --git a/internal/cpa/client.go b/internal/cpa/client.go
-index 2854be5..1259c64 100644
+index 2854be5b..1259c640 100644
 --- a/internal/cpa/client.go
 +++ b/internal/cpa/client.go
 @@ -4,6 +4,7 @@ import (
@@ -330,7 +330,7 @@ index 2854be5..1259c64 100644
  	}
  	if target == nil || isBlankJSONResponseBody(responseBody) {
 diff --git a/internal/cpa/dto/quotareset/reset.go b/internal/cpa/dto/quotareset/reset.go
-index d6e5ba9..64a5840 100644
+index d6e5ba9d..64a58406 100644
 --- a/internal/cpa/dto/quotareset/reset.go
 +++ b/internal/cpa/dto/quotareset/reset.go
 @@ -18,6 +18,9 @@ type Options struct {
@@ -345,7 +345,7 @@ index d6e5ba9..64a5840 100644
  	RecoveryFailed bool   `json:"recoveryFailed"`
 diff --git a/internal/operationerror/details.go b/internal/operationerror/details.go
 new file mode 100644
-index 0000000..efbda95
+index 00000000..efbda95d
 --- /dev/null
 +++ b/internal/operationerror/details.go
 @@ -0,0 +1,52 @@
@@ -402,7 +402,7 @@ index 0000000..efbda95
 +	return label + ": " + details.Reason
 +}
 diff --git a/internal/quota/errors.go b/internal/quota/errors.go
-index 9be73d3..a96e51d 100644
+index 9be73d34..a96e51d0 100644
 --- a/internal/quota/errors.go
 +++ b/internal/quota/errors.go
 @@ -1,6 +1,7 @@
@@ -425,7 +425,7 @@ index 9be73d3..a96e51d 100644
  	message := strings.TrimSpace(e.Message)
  	if message == "" {
 diff --git a/internal/quota/refresh.go b/internal/quota/refresh.go
-index 0ead72e..d97b312 100644
+index 0ead72e9..d97b312a 100644
 --- a/internal/quota/refresh.go
 +++ b/internal/quota/refresh.go
 @@ -2,6 +2,7 @@ package quota
@@ -460,7 +460,7 @@ index 0ead72e..d97b312 100644
  
  func refreshTaskHTTPStatusCode(err error) *int {
 diff --git a/internal/quota/reset.go b/internal/quota/reset.go
-index d0218cf..4c55ffc 100644
+index d0218cf1..4c55ffc6 100644
 --- a/internal/quota/reset.go
 +++ b/internal/quota/reset.go
 @@ -20,6 +20,9 @@ type ResetRequest struct {
@@ -491,7 +491,7 @@ index d0218cf..4c55ffc 100644
  		Code:           output.Code,
  		WindowsReset:   output.WindowsReset,
 diff --git a/internal/quota/shared_reset.go b/internal/quota/shared_reset.go
-index 659fd2f..042e77e 100644
+index 659fd2fc..042e77e5 100644
 --- a/internal/quota/shared_reset.go
 +++ b/internal/quota/shared_reset.go
 @@ -38,5 +38,5 @@ func redeemSharedReset(ctx context.Context, caller ManagementAPICaller, input Pr
@@ -502,7 +502,7 @@ index 659fd2f..042e77e 100644
 +	return ProviderResetOutput{ErrorSource: out.ErrorSource, ErrorReason: out.ErrorReason, ErrorStatus: out.ErrorStatus, Code: out.Code, WindowsReset: out.WindowsReset, RecoveryFailed: out.RecoveryFailed}, err
  }
 diff --git a/internal/quota/test/service_refresh_test.go b/internal/quota/test/service_refresh_test.go
-index 38f47ff..4a98a23 100644
+index 38f47ff6..4a98a235 100644
 --- a/internal/quota/test/service_refresh_test.go
 +++ b/internal/quota/test/service_refresh_test.go
 @@ -646,7 +646,7 @@ func TestQueuedRefreshTaskFailsWhenParentContextCancelsBeforeWorkerSlot(t *testi
@@ -542,7 +542,7 @@ index 38f47ff..4a98a23 100644
  	}
  	cache, err := service.GetCachedQuota(context.Background(), CacheRequest{AuthIndexes: []string{"auth-1"}})
 diff --git a/internal/quota/types.go b/internal/quota/types.go
-index 4244065..ba579b3 100644
+index fe443e69..e52bf4f1 100644
 --- a/internal/quota/types.go
 +++ b/internal/quota/types.go
 @@ -28,6 +28,9 @@ type ProviderOutput struct {
@@ -556,7 +556,7 @@ index 4244065..ba579b3 100644
  	WindowsReset   int    `json:"windowsReset,omitempty"`
  	RecoveryFailed bool   `json:"recoveryFailed,omitempty"`
 diff --git a/web/src/components/usage/credentials/CredentialEditModal.tsx b/web/src/components/usage/credentials/CredentialEditModal.tsx
-index dcc8800..1f31523 100644
+index dcc88001..1f315238 100644
 --- a/web/src/components/usage/credentials/CredentialEditModal.tsx
 +++ b/web/src/components/usage/credentials/CredentialEditModal.tsx
 @@ -5,6 +5,7 @@ import { Modal } from '@/components/ui/Modal'
@@ -577,7 +577,7 @@ index dcc8800..1f31523 100644
        busyRef.current = false
        setSaving(false)
 diff --git a/web/src/components/usage/credentials/CredentialPriorityEditor.tsx b/web/src/components/usage/credentials/CredentialPriorityEditor.tsx
-index f0fb92d..8623da1 100644
+index f0fb92d1..8623da17 100644
 --- a/web/src/components/usage/credentials/CredentialPriorityEditor.tsx
 +++ b/web/src/components/usage/credentials/CredentialPriorityEditor.tsx
 @@ -1,3 +1,4 @@
@@ -598,7 +598,7 @@ index f0fb92d..8623da1 100644
        busyRef.current = false
        setSaving(false)
 diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
-index a0a6c36..3573464 100644
+index 87bfd142..f4065642 100644
 --- a/web/src/components/usage/credentials/CredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/CredentialsSection.tsx
 @@ -1,3 +1,4 @@
@@ -606,7 +606,7 @@ index a0a6c36..3573464 100644
  import { browserDateLocale } from '@/utils/browserDateTime';
  import { formatBrowserDateTime } from '@/utils/browserDateTime'
  import { useCallback, useEffect, useId, useRef, useState, type Ref } from 'react'
-@@ -454,6 +455,7 @@ export function QuotaResetAction({
+@@ -456,6 +457,7 @@ export function QuotaResetAction({
    const [resetCreditsDetails, setResetCreditsDetails] = useState<UsageQuotaResetCreditsResponse | null>(null)
    const [resetCreditsLoading, setResetCreditsLoading] = useState(false)
    const [resetCreditsFailed, setResetCreditsFailed] = useState(false)
@@ -614,7 +614,7 @@ index a0a6c36..3573464 100644
    const [claudeDetails, setClaudeDetails] = useState<ClaudeResetGrantsResponse | null>(null)
    const [selectedClaudeGrantId, setSelectedClaudeGrantId] = useState('')
    const [claudeMessage, setClaudeMessage] = useState('')
-@@ -518,6 +520,7 @@ export function QuotaResetAction({
+@@ -520,6 +522,7 @@ export function QuotaResetAction({
        active = false
        controller.abort()
        setResetCreditsFailed(true)
@@ -622,7 +622,7 @@ index a0a6c36..3573464 100644
        setResetCreditsLoading(false)
      }, provider === 'claude' ? 20_000 : RESET_CREDITS_LOOKUP_TIMEOUT_MS)
      // Claude 确认需要本次查询的 grant 与组织 UUID；Codex 保留明细失败后的缓存回退。
-@@ -532,9 +535,10 @@ export function QuotaResetAction({
+@@ -534,9 +537,10 @@ export function QuotaResetAction({
            } else setResetCreditsDetails(response as UsageQuotaResetCreditsResponse)
          }
        })
@@ -634,7 +634,7 @@ index a0a6c36..3573464 100644
          }
        })
        .finally(() => {
-@@ -606,6 +610,7 @@ export function QuotaResetAction({
+@@ -608,6 +612,7 @@ export function QuotaResetAction({
      updatePopoverPosition()
      setResetCreditsDetails(null)
      setResetCreditsFailed(false)
@@ -642,7 +642,7 @@ index a0a6c36..3573464 100644
      setResetCreditsLoading(true)
      setClaudeDetails(null)
      setClaudeMessage('')
-@@ -669,6 +674,7 @@ export function QuotaResetAction({
+@@ -671,6 +676,7 @@ export function QuotaResetAction({
              <span>{t('usage_stats.credentials_quota_reset_message_prompt')}</span>
            </p>
            <div className={styles.credentialQuotaResetExpiry} aria-live="polite">
@@ -650,7 +650,7 @@ index a0a6c36..3573464 100644
              <p className={styles.credentialQuotaResetExpiryTitle}>{t(provider === 'claude' ? 'usage_stats.claude_reset_grants_title' : 'usage_stats.credentials_quota_reset_expiry_title')}</p>
              {resetCreditsLoading && (
                <div className={styles.credentialQuotaResetExpiryStatus}>
-@@ -1060,7 +1066,7 @@ export function QuotaInspectionModal({
+@@ -1062,7 +1068,7 @@ export function QuotaInspectionModal({
        setInvalidAccountAction(null)
        setSelectedInvalidFileNames([])
      } catch (nextError) {
@@ -659,7 +659,7 @@ index a0a6c36..3573464 100644
      } finally {
        setInvalidAccountSubmitting(false)
      }
-@@ -1138,7 +1144,7 @@ export function QuotaInspectionModal({
+@@ -1140,7 +1146,7 @@ export function QuotaInspectionModal({
          setValue: setScheduleValue,
        })
      } catch (nextError) {
@@ -669,7 +669,7 @@ index a0a6c36..3573464 100644
        setSettingsSaving(false)
      }
 diff --git a/web/src/components/usage/credentials/QuotaPolicyPanel.tsx b/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
-index 79da81e..a85270e 100644
+index 79da81ee..a85270e4 100644
 --- a/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
 +++ b/web/src/components/usage/credentials/QuotaPolicyPanel.tsx
 @@ -1,5 +1,6 @@
@@ -693,7 +693,7 @@ index 79da81e..a85270e 100644
    }
    return <section className={styles.panel} data-quota-policy={authIndex} aria-label="Quota routing policy">
 diff --git a/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx b/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx
-index afa0d57..c8c2edf 100644
+index afa0d572..c8c2edf5 100644
 --- a/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx
 +++ b/web/src/components/usage/credentials/test/CredentialPriorityEditor.test.tsx
 @@ -7,7 +7,7 @@ import { CredentialPriorityEditor, parseCredentialPriority } from '../Credential
@@ -715,7 +715,7 @@ index afa0d57..c8c2edf 100644
      expect(popover()).toBeNull()
      expect(document.activeElement).toBe(container.querySelector('button'))
 diff --git a/web/src/components/usage/credentials/test/quotaResetRecovery.test.ts b/web/src/components/usage/credentials/test/quotaResetRecovery.test.ts
-index 3864098..286a7aa 100644
+index 38640981..286a7aa7 100644
 --- a/web/src/components/usage/credentials/test/quotaResetRecovery.test.ts
 +++ b/web/src/components/usage/credentials/test/quotaResetRecovery.test.ts
 @@ -13,7 +13,8 @@ describe('quota reset recovery', () => {
@@ -729,7 +729,7 @@ index 3864098..286a7aa 100644
      expect(resetUsageQuota).toHaveBeenCalledTimes(1)
      expect(refreshQuotaForAuthIndex).toHaveBeenCalledWith('auth-1')
 diff --git a/web/src/components/usage/credentials/test/useCredentialsTabData.interaction.test.tsx b/web/src/components/usage/credentials/test/useCredentialsTabData.interaction.test.tsx
-index dfb806a..2360e73 100644
+index dfb806a3..2360e734 100644
 --- a/web/src/components/usage/credentials/test/useCredentialsTabData.interaction.test.tsx
 +++ b/web/src/components/usage/credentials/test/useCredentialsTabData.interaction.test.tsx
 @@ -148,7 +148,7 @@ describe('credential status refresh after toggle', () => {
@@ -742,7 +742,7 @@ index dfb806a..2360e73 100644
  
    it('ignores repeated activation of the same credential while the first request is in flight', async () => {
 diff --git a/web/src/components/usage/credentials/test/useCredentialsTabData.priority.test.tsx b/web/src/components/usage/credentials/test/useCredentialsTabData.priority.test.tsx
-index c1e114b..5962720 100644
+index c1e114b2..59627204 100644
 --- a/web/src/components/usage/credentials/test/useCredentialsTabData.priority.test.tsx
 +++ b/web/src/components/usage/credentials/test/useCredentialsTabData.priority.test.tsx
 @@ -77,7 +77,7 @@ describe('credential priority save data flow', () => {
@@ -764,7 +764,7 @@ index c1e114b..5962720 100644
      expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/priority'))).toHaveLength(1)
      expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/usage/identities/page'))).toHaveLength(beforePages)
 diff --git a/web/src/components/usage/credentials/test/useCredentialsTabData.test.ts b/web/src/components/usage/credentials/test/useCredentialsTabData.test.ts
-index 9849a92..47c1b04 100644
+index 9849a928..47c1b04a 100644
 --- a/web/src/components/usage/credentials/test/useCredentialsTabData.test.ts
 +++ b/web/src/components/usage/credentials/test/useCredentialsTabData.test.ts
 @@ -150,8 +150,9 @@ describe('buildQuotaRefreshTaskErrorUpdate', () => {
@@ -854,7 +854,7 @@ index 9849a92..47c1b04 100644
    it('uses the existing recovery warning and single-row refresh after confirmed success', async () => {
      const calls: string[] = []
 diff --git a/web/src/components/usage/credentials/test/useCredentialsTabData.wiring.test.tsx b/web/src/components/usage/credentials/test/useCredentialsTabData.wiring.test.tsx
-index fd8f0e3..cbb895a 100644
+index fd8f0e38..cbb895a1 100644
 --- a/web/src/components/usage/credentials/test/useCredentialsTabData.wiring.test.tsx
 +++ b/web/src/components/usage/credentials/test/useCredentialsTabData.wiring.test.tsx
 @@ -100,7 +100,7 @@ describe('credential hook coordination', () => {
@@ -867,7 +867,7 @@ index fd8f0e3..cbb895a 100644
      expect(mocks.refreshQuota).not.toHaveBeenCalled()
    })
 diff --git a/web/src/components/usage/credentials/test/useQuotaInspection.test.tsx b/web/src/components/usage/credentials/test/useQuotaInspection.test.tsx
-index 2b3601b..02e4401 100644
+index 2b3601b5..02e4401a 100644
 --- a/web/src/components/usage/credentials/test/useQuotaInspection.test.tsx
 +++ b/web/src/components/usage/credentials/test/useQuotaInspection.test.tsx
 @@ -145,7 +145,8 @@ describe('useQuotaInspection', () => {
@@ -881,7 +881,7 @@ index 2b3601b..02e4401 100644
      expect(onCompleted).not.toHaveBeenCalled()
      await act(async () => vi.advanceTimersByTimeAsync(3_000))
 diff --git a/web/src/components/usage/credentials/useCredentialPages.ts b/web/src/components/usage/credentials/useCredentialPages.ts
-index 8d20250..3d4312d 100644
+index 8d202502..3d4312d4 100644
 --- a/web/src/components/usage/credentials/useCredentialPages.ts
 +++ b/web/src/components/usage/credentials/useCredentialPages.ts
 @@ -1,3 +1,4 @@
@@ -908,7 +908,7 @@ index 8d20250..3d4312d 100644
        if (aiProvidersRequestControllerRef.current === controller) {
          setAiProvidersLoading(false)
 diff --git a/web/src/components/usage/credentials/useCredentialsTabData.ts b/web/src/components/usage/credentials/useCredentialsTabData.ts
-index 22d2660..4a19bb7 100644
+index 22d26604..4a19bb7d 100644
 --- a/web/src/components/usage/credentials/useCredentialsTabData.ts
 +++ b/web/src/components/usage/credentials/useCredentialsTabData.ts
 @@ -12,6 +12,7 @@ import { useQuotaCache } from './useQuotaCache'
@@ -996,7 +996,7 @@ index 22d2660..4a19bb7 100644
  
  export function buildCredentialQuotaStateMap(
 diff --git a/web/src/components/usage/credentials/useQuotaInspection.ts b/web/src/components/usage/credentials/useQuotaInspection.ts
-index 9bd27ae..875da86 100644
+index 9bd27ae2..875da861 100644
 --- a/web/src/components/usage/credentials/useQuotaInspection.ts
 +++ b/web/src/components/usage/credentials/useQuotaInspection.ts
 @@ -1,3 +1,4 @@
@@ -1014,7 +1014,7 @@ index 9bd27ae..875da86 100644
  
    const loadQuotaInspectionStatus = useCallback(async (controller = new AbortController()): Promise<UsageQuotaInspectionStatusResponse | null> => {
 diff --git a/web/src/components/usage/credentials/useQuotaRefreshTasks.ts b/web/src/components/usage/credentials/useQuotaRefreshTasks.ts
-index e1e6f2a..905fd0d 100644
+index e1e6f2a0..905fd0d9 100644
 --- a/web/src/components/usage/credentials/useQuotaRefreshTasks.ts
 +++ b/web/src/components/usage/credentials/useQuotaRefreshTasks.ts
 @@ -1,3 +1,4 @@
@@ -1033,7 +1033,7 @@ index e1e6f2a..905fd0d 100644
 +  return accountActionError(error, 'Quota request failed.')
  }
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index 7f20dd9..ac62349 100644
+index 22a10ea6..e5292dac 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -20,6 +20,7 @@ const getInitialLanguage = (): SupportedLanguage => {
@@ -1044,7 +1044,7 @@ index 7f20dd9..ac62349 100644
        usage_graph: {peak: 'Peak {{count}} / 10m'},
        live: { live: 'Live', connecting: 'Connecting…', reconnecting: 'Reconnecting…', paused: 'Paused while hidden' },
        overview_limits: { window: 'Window', observed_ago: '{{minutes}}m {{seconds}}s ago', title: 'Usage Limits', account: 'Provider / account', remaining: 'Remaining', resets: 'Resets in', unavailable: 'Quota unavailable', capture_unknown: 'Capture time unavailable', stale: 'Stale observation', awaiting: 'Awaiting update', info: 'Quota details', rpm_avg: 'RPM avg' },
-@@ -1118,6 +1119,7 @@ const resources = {
+@@ -1135,6 +1136,7 @@ const resources = {
    },
    zh: {
      translation: {
@@ -1052,7 +1052,7 @@ index 7f20dd9..ac62349 100644
        usage_graph: {peak: '峰值 {{count}} / 10分钟'},
        live: { live: '实时', connecting: '正在连接…', reconnecting: '正在重新连接…', paused: '页面隐藏时暂停' },
        overview_limits: { window: '窗口', observed_ago: '{{minutes}}分 {{seconds}}秒前', title: '用量限额', account: '提供商 / 账号', remaining: '剩余', resets: '重置倒计时', unavailable: '限额不可用', capture_unknown: '采集时间不可用', stale: '数据已过期', awaiting: '等待更新', info: '限额详情', rpm_avg: 'RPM 平均' },
-@@ -2216,6 +2218,7 @@ const resources = {
+@@ -2250,6 +2252,7 @@ const resources = {
    },
    'zh-TW': {
      translation: {
@@ -1062,7 +1062,7 @@ index 7f20dd9..ac62349 100644
        overview_limits: { window: '時段', observed_ago: '{{minutes}}分 {{seconds}}秒前', title: '用量限額', account: '供應商 / 帳號', remaining: '剩餘', resets: '重置倒數', unavailable: '限額不可用', capture_unknown: '擷取時間不可用', stale: '資料已過期', awaiting: '等待更新', info: '限額詳情', rpm_avg: 'RPM 平均' },
 diff --git a/web/src/lib/accountErrors.ts b/web/src/lib/accountErrors.ts
 new file mode 100644
-index 0000000..067539c
+index 00000000..067539cf
 --- /dev/null
 +++ b/web/src/lib/accountErrors.ts
 @@ -0,0 +1,21 @@
@@ -1088,7 +1088,7 @@ index 0000000..067539c
 +  return `${i18n.t(`account_errors.${source}`)}: ${reason}${status} ${i18n.t('account_errors.reset_retry')}`
 +}
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index 537d14b..f59ee91 100644
+index aa15d447..3d3c12e3 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
 @@ -25,6 +25,9 @@ export async function fetchKeyQuota(signal?: AbortSignal): Promise<{accounts: Vi
@@ -1101,7 +1101,7 @@ index 537d14b..f59ee91 100644
    code?: string
    // 价格表单按字段路径标红，分支冲突用 branch_ids 指明双方。
    fields?: PricingFieldError[]
-@@ -150,23 +153,29 @@ export function apiPath(path: string): string {
+@@ -151,23 +154,29 @@ export function apiPath(path: string): string {
    return `${normalizeBasePath(window.__APP_BASE_PATH__)}/api/v1${normalizedPath}`
  }
  
@@ -1136,7 +1136,7 @@ index 537d14b..f59ee91 100644
  function isMutatingMethod(method: string | undefined): boolean {
 diff --git a/web/src/lib/test/accountErrors.test.ts b/web/src/lib/test/accountErrors.test.ts
 new file mode 100644
-index 0000000..9b1a054
+index 00000000..9b1a0542
 --- /dev/null
 +++ b/web/src/lib/test/accountErrors.test.ts
 @@ -0,0 +1,29 @@
@@ -1170,7 +1170,7 @@ index 0000000..9b1a054
 +  })
 +})
 diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
-index 24f0fa2..bc426e7 100644
+index 24f0fa29..bc426e7b 100644
 --- a/web/src/lib/types.ts
 +++ b/web/src/lib/types.ts
 @@ -570,6 +570,9 @@ export interface UsageQuotaUpstreamResponse {

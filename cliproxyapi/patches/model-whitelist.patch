@@ -1,5 +1,5 @@
 diff --git a/internal/api/handlers/management/auth_files_crud.go b/internal/api/handlers/management/auth_files_crud.go
-index 8f62d27..f465591 100644
+index 8f62d27b..f465591e 100644
 --- a/internal/api/handlers/management/auth_files_crud.go
 +++ b/internal/api/handlers/management/auth_files_crud.go
 @@ -553,6 +553,9 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
@@ -13,7 +13,7 @@ index 8f62d27..f465591 100644
  	if provider == "" {
  		provider = "unknown"
 diff --git a/internal/api/handlers/management/auth_files_excluded_models_test.go b/internal/api/handlers/management/auth_files_excluded_models_test.go
-index f93a1a0..5bc2f10 100644
+index f93a1a04..5bc2f10a 100644
 --- a/internal/api/handlers/management/auth_files_excluded_models_test.go
 +++ b/internal/api/handlers/management/auth_files_excluded_models_test.go
 @@ -219,3 +219,88 @@ func TestPatchAuthFileFieldsRejectsInvalidExcludedModels(t *testing.T) {
@@ -106,7 +106,7 @@ index f93a1a0..5bc2f10 100644
 +	}
 +}
 diff --git a/internal/api/handlers/management/auth_files_fields.go b/internal/api/handlers/management/auth_files_fields.go
-index 2b76941..67dc411 100644
+index d5e221c6..a3a94871 100644
 --- a/internal/api/handlers/management/auth_files_fields.go
 +++ b/internal/api/handlers/management/auth_files_fields.go
 @@ -381,6 +381,18 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
@@ -129,7 +129,7 @@ index 2b76941..67dc411 100644
  			if fieldPath != "excluded_models" {
  				return &authFileFieldPatchError{message: "excluded_models does not support nested fields"}
 diff --git a/internal/client/codex/live/live.go b/internal/client/codex/live/live.go
-index 67837ad..cbe473a 100644
+index 67837adb..cbe473ad 100644
 --- a/internal/client/codex/live/live.go
 +++ b/internal/client/codex/live/live.go
 @@ -529,6 +529,7 @@ func mediaCredentialName(selected *auth.Auth, authIndex string) string {
@@ -141,10 +141,10 @@ index 67837ad..cbe473a 100644
  	var selected *auth.Auth
  	var errSelect error
 diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
-index 21593f5..4f79853 100644
+index 3f86175d..31e7eac9 100644
 --- a/internal/runtime/executor/codex_websockets_duplex.go
 +++ b/internal/runtime/executor/codex_websockets_duplex.go
-@@ -295,6 +295,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -357,6 +357,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  			}
  			return payload, curHeaders, true, true
  		}
@@ -161,7 +161,7 @@ index 21593f5..4f79853 100644
  		rejectQuotaPolicy := func() bool {
  			payload, _ := json.Marshal(map[string]any{"type": "error", "status": 503, "error": map[string]string{"type": "server_error", "code": "quota_policy_excluded", "message": "Account excluded by quota policy. Reconnect with full context to select an eligible account."}})
  			select {
-@@ -307,6 +317,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -369,6 +379,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  		}
  		processCreatePayload := func(payload []byte) bool {
  			consumedPayload = payload
@@ -171,9 +171,9 @@ index 21593f5..4f79853 100644
  			cliproxyauth.CheckSessionRebalanceQuota(ctx)
  			if !cliproxyauth.SessionRebalanceDraining(ctx) && !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
  				return rejectQuotaPolicy()
-@@ -470,6 +483,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -713,6 +726,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  				}
- 				switch gjson.GetBytes(payload, "type").String() {
+ 				switch ojson.GetBytesNoCopy(payload, "type").String() {
  				case "response.steer":
 +					if !cliproxyauth.ModelWhitelistAllows(ctx, auth, req.Model) {
 +						if !rejectModelWhitelist() {
@@ -184,7 +184,7 @@ index 21593f5..4f79853 100644
  					cliproxyauth.CheckSessionRebalanceQuota(ctx)
  					if !cliproxyauth.SessionRebalanceDraining(ctx) && !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
  						if !rejectQuotaPolicy() {
-@@ -545,6 +564,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -800,6 +819,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  					continue
  
  				case "response.create", "response.append":
@@ -199,7 +199,7 @@ index 21593f5..4f79853 100644
  						if !rejectQuotaPolicy() {
 diff --git a/internal/runtime/executor/codex_websockets_model_whitelist_test.go b/internal/runtime/executor/codex_websockets_model_whitelist_test.go
 new file mode 100644
-index 0000000..ee538a8
+index 00000000..ee538a85
 --- /dev/null
 +++ b/internal/runtime/executor/codex_websockets_model_whitelist_test.go
 @@ -0,0 +1,101 @@
@@ -306,7 +306,7 @@ index 0000000..ee538a8
 +}
 diff --git a/sdk/cliproxy/auth/allowed_models.go b/sdk/cliproxy/auth/allowed_models.go
 new file mode 100644
-index 0000000..cd86e3c
+index 00000000..cd86e3c7
 --- /dev/null
 +++ b/sdk/cliproxy/auth/allowed_models.go
 @@ -0,0 +1,141 @@
@@ -453,7 +453,7 @@ index 0000000..cd86e3c
 +}
 diff --git a/sdk/cliproxy/auth/allowed_models_test.go b/sdk/cliproxy/auth/allowed_models_test.go
 new file mode 100644
-index 0000000..b817aae
+index 00000000..b817aae6
 --- /dev/null
 +++ b/sdk/cliproxy/auth/allowed_models_test.go
 @@ -0,0 +1,95 @@
@@ -553,10 +553,10 @@ index 0000000..b817aae
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/conductor_execution.go b/sdk/cliproxy/auth/conductor_execution.go
-index b81983d..d744ee8 100644
+index a34889b0..52e5585e 100644
 --- a/sdk/cliproxy/auth/conductor_execution.go
 +++ b/sdk/cliproxy/auth/conductor_execution.go
-@@ -2314,6 +2314,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
+@@ -2476,6 +2476,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
  	credVersion := auth.CredentialVersion
  	regEpoch := auth.RegistrationEpoch
  
@@ -565,10 +565,10 @@ index b81983d..d744ee8 100644
  	if errStream != nil {
  		rerr := resultErrorFromError(errStream)
 diff --git a/sdk/cliproxy/auth/conductor_lifecycle.go b/sdk/cliproxy/auth/conductor_lifecycle.go
-index 8e1d8d4..fe1044e 100644
+index 9a466175..34fbb2a0 100644
 --- a/sdk/cliproxy/auth/conductor_lifecycle.go
 +++ b/sdk/cliproxy/auth/conductor_lifecycle.go
-@@ -88,6 +88,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
+@@ -87,6 +87,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
  		return nil, nil
  	}
  	NormalizeCredentialMetadata(auth.Metadata)
@@ -576,7 +576,7 @@ index 8e1d8d4..fe1044e 100644
  	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
  		return nil, fmt.Errorf("register auth: %w", errWeight)
  	}
-@@ -296,6 +297,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
+@@ -305,6 +306,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
  		return nil, false, false, nil
  	}
  	NormalizeCredentialMetadata(auth.Metadata)
@@ -584,7 +584,7 @@ index 8e1d8d4..fe1044e 100644
  	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
  		return nil, false, false, fmt.Errorf("update auth: %w", errWeight)
  	}
-@@ -350,12 +352,14 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
+@@ -359,12 +361,14 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
  			}
  			auth = merged
  			NormalizeCredentialMetadata(auth.Metadata)
@@ -599,7 +599,7 @@ index 8e1d8d4..fe1044e 100644
  		}
  	}
  	if auth.RegistrationEpoch != 0 && auth.RegistrationEpoch < m.authEpochs[auth.ID] {
-@@ -757,6 +761,7 @@ func (m *Manager) Load(ctx context.Context) error {
+@@ -830,6 +834,7 @@ func (m *Manager) Load(ctx context.Context) error {
  			continue
  		}
  		NormalizeCredentialMetadata(auth.Metadata)
@@ -608,7 +608,7 @@ index 8e1d8d4..fe1044e 100644
  			continue
  		}
 diff --git a/sdk/cliproxy/auth/conductor_selection.go b/sdk/cliproxy/auth/conductor_selection.go
-index 1750ecf..5e47cc4 100644
+index 2078715b..8d19e724 100644
 --- a/sdk/cliproxy/auth/conductor_selection.go
 +++ b/sdk/cliproxy/auth/conductor_selection.go
 @@ -84,11 +84,12 @@ type requiredAuthKindContextKey struct{}
@@ -647,7 +647,7 @@ index 1750ecf..5e47cc4 100644
  	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
  		return false
  	}
-@@ -1066,6 +1071,9 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
+@@ -1429,6 +1434,9 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
  }
  
  func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -657,7 +657,7 @@ index 1750ecf..5e47cc4 100644
  	if registryRef == nil || auth == nil {
  		return true
  	}
-@@ -2154,7 +2162,7 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
+@@ -2631,7 +2639,7 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
  		providerMatches := strings.TrimSpace(provider) == "" || strings.EqualFold(strings.TrimSpace(selection.Provider), strings.TrimSpace(provider))
  		selectionAuth := selection.CloneAuth()
  		kindMatches := selectionAuth != nil && selectionAuth.AuthKind() == requiredKind
@@ -667,7 +667,7 @@ index 1750ecf..5e47cc4 100644
  		}
  
 diff --git a/sdk/cliproxy/auth/conductor_stream.go b/sdk/cliproxy/auth/conductor_stream.go
-index 59c6987..233c835 100644
+index 03e40d29..8db35594 100644
 --- a/sdk/cliproxy/auth/conductor_stream.go
 +++ b/sdk/cliproxy/auth/conductor_stream.go
 @@ -438,6 +438,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
@@ -680,7 +680,7 @@ index 59c6987..233c835 100644
  		if hasUpstreamExecutionAttempt(errStream) {
 diff --git a/sdk/cliproxy/service_allowed_models_test.go b/sdk/cliproxy/service_allowed_models_test.go
 new file mode 100644
-index 0000000..96c83d2
+index 00000000..96c83d28
 --- /dev/null
 +++ b/sdk/cliproxy/service_allowed_models_test.go
 @@ -0,0 +1,66 @@
@@ -751,10 +751,10 @@ index 0000000..96c83d2
 +	}
 +}
 diff --git a/sdk/cliproxy/service_executors.go b/sdk/cliproxy/service_executors.go
-index c83c246..e2fe1a7 100644
+index 0ad196e2..8d3e65fb 100644
 --- a/sdk/cliproxy/service_executors.go
 +++ b/sdk/cliproxy/service_executors.go
-@@ -469,6 +469,9 @@ func (s *Service) registerResolvedModelsForAuthFenced(a *coreauth.Auth, fence mo
+@@ -475,6 +475,9 @@ func (s *Service) registerResolvedModelsForAuthFenced(a *coreauth.Auth, fence mo
  		if modelID == "" {
  			continue
  		}

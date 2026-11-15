@@ -348,7 +348,7 @@ index 00000000..9a53429b
 +	}
 +}
 diff --git a/internal/api/router.go b/internal/api/router.go
-index 6c1278a0..8012d822 100644
+index d707091b..6f3b2e52 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
 @@ -52,6 +52,7 @@ type StatusRouteConfig struct {
@@ -357,9 +357,9 @@ index 6c1278a0..8012d822 100644
  type OptionalProviders struct {
 +	EmailPrivacy       *EmailPrivacyBoundary
  	QuotaPolicies      QuotaPolicyProvider
- 	Live               *live.Hub
- 	Ranking            rankinghttpapi.Provider
-@@ -138,9 +139,13 @@ func NewRouter(
+ 	Live *live.Hub
+ 	Ranking rankinghttpapi.Provider
+@@ -147,9 +148,13 @@ func NewRouter(
  	if len(optionalProviders) > 0 {
  		authHandler.registerLiveRoutes(apiV1, optionalProviders[0].Live)
  	}
@@ -374,7 +374,7 @@ index 6c1278a0..8012d822 100644
  
  	versionProtected := apiV1.Group("")
  	versionProtected.Use(authHandler.roleMiddleware(auth.RoleAdmin, auth.RoleAPIKeyViewer, auth.RoleReadOnly))
-@@ -148,6 +153,7 @@ func NewRouter(
+@@ -157,6 +162,7 @@ func NewRouter(
  
  	readOnlyProtected := apiV1.Group("")
  	readOnlyProtected.Use(authHandler.readOnlyMiddleware())
@@ -382,7 +382,7 @@ index 6c1278a0..8012d822 100644
  	readOnlyProtected.Use(costReadMiddleware(costReadGate, basePath))
  	registerReadOnlyOverviewRoute(readOnlyProtected, usageProvider, cpaAPIKeyProvider)
  	registerReadOnlyDashboardRoutes(readOnlyProtected, usageProvider, cpaAPIKeyProvider, usageIdentityProvider)
-@@ -156,6 +162,7 @@ func NewRouter(
+@@ -165,6 +171,7 @@ func NewRouter(
  
  	adminProtected := apiV1.Group("")
  	adminProtected.Use(authHandler.adminMiddleware())
@@ -390,7 +390,7 @@ index 6c1278a0..8012d822 100644
  	if len(optionalProviders) > 0 && optionalProviders[0].Live != nil {
  		adminProtected.Use(func(c *gin.Context) {
  			c.Next()
-@@ -200,6 +207,7 @@ func NewRouter(
+@@ -211,6 +218,7 @@ func NewRouter(
  	keyViewerProtected := apiV1.Group("")
  	keyViewerProtected.Use(authHandler.apiKeyViewerMiddleware())
  	keyViewerProtected.Use(authHandler.activeAPIKeyViewerMiddleware())
@@ -399,7 +399,7 @@ index 6c1278a0..8012d822 100644
  	if authConfig.APIKeyViewerQuotaEnabled {
  		registerKeyQuotaRoute(keyViewerProtected, usageIdentityProvider, quotaProvider)
 diff --git a/internal/app/app.go b/internal/app/app.go
-index 2283b3dd..6cca62b4 100644
+index 240ff7cc..918d9e2e 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
 @@ -7,6 +7,7 @@ import (
@@ -410,14 +410,14 @@ index 2283b3dd..6cca62b4 100644
  	"strings"
  	"sync"
  	"time"
-@@ -307,6 +308,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+@@ -309,6 +310,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  			authHandler,
  			cfg.AppBasePath,
  			api.OptionalProviders{
 +				EmailPrivacy:  api.NewEmailPrivacyBoundary(cpaClient, filepath.Join(cfg.WorkDir, "keeper-email-privacy.json")),
  				QuotaPolicies: cpaClient,
- 				Live:          liveHub,
- 				UsageIdentity: usageIdentityService,
+ 				Live: liveHub,
+ 				UsageIdentity:          usageIdentityService,
 diff --git a/internal/app/test/database_file_pool_test.go b/internal/app/test/database_file_pool_test.go
 index 6e906b4a..c9d29cae 100644
 --- a/internal/app/test/database_file_pool_test.go

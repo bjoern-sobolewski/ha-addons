@@ -1,44 +1,6 @@
-diff --git a/internal/client/codex/live/sideband.go b/internal/client/codex/live/sideband.go
---- a/internal/client/codex/live/sideband.go
-+++ b/internal/client/codex/live/sideband.go
-@@ -71,10 +71,12 @@
- }
- 
- type sessionStore struct {
--	mu       sync.Mutex
--	next     uint64
--	lifetime time.Duration
--	sessions map[string]*storedSession
-+	mu                   sync.Mutex
-+	next                 uint64
-+	lifetime             time.Duration
-+	sessions             map[string]*storedSession
-+	knownCalls           map[string]time.Time
-+	adoptionBlockedUntil time.Time
- }
- 
- type sessionClaim int
-@@ -111,6 +113,7 @@
- 		s.expire(callID, session.token)
- 	})
- 	s.sessions[callID] = entry
-+	s.rememberCallLocked(callID)
- 	s.mu.Unlock()
- 
- 	if previous != nil {
-@@ -327,6 +330,10 @@
- 		return
- 	case sessionClaimAcquired:
- 	default:
-+		if style == sidebandFrameless && desktopCallIDPattern.MatchString(callID) {
-+			h.handleDesktopSideband(c, callID)
-+			return
-+		}
- 		writeLiveError(c, http.StatusNotFound, "Codex live session not found")
- 		return
- 	}
 diff --git a/internal/client/codex/live/desktop_sideband.go b/internal/client/codex/live/desktop_sideband.go
 new file mode 100644
+index 00000000..520e23df
 --- /dev/null
 +++ b/internal/client/codex/live/desktop_sideband.go
 @@ -0,0 +1,196 @@
@@ -240,6 +202,7 @@ new file mode 100644
 +}
 diff --git a/internal/client/codex/live/desktop_sideband_test.go b/internal/client/codex/live/desktop_sideband_test.go
 new file mode 100644
+index 00000000..648118e6
 --- /dev/null
 +++ b/internal/client/codex/live/desktop_sideband_test.go
 @@ -0,0 +1,261 @@
@@ -504,3 +467,43 @@ new file mode 100644
 +		t.Fatalf("finished owned call was adopted: status=%d handshakes=%d", response.Code, handshakes.Load())
 +	}
 +}
+diff --git a/internal/client/codex/live/sideband.go b/internal/client/codex/live/sideband.go
+index babbfbc4..f9594b5c 100644
+--- a/internal/client/codex/live/sideband.go
++++ b/internal/client/codex/live/sideband.go
+@@ -71,10 +71,12 @@ type storedSession struct {
+ }
+ 
+ type sessionStore struct {
+-	mu       sync.Mutex
+-	next     uint64
+-	lifetime time.Duration
+-	sessions map[string]*storedSession
++	mu                   sync.Mutex
++	next                 uint64
++	lifetime             time.Duration
++	sessions             map[string]*storedSession
++	knownCalls           map[string]time.Time
++	adoptionBlockedUntil time.Time
+ }
+ 
+ type sessionClaim int
+@@ -111,6 +113,7 @@ func (s *sessionStore) put(callID string, session liveSession) liveSession {
+ 		s.expire(callID, session.token)
+ 	})
+ 	s.sessions[callID] = entry
++	s.rememberCallLocked(callID)
+ 	s.mu.Unlock()
+ 
+ 	if previous != nil {
+@@ -327,6 +330,10 @@ func (h *Handler) HandleSideband(c *gin.Context) {
+ 		return
+ 	case sessionClaimAcquired:
+ 	default:
++		if style == sidebandFrameless && desktopCallIDPattern.MatchString(callID) {
++			h.handleDesktopSideband(c, callID)
++			return
++		}
+ 		writeLiveError(c, http.StatusNotFound, "Codex live session not found")
+ 		return
+ 	}

@@ -252,7 +252,7 @@ index 00000000..db847d42
 +	}
 +}
 diff --git a/internal/redisqueue/plugin.go b/internal/redisqueue/plugin.go
-index 704808ca..039bd498 100644
+index 6f8fc736..4c3166ed 100644
 --- a/internal/redisqueue/plugin.go
 +++ b/internal/redisqueue/plugin.go
 @@ -3,6 +3,7 @@ package redisqueue
@@ -263,7 +263,7 @@ index 704808ca..039bd498 100644
  	"net/http"
  	"strings"
  	"time"
-@@ -182,6 +183,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
+@@ -185,6 +186,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
  		TraceID:               traceID,
  		SessionID:             sessionID,
  		ParentSessionID:       parentSessionID,
@@ -271,7 +271,7 @@ index 704808ca..039bd498 100644
  		NodeKind:              strings.TrimSpace(clientRequestMetadata.NodeKind),
  		IsFork:                clientRequestMetadata.IsFork,
  		IsCompaction:          clientRequestMetadata.IsCompaction,
-@@ -210,6 +212,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
+@@ -213,6 +215,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
  }
  
  type queuedUsageDetail struct {
@@ -564,27 +564,27 @@ index f11a8ebf..e757902e 100644
  	}
  	sort.Slice(out.Rows, func(i, j int) bool { return out.Rows[i].Started.Before(out.Rows[j].Started) })
 diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
-index 27d06287..63283e7f 100644
+index daa6e74f..9e7632f5 100644
 --- a/internal/runtime/executor/codex_websockets_duplex.go
 +++ b/internal/runtime/executor/codex_websockets_duplex.go
-@@ -739,6 +739,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -1004,6 +1004,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  				wakeWriter()
- 				if !firstResponse {
- 					reporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
+ 				if !wasFirstResponse {
+ 					reporter = helps.NewExecutorUsageReporter(followupCtx, e, req.Model, auth)
 +					reporter.SetPromptPreview(current.promptPreview)
  					reporter.SetTranslatedReasoningEffort(current.clientBody, current.to.String())
  					reporter.SetUpstreamServiceTier(current.clientBody)
  					reporter.StartResponseTTFT()
-@@ -825,6 +826,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -1091,6 +1092,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  				if len(pending) > 0 && !currentFailure && !ambiguous {
  					eventPrepared, pending = pending[0], pending[1:]
- 					eventReporter = helps.NewExecutorUsageReporter(ctx, e, req.Model, auth)
+ 					eventReporter = helps.NewExecutorUsageReporter(followupCtx, e, req.Model, auth)
 +					eventReporter.SetPromptPreview(eventPrepared.promptPreview)
  					eventReporter.SetTranslatedReasoningEffort(eventPrepared.clientBody, eventPrepared.to.String())
+ 					terminalDeliveryPending = true
  					eventReporter.SetUpstreamServiceTier(eventPrepared.clientBody)
- 				} else if !ambiguous {
 diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
-index 1d66e2c3..7eff22ad 100644
+index 477f8e17..4b5bda33 100644
 --- a/internal/runtime/executor/codex_websockets_stream.go
 +++ b/internal/runtime/executor/codex_websockets_stream.go
 @@ -4,6 +4,8 @@ import (
@@ -596,23 +596,23 @@ index 1d66e2c3..7eff22ad 100644
  	"net/http"
  	"strings"
  	"time"
-@@ -14,6 +16,7 @@ import (
+@@ -15,6 +17,7 @@ import (
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
  	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
  	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 +	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
  	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
  	log "github.com/sirupsen/logrus"
- 	"github.com/tidwall/gjson"
-@@ -38,6 +41,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
- 	if err != nil {
- 		return nil, err
+ )
+@@ -66,6 +69,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
+ 	if prepared.upstreamModel != "" && prepared.upstreamModel != baseModel {
+ 		reporter.SetUpstreamModel(prepared.upstreamModel)
  	}
 +	reporter.SetPromptPreview(prepared.promptPreview)
  	from := prepared.from
  	responseFormat := prepared.responseFormat
  	to := prepared.to
-@@ -840,6 +844,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
+@@ -863,6 +867,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
  // codexWebsocketPrepared contains the request pipeline output shared by the
  // ordinary per-response stream and subsequent creates on a duplex connection.
  type codexWebsocketPrepared struct {
@@ -620,8 +620,8 @@ index 1d66e2c3..7eff22ad 100644
  	from                 sdktranslator.Format
  	responseFormat       sdktranslator.Format
  	to                   sdktranslator.Format
-@@ -935,6 +940,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
- 	applyModelHeaderOverrides(wsHeaders, baseModel)
+@@ -976,6 +981,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
+ 	}
  
  	return &codexWebsocketPrepared{
 +		promptPreview:        promptpreview.Default.Observe(usage.APIKeyFromContext(ctx), logging.GetClientRequestMetadata(ctx).SessionID, req.Payload),
@@ -629,7 +629,7 @@ index 1d66e2c3..7eff22ad 100644
  		responseFormat:       responseFormat,
  		to:                   to,
 diff --git a/internal/runtime/executor/helps/usage_helpers.go b/internal/runtime/executor/helps/usage_helpers.go
-index 8b4c3320..f63c2153 100644
+index b9a4a6e8..8a7871a2 100644
 --- a/internal/runtime/executor/helps/usage_helpers.go
 +++ b/internal/runtime/executor/helps/usage_helpers.go
 @@ -5,6 +5,7 @@ import (
@@ -648,7 +648,7 @@ index 8b4c3320..f63c2153 100644
  	requestID            string
  	traceID              string
  	selectionID          string
-@@ -92,6 +94,8 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
+@@ -94,6 +96,8 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
  	return reporter
  }
  
@@ -657,7 +657,7 @@ index 8b4c3320..f63c2153 100644
  func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
  	apiKey := APIKeyFromContext(ctx)
  	accessProvider := AccessProviderFromContext(ctx)
-@@ -131,6 +135,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
+@@ -133,6 +137,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
  		traceID = internallogging.GetRequestID(ctx)
  	}
  	reporter := &UsageReporter{
@@ -665,7 +665,7 @@ index 8b4c3320..f63c2153 100644
  		requestID:       uuid.NewString(),
  		traceID:         traceID,
  		selectionID:     usage.SelectionIDFromContext(ctx),
-@@ -680,6 +685,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
+@@ -707,6 +712,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
  		responseModel = r.ResponseModel()
  	}
  	return usage.Record{
@@ -714,7 +714,7 @@ index a833f8d2..9ec8e024 100644
  		r.Tools = len(s.tools)
  		r.Draining = s.draining
 diff --git a/sdk/api/handlers/handlers.go b/sdk/api/handlers/handlers.go
-index b9c0366c..3c89b81f 100644
+index 01e0681e..708a2b86 100644
 --- a/sdk/api/handlers/handlers.go
 +++ b/sdk/api/handlers/handlers.go
 @@ -7,6 +7,7 @@ import (
@@ -725,7 +725,7 @@ index b9c0366c..3c89b81f 100644
  	"net"
  	"net/http"
  	"reflect"
-@@ -344,7 +345,11 @@ func EnrichContextWithSessionHierarchy(ctx context.Context, headers http.Header,
+@@ -380,7 +381,11 @@ func EnrichContextWithSessionHierarchy(ctx context.Context, headers http.Header,
  }
  
  func enrichContextWithSessionHierarchy(ctx context.Context, headers http.Header, payload []byte, metadata map[string]any) context.Context {
@@ -739,7 +739,7 @@ index b9c0366c..3c89b81f 100644
  
  func requestCallerScope(ginCtx *gin.Context) string {
 diff --git a/sdk/api/handlers/handlers_stream.go b/sdk/api/handlers/handlers_stream.go
-index 86a30602..ae538d7d 100644
+index e04fe3bb..bde6b339 100644
 --- a/sdk/api/handlers/handlers_stream.go
 +++ b/sdk/api/handlers/handlers_stream.go
 @@ -8,7 +8,9 @@ import (
@@ -752,7 +752,7 @@ index 86a30602..ae538d7d 100644
  	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
  	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-@@ -438,6 +440,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
+@@ -490,6 +492,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
  	}
  
  	transformStreamPayload := func(payload []byte, chunkIndex *int, historyChunks [][]byte) ([]byte, bool, *interfaces.ErrorMessage) {
@@ -765,7 +765,7 @@ index 86a30602..ae538d7d 100644
  		payload = cloneBytes(payload)
  		if streamInterceptorsActive {
 diff --git a/sdk/cliproxy/usage/manager.go b/sdk/cliproxy/usage/manager.go
-index 85c247eb..7601c76e 100644
+index 83ac0633..bf15920f 100644
 --- a/sdk/cliproxy/usage/manager.go
 +++ b/sdk/cliproxy/usage/manager.go
 @@ -3,6 +3,7 @@ package usage
@@ -784,7 +784,7 @@ index 85c247eb..7601c76e 100644
  	// RequestID uniquely identifies this specific model execution instance (UUID v4).
  	RequestID string
  	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
-@@ -755,6 +757,9 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
+@@ -770,6 +772,9 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
  			record.IsNativeKey = IsNativeAccessProvider(record.AccessProvider)
  		}
  	}

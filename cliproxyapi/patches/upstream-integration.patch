@@ -127,10 +127,10 @@ index f67dd5b9..83a7ba73 100644
 +	}
 +}
 diff --git a/internal/api/handlers/management/oauth_sessions.go b/internal/api/handlers/management/oauth_sessions.go
-index 8b5925a9..98423d7a 100644
+index b364a228..2826012e 100644
 --- a/internal/api/handlers/management/oauth_sessions.go
 +++ b/internal/api/handlers/management/oauth_sessions.go
-@@ -72,7 +72,7 @@ type oauthSession struct {
+@@ -73,7 +73,7 @@ type oauthSession struct {
  	Completed       bool
  	CreatedAt       time.Time
  	ExpiresAt       time.Time
@@ -139,7 +139,7 @@ index 8b5925a9..98423d7a 100644
  }
  
  type oauthSessionStore struct {
-@@ -457,7 +457,7 @@ func (s *oauthSessionStore) Cancel(state string) bool {
+@@ -458,7 +458,7 @@ func (s *oauthSessionStore) Cancel(state string) bool {
  
  	s.purgeExpiredLocked(now)
  	session, ok := s.sessions[state]
@@ -148,26 +148,11 @@ index 8b5925a9..98423d7a 100644
  		return false
  	}
  	if session.SIWC != nil {
-diff --git a/internal/auth/codex/openai_auth.go b/internal/auth/codex/openai_auth.go
-index 931e40ee..6f6d6f36 100644
---- a/internal/auth/codex/openai_auth.go
-+++ b/internal/auth/codex/openai_auth.go
-@@ -347,7 +347,9 @@ func isNonRetryableRefreshErr(err error) bool {
- 	if err == nil {
- 		return false
- 	}
--	if refreshdiagnostic.Reason(err) != "" { return true }
-+	if refreshdiagnostic.Reason(err) != "" {
-+		return true
-+	}
- 	raw := strings.ToLower(err.Error())
- 	for _, token := range []string{
- 		"refresh_token_reused",
 diff --git a/internal/redisqueue/plugin.go b/internal/redisqueue/plugin.go
-index dff3c706..704808ca 100644
+index 229420bf..6f8fc736 100644
 --- a/internal/redisqueue/plugin.go
 +++ b/internal/redisqueue/plugin.go
-@@ -161,7 +161,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
+@@ -163,7 +163,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
  	}
  
  	upstreamTier := strings.TrimSpace(record.UpstreamServiceTier)
@@ -246,10 +231,10 @@ index a6f8d024..b4460765 100644
 +	}
 +}
 diff --git a/internal/runtime/executor/helps/usage_helpers.go b/internal/runtime/executor/helps/usage_helpers.go
-index ea187635..8b4c3320 100644
+index 630d10e7..b9a4a6e8 100644
 --- a/internal/runtime/executor/helps/usage_helpers.go
 +++ b/internal/runtime/executor/helps/usage_helpers.go
-@@ -62,8 +62,8 @@ type UsageReporter struct {
+@@ -64,8 +64,8 @@ type UsageReporter struct {
  	ttftStart            time.Time
  	ttftSet              bool
  	once                 sync.Once
@@ -260,7 +245,7 @@ index ea187635..8b4c3320 100644
  
  	responseModelMu sync.RWMutex
  	// responseModel holds the latest model name reported by the upstream response.
-@@ -711,8 +711,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
+@@ -739,8 +739,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
  		Failed:               failed,
  		Fail:                 fail,
  		Detail:               detail,
@@ -271,7 +256,7 @@ index ea187635..8b4c3320 100644
  }
  
 diff --git a/sdk/cliproxy/service_executionregistry_test.go b/sdk/cliproxy/service_executionregistry_test.go
-index dbf92290..800e3e6f 100644
+index 5bd4dc30..c24bf544 100644
 --- a/sdk/cliproxy/service_executionregistry_test.go
 +++ b/sdk/cliproxy/service_executionregistry_test.go
 @@ -1450,7 +1450,8 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {

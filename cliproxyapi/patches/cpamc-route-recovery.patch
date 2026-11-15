@@ -32,10 +32,10 @@ index 5ca6723..9ed9028 100644
    source: string;
   reset_credits_available_count?: number;
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 64a303e..e308f73 100644
+index 363148f..a06620a 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -2469,5 +2469,11 @@
+@@ -2535,5 +2535,11 @@
      "scheduled": "Scheduled provider query",
      "provider": "Provider quota query",
      "custom_window": "{{name}}{{minutes}}-minute limit"
@@ -48,10 +48,10 @@ index 64a303e..e308f73 100644
    }
  }
 diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
-index be90c22..c74702a 100644
+index 6a6f9a8..2203d15 100644
 --- a/src/i18n/locales/ko.json
 +++ b/src/i18n/locales/ko.json
-@@ -2469,5 +2469,11 @@
+@@ -2535,5 +2535,11 @@
      "scheduled": "예약된 제공업체 조회",
      "provider": "제공업체 할당량 조회",
      "custom_window": "{{name}}{{minutes}}분 한도"
@@ -64,10 +64,10 @@ index be90c22..c74702a 100644
    }
  }
 diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
-index 280e74d..7dea593 100644
+index 7b2bd15..fab7cca 100644
 --- a/src/i18n/locales/ru.json
 +++ b/src/i18n/locales/ru.json
-@@ -2463,5 +2463,11 @@
+@@ -2539,5 +2539,11 @@
      "scheduled": "Плановый запрос провайдера",
      "provider": "Запрос квоты провайдера",
      "custom_window": "{{name}}Лимит на {{minutes}} минут"
@@ -80,10 +80,10 @@ index 280e74d..7dea593 100644
    }
  }
 diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
-index 7bd2557..e0ae413 100644
+index b0d0c2c..626fd65 100644
 --- a/src/i18n/locales/tr.json
 +++ b/src/i18n/locales/tr.json
-@@ -2469,5 +2469,11 @@
+@@ -2535,5 +2535,11 @@
      "scheduled": "Zamanlanmış sağlayıcı sorgusu",
      "provider": "Sağlayıcı kota sorgusu",
      "custom_window": "{{name}}{{minutes}} dakikalık limit"
@@ -96,10 +96,10 @@ index 7bd2557..e0ae413 100644
    }
  }
 diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
-index 5f4119c..0011d55 100644
+index 0c94745..ad25fb6 100644
 --- a/src/i18n/locales/vi.json
 +++ b/src/i18n/locales/vi.json
-@@ -2475,5 +2475,11 @@
+@@ -2541,5 +2541,11 @@
      "scheduled": "Truy vấn nhà cung cấp theo lịch",
      "provider": "Truy vấn hạn mức nhà cung cấp",
      "custom_window": "Giới hạn {{name}}{{minutes}} phút"
@@ -112,10 +112,10 @@ index 5f4119c..0011d55 100644
    }
  }
 diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
-index 20ebf54..e597a3f 100644
+index d1caf4b..275fb9b 100644
 --- a/src/i18n/locales/zh-CN.json
 +++ b/src/i18n/locales/zh-CN.json
-@@ -2467,5 +2467,11 @@
+@@ -2528,5 +2528,11 @@
      "scheduled": "定时提供商查询",
      "provider": "提供商配额查询",
      "custom_window": "{{name}}{{minutes}} 分钟限额"
@@ -128,10 +128,10 @@ index 20ebf54..e597a3f 100644
    }
  }
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 1df37a2..139dd5e 100644
+index 51e361e..78ecc83 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -2495,5 +2495,11 @@
+@@ -2556,5 +2556,11 @@
      "scheduled": "排程提供者查詢",
      "provider": "提供者配額查詢",
      "custom_window": "{{name}}{{minutes}} 分鐘限額"

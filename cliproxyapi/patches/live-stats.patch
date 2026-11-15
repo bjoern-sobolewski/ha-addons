@@ -93,7 +93,7 @@ index 00000000..9052f8b4
 +	}
 +}
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index ba1f836b..892d97b4 100644
+index c4ea8a83..867b9cb1 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
 @@ -1,6 +1,7 @@
@@ -413,7 +413,7 @@ index 00000000..fa17e84a
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/conductor_cooldown.go b/sdk/cliproxy/auth/conductor_cooldown.go
-index 76379170..efc5048b 100644
+index 4496934e..13969b9f 100644
 --- a/sdk/cliproxy/auth/conductor_cooldown.go
 +++ b/sdk/cliproxy/auth/conductor_cooldown.go
 @@ -5,6 +5,7 @@ import (
@@ -423,8 +423,8 @@ index 76379170..efc5048b 100644
 +	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/refreshdiagnostic"
  	"io"
- 	"net"
-@@ -948,8 +949,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
+ 	"maps"
+@@ -1557,8 +1558,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
  		auth.recordRecentRequest(now, result.Success)
  		if result.Success {
  			auth.Success++
@@ -437,7 +437,7 @@ index 76379170..efc5048b 100644
  		}
  		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
  
-@@ -1488,8 +1493,12 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
+@@ -2286,8 +2291,12 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
  		auth.recordRecentRequest(now, result.Success)
  		if result.Success {
  			auth.Success++
@@ -451,7 +451,7 @@ index 76379170..efc5048b 100644
  		auth.Generation++
  		auth.UpdatedAt = now
 diff --git a/sdk/cliproxy/auth/conductor_lifecycle.go b/sdk/cliproxy/auth/conductor_lifecycle.go
-index 117c15c0..8e1d8d4b 100644
+index 4eba974b..9a466175 100644
 --- a/sdk/cliproxy/auth/conductor_lifecycle.go
 +++ b/sdk/cliproxy/auth/conductor_lifecycle.go
 @@ -3,6 +3,7 @@ package auth
@@ -460,9 +460,9 @@ index 117c15c0..8e1d8d4b 100644
  	"fmt"
 +	"github.com/router-for-me/CLIProxyAPI/v8/internal/live"
  	"math"
- 	"net/http"
  	"strings"
-@@ -165,6 +166,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
+ 	"sync"
+@@ -174,6 +175,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
  	m.structuralEpoch.Add(1)
  	m.queueRefreshReschedule(auth.ID)
  	m.hook.OnAuthRegistered(ctx, auth.Clone())
@@ -470,7 +470,7 @@ index 117c15c0..8e1d8d4b 100644
  	if cooldownStateChanged {
  		m.persistCooldownStates(context.Background())
  	}
-@@ -275,6 +277,7 @@ func (m *Manager) finishAuthUpdate(ctx context.Context, committed *Auth, persist
+@@ -284,6 +286,7 @@ func (m *Manager) finishAuthUpdate(ctx context.Context, committed *Auth, persist
  	m.structuralEpoch.Add(1)
  	m.queueRefreshReschedule(committed.ID)
  	m.hook.OnAuthUpdated(ctx, committed.Clone())
@@ -478,7 +478,7 @@ index 117c15c0..8e1d8d4b 100644
  	if persistCooldown {
  		m.persistCooldownStates(context.Background())
  	}
-@@ -695,6 +698,7 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
+@@ -751,6 +754,7 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
  	}
  	m.structuralEpoch.Add(1)
  	m.queueRefreshUnschedule(id)

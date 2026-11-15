@@ -1,8 +1,8 @@
 diff --git a/internal/api/router.go b/internal/api/router.go
-index cd5fe1c4..6c1278a0 100644
+index 11aa508c..d707091b 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
-@@ -183,6 +183,7 @@ func NewRouter(
+@@ -193,6 +193,7 @@ func NewRouter(
  	if len(optionalProviders) > 0 {
  		registerQuotaPolicyRoutes(adminProtected, optionalProviders[0].QuotaPolicies, optionalProviders[0].Live)
  		registerSessionRebalanceRoutes(adminProtected, optionalProviders[0].QuotaPolicies)
@@ -95,7 +95,7 @@ index fcaa71d5..82f30eda 100644
      },
    };
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index 3f95fba0..7f20dd95 100644
+index fdbc923d..22a10ea6 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -271,6 +271,7 @@ const resources = {
@@ -106,7 +106,7 @@ index 3f95fba0..7f20dd95 100644
          tab_realtime: 'Realtime',
          insights_requests: "Window requests",
          insights_tokens: "Window tokens",
-@@ -1368,6 +1369,7 @@ const resources = {
+@@ -1385,6 +1386,7 @@ const resources = {
          back_to_cpa_aria: '返回CPA管理界面',
          tabs_aria_label: '用量页面分区',
          tab_overview: '概览',
@@ -114,7 +114,7 @@ index 3f95fba0..7f20dd95 100644
          tab_realtime: '实时',
          insights_requests: "窗口请求数",
          insights_tokens: "窗口 Token",
-@@ -2465,6 +2467,7 @@ const resources = {
+@@ -2499,6 +2501,7 @@ const resources = {
          back_to_cpa_aria: '返回CPA管理介面',
          tabs_aria_label: '用量頁面分區',
          tab_overview: '總覽',
@@ -144,18 +144,18 @@ index fb241595..345cba2e 100644
        }
      }
 diff --git a/web/src/lib/usageNavigation.ts b/web/src/lib/usageNavigation.ts
-index 6c170837..18e50651 100644
+index e0782cc5..44213155 100644
 --- a/web/src/lib/usageNavigation.ts
 +++ b/web/src/lib/usageNavigation.ts
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,7 @@ export const USAGE_TAB_OPTIONS = [
    'analysis',
    'ranking',
    'events',
 +  'routing',
    'credentials',
    'ai-provider',
-   'settings',
-@@ -15,6 +16,7 @@ export const DEFAULT_USAGE_TAB: UsageTab = 'overview';
+   'models',
+@@ -16,6 +17,7 @@ export const DEFAULT_USAGE_TAB: UsageTab = 'overview';
  const USAGE_TAB_PATHS: Record<UsageTab, string> = {
    overview: '/overview',
    realtime: '/realtime',
@@ -385,7 +385,7 @@ index 00000000..1e2eb36e
 + </section>
 +}
 diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
-index 0ee607c3..69b78ca1 100644
+index 5a301565..1e848698 100644
 --- a/web/src/pages/UsagePage.tsx
 +++ b/web/src/pages/UsagePage.tsx
 @@ -1,5 +1,6 @@
@@ -395,7 +395,7 @@ index 0ee607c3..69b78ca1 100644
  import { SessionRebalanceProgress } from '@/components/usage/credentials/SessionRebalanceProgress';
  import { CredentialEditModal } from '@/components/usage/credentials/CredentialEditModal';
  import { UsageComparisonCharts } from '@/components/usage/UsageComparisonCharts';
-@@ -78,6 +79,7 @@ type Translate = (key: string) => string;
+@@ -82,6 +83,7 @@ type Translate = (key: string) => string;
  const USAGE_TAB_LABEL_KEYS: Record<UsageTab, string> = {
    overview: 'usage_stats.tab_overview',
    realtime: 'usage_stats.tab_realtime',
@@ -403,16 +403,16 @@ index 0ee607c3..69b78ca1 100644
    analysis: 'usage_stats.tab_analysis',
    ranking: 'usage_stats.tab_ranking',
    events: 'usage_stats.tab_events',
-@@ -145,7 +147,7 @@ export const getCredentialSectionVisibility = (tab: UsageTab) => ({
+@@ -150,7 +152,7 @@ export const getCredentialSectionVisibility = (tab: UsageTab) => ({
    showAiProvider: tab === 'ai-provider',
  });
  
--export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'realtime' && tab !== 'ranking' && tab !== 'settings' && !getCredentialSectionVisibility(tab).enabled;
-+export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'routing' && tab !== 'realtime' && tab !== 'ranking' && tab !== 'settings' && !getCredentialSectionVisibility(tab).enabled;
+-export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'realtime' && tab !== 'ranking' && tab !== 'settings' && tab !== 'models' && !getCredentialSectionVisibility(tab).enabled;
++export const shouldShowRangeControls = (tab: UsageTab) => tab !== 'routing' && tab !== 'realtime' && tab !== 'ranking' && tab !== 'settings' && tab !== 'models' && !getCredentialSectionVisibility(tab).enabled;
  
  export const shouldShowApiKeyFilter = (tab: UsageTab) => tab === 'realtime' || shouldShowRangeControls(tab);
  
-@@ -1009,7 +1011,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -966,7 +968,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
  
    const tabOptions = useMemo(
      () => getUsageTabOptions(t, { includeRanking: !isEmbeddedInCPAMC }),
@@ -421,7 +421,7 @@ index 0ee607c3..69b78ca1 100644
    );
    const apiKeySelectOptions = useMemo(
      () => [
-@@ -1749,6 +1751,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -1577,6 +1579,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
    }, [onAuthRequired, requestLogAccessEnabled, showTopNotice, t]);
  
    const refreshActiveTabData = useCallback(async () => {
@@ -429,7 +429,7 @@ index 0ee607c3..69b78ca1 100644
      if (!apiKeyFilterReady && shouldShowApiKeyFilter(activeTab)) return;
      if (activeTab === 'realtime') {
        await loadRealtime((response) => {
-@@ -2215,6 +2218,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2018,6 +2021,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
                autoRefreshControl={autoRefreshControl}
              />}
  
@@ -478,24 +478,22 @@ index 00000000..2834d543
 + } finally { await act(async () => root.unmount()); container.remove() }
 +})
 diff --git a/web/src/pages/test/UsagePage.logic.test.ts b/web/src/pages/test/UsagePage.logic.test.ts
-index 22453e44..9b3e30f7 100644
+index d10c81ee..f6c3d6b2 100644
 --- a/web/src/pages/test/UsagePage.logic.test.ts
 +++ b/web/src/pages/test/UsagePage.logic.test.ts
-@@ -822,9 +822,10 @@ describe('UsagePage tab labels', () => {
-     expect(labels).toEqual([
-       'translated:usage_stats.tab_overview',
-       'translated:usage_stats.tab_realtime',
+@@ -752,6 +752,7 @@ describe('UsagePage tab labels', () => {
        'translated:usage_stats.tab_analysis',
        'translated:usage_stats.tab_ranking',
        'translated:usage_stats.tab_events',
 +      'translated:usage_stats.tab_routing',
        'translated:usage_stats.tab_credentials',
        'translated:usage_stats.tab_ai_provider',
-       'translated:usage_stats.tab_settings',
+       'translated:usage_stats.tab_models',
 diff --git a/web/src/test/AppUsageNavigation.test.ts b/web/src/test/AppUsageNavigation.test.ts
+index 057ed61e..1a33fe6a 100644
 --- a/web/src/test/AppUsageNavigation.test.ts
 +++ b/web/src/test/AppUsageNavigation.test.ts
-@@ -2,6 +2,15 @@
+@@ -2,6 +2,15 @@ import { describe, expect, it } from 'vitest';
  import { getRoleHomePath, getRoleTargetPath, shouldNormalizeRolePath } from '../App';
  
  describe('App usage-page route authorization', () => {

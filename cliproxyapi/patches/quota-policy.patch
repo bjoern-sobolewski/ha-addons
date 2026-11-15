@@ -148,7 +148,7 @@ index 00000000..216e2f56
 +	}
 +}
 diff --git a/internal/api/server.go b/internal/api/server.go
-index 099b5dda..b1c8e7e2 100644
+index dab13afa..dca66925 100644
 --- a/internal/api/server.go
 +++ b/internal/api/server.go
 @@ -9,9 +9,11 @@ import (
@@ -163,7 +163,7 @@ index 099b5dda..b1c8e7e2 100644
  	"strings"
  	"sync"
  	"sync/atomic"
-@@ -220,6 +222,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
+@@ -248,6 +250,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
  	auth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
  	applySignatureCacheConfig(nil, cfg)
  	applyClaudeToolSearchConfig(cfg)
@@ -177,7 +177,7 @@ index 099b5dda..b1c8e7e2 100644
  	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
  	s.mgmt.SetPluginHost(optionState.pluginHost)
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index a2aa3912..c5139fa2 100644
+index f42661f4..6846537a 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
 @@ -27,6 +27,8 @@ func (s *Server) registerManagementV8Routes() {
@@ -674,7 +674,7 @@ index 00000000..9bb9af00
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
-index 5dd1ac5e..faa656b9 100644
+index 2407f8bc..382189c9 100644
 --- a/internal/runtime/executor/codex_websockets_duplex.go
 +++ b/internal/runtime/executor/codex_websockets_duplex.go
 @@ -10,6 +10,7 @@ import (
@@ -683,9 +683,9 @@ index 5dd1ac5e..faa656b9 100644
  	"sync"
 +	"time"
  
+ 	"github.com/MoeForge/moego/ojson"
  	"github.com/gorilla/websocket"
- 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
-@@ -294,8 +295,21 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -356,8 +357,21 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  			}
  			return payload, curHeaders, true, true
  		}
@@ -707,9 +707,9 @@ index 5dd1ac5e..faa656b9 100644
  			if allowed, keepOpen := authorizePayload(payload, false); !allowed {
  				return keepOpen
  			}
-@@ -455,6 +469,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -698,6 +712,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  				}
- 				switch gjson.GetBytes(payload, "type").String() {
+ 				switch ojson.GetBytesNoCopy(payload, "type").String() {
  				case "response.steer":
 +					if !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
 +						if !rejectQuotaPolicy() {
@@ -720,7 +720,7 @@ index 5dd1ac5e..faa656b9 100644
  					if allowed, keepOpen := authorizePayload(payload, true); !allowed {
  						if !keepOpen {
  							return
-@@ -523,6 +543,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -778,6 +798,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  					continue
  
  				case "response.create", "response.append":
@@ -854,10 +854,10 @@ index 00000000..837f20e2
 +	}
 +}
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
-index 3cbdd20b..f2fa2a0e 100644
+index f28526ca..cdc24690 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket.go
-@@ -511,6 +511,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -613,6 +613,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  		pinnedAuthID = ""
  	}
  
@@ -865,7 +865,7 @@ index 3cbdd20b..f2fa2a0e 100644
  	for {
  		var msgType int
  		var payload []byte
-@@ -607,6 +608,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -710,6 +711,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  		isPluginExecutorRoute := pluginExecutorID != ""
  		if pinnedAuthID != "" {
  			pinnedAuth, homeRuntime, ok := sessionAuthByIDWithSource(pinnedAuthID)
@@ -879,7 +879,7 @@ index 3cbdd20b..f2fa2a0e 100644
  			providerKey := ""
  			if pinnedAuth != nil {
  				providerKey = strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
-@@ -622,6 +630,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -725,6 +733,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  				for providerKey := range providerSet {
  					state, ok := pinnedAuthByProvider[providerKey]
  					candidateAuth, homeRuntime, okAuth := sessionAuthByIDWithSource(state.authID)
@@ -893,7 +893,7 @@ index 3cbdd20b..f2fa2a0e 100644
  					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime) {
  						pinnedAuthID = state.authID
  					} else {
-@@ -1179,3 +1194,9 @@ func writeResponsesWebsocketPreviousResponseNotFound(writer *responsesWebsocketW
+@@ -1325,3 +1340,9 @@ func writeResponsesWebsocketPreviousResponseNotFound(writer *responsesWebsocketW
  	}
  	return writeResponsesWebsocketPayload(writer, wsTimelineLog, errorPayload, time.Now())
  }
@@ -904,20 +904,18 @@ index 3cbdd20b..f2fa2a0e 100644
 +	return writeResponsesWebsocketPayload(writer, timeline, payload, time.Now())
 +}
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_session.go b/sdk/api/handlers/openai/openai_responses_websocket_session.go
-index 9fde5f8d..7a5a0aae 100644
+index dbb7d475..d42bf703 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_session.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_session.go
-@@ -208,7 +208,7 @@ func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
+@@ -216,5 +216,5 @@ func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
  }
  
  func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {
--	if auth == nil {
-+	if auth == nil || !coreauth.QuotaPolicyAllows(auth, now) {
- 		return false
- 	}
- 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+-	return coreauth.IsAuthAvailableForModel(auth, modelName, now)
++	return coreauth.QuotaPolicyAllows(auth, now) && coreauth.IsAuthAvailableForModel(auth, modelName, now)
+ }
 diff --git a/sdk/cliproxy/auth/conductor_selection.go b/sdk/cliproxy/auth/conductor_selection.go
-index bf1bbc57..246f0963 100644
+index 867bfa35..a5111dfe 100644
 --- a/sdk/cliproxy/auth/conductor_selection.go
 +++ b/sdk/cliproxy/auth/conductor_selection.go
 @@ -115,7 +115,7 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
@@ -929,7 +927,7 @@ index bf1bbc57..246f0963 100644
  		return false
  	}
  	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
-@@ -525,6 +525,9 @@ func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Aut
+@@ -826,6 +826,9 @@ func (m *Manager) LookupSessionAffinity(provider, model, sessionID string) (*Aut
  		return nil, "unbound"
  	}
  	snapshot.EnsureIndex()
@@ -939,7 +937,7 @@ index bf1bbc57..246f0963 100644
  	return snapshot, "bound"
  }
  
-@@ -572,6 +575,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
+@@ -877,6 +880,9 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
  	unauthorizedCount := 0
  	var earliest time.Time
  	for _, candidate := range auths {
@@ -947,7 +945,7 @@ index bf1bbc57..246f0963 100644
 +			continue
 +		}
  		checkModel := m.selectionModelForAuth(candidate, routeModel)
- 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
+ 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...)
  		if !blocked {
 diff --git a/sdk/cliproxy/auth/quota_policy.go b/sdk/cliproxy/auth/quota_policy.go
 new file mode 100644
@@ -1070,23 +1068,23 @@ index 00000000..3c751c3e
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/selector.go b/sdk/cliproxy/auth/selector.go
-index 1f991e5d..3e28c38a 100644
+index efce8290..547dba4c 100644
 --- a/sdk/cliproxy/auth/selector.go
 +++ b/sdk/cliproxy/auth/selector.go
-@@ -470,6 +470,9 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
+@@ -923,6 +923,9 @@ func collectAvailableByPriorityForRequest(ctx context.Context, auths []*Auth, mo
  	available = make(map[int][]*Auth)
  	for i := 0; i < len(auths); i++ {
  		candidate := auths[i]
 +		if !QuotaPolicyAllows(candidate, now) {
 +			continue
 +		}
- 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
+ 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, model, now, clientHeaders...)
  		if !blocked {
  			priority := authPriority(candidate)
-@@ -970,7 +973,7 @@ func shouldRebindSessionAffinityOnError(err *Error) bool {
+@@ -1473,7 +1476,7 @@ func isAuthBlockedByQuotaOrAuthForModel(auth *Auth, model string, now time.Time)
  }
  
- func isAuthBlockedByQuotaOrAuthForModel(auth *Auth, model string, now time.Time) bool {
+ func isAuthBlockedByQuotaOrAuthForModelForRequest(ctx context.Context, auth *Auth, model string, now time.Time, clientHeaders ...http.Header) bool {
 -	if auth == nil {
 +	if auth == nil || !QuotaPolicyAllows(auth, now) {
  		return true

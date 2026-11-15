@@ -304,6 +304,14 @@ def main():
             assert request(keys_route, headers={'X-CPA-Usage-Keeper-Request':'fetch'}, body={}, opener=read_only_opener)[0] == 404
             print('PASS: read-only key dropdown metadata, selected/all/unknown scopes and role isolation', flush=True)
             print('PASS: native all-key dashboard APIs/pages, account data filtering and role/write isolation', flush=True)
+            assert request(keeper + '/api/v1/models', opener=opener)[0] == 200
+            direct_viewer = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            assert request(keeper + '/api/v1/auth/api-key-login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'apiKey': key}, opener=direct_viewer)[0] == 204
+            for restricted in (direct_viewer, direct_read_only):
+                assert request(keeper + '/api/v1/models', opener=restricted)[0] == 403
+            for restricted in (viewer_opener, read_only_opener):
+                assert request(viewer_gateway + viewer_path + '/api/v1/models', opener=restricted)[0] == 404
+            print('PASS: native model catalog retains administrator and gateway boundaries', flush=True)
             print('PASS: read-only all-key reports, secret filtering, client-key separation and server/gateway write denial', flush=True)
             # Exercise the same persisted client-key setting as the management UI.
             management_auth = {'Authorization': 'Bearer ' + management}
@@ -319,6 +327,7 @@ def main():
             # Clear stale HA keys after switching to management ownership.
             (temp / 'cpa.json').write_text(json.dumps({'api_key_source': 'management_ui', 'api_keys': [], 'management_key': management}))
             docker('cp', str(temp / 'cpa.json'), names['cpa'] + ':/data/options.json')
+            docker('exec', names['cpa'], 'test', '-s', '/data/auth/kv.db')
             docker('exec', names['cpa'], 'sh', '-c', 'echo test > /data/auth/persistence-marker')
             # Linux Docker cp can leave fixture ownership from the host user.
             # Startup must regenerate configs safely regardless of this owner.
@@ -334,6 +343,7 @@ def main():
             assert json.loads(request(private + '/v8/management/access/api-key-names', management_auth)[1])['names'][fingerprint] == 'Shared Team ✓'
             assert int(docker('exec', names['keeper'], 'python3', '-c', query)) >= count
             assert docker('exec', names['cpa'], 'cat', '/data/auth/persistence-marker') == 'test'
+            docker('exec', names['cpa'], 'test', '-s', '/data/auth/kv.db')
             viewer_gateway = endpoint(names['keeper'], 8082)
             assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=read_only_opener)[0] == 200
             assert 'Shared Team' in request(viewer_gateway + viewer_path + '/api/v1/read-only/keys', opener=read_only_opener)[1].decode()

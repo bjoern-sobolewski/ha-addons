@@ -102,7 +102,7 @@ index 00000000..5cf482d6
 +	}
 +}
 diff --git a/internal/api/router.go b/internal/api/router.go
-index 78f8a103..b1139203 100644
+index 2f215168..cd9de6ea 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
 @@ -52,6 +52,7 @@ type StatusRouteConfig struct {
@@ -110,10 +110,10 @@ index 78f8a103..b1139203 100644
  
  type OptionalProviders struct {
 +	QuotaPolicies      QuotaPolicyProvider
- 	Live               *live.Hub
- 	Ranking            rankinghttpapi.Provider
- 	LocalRanking       rankinghttpapi.LocalProvider
-@@ -179,6 +180,9 @@ func NewRouter(
+ 	Live *live.Hub
+ 	Ranking rankinghttpapi.Provider
+ 	LocalRanking rankinghttpapi.LocalProvider
+@@ -189,6 +190,9 @@ func NewRouter(
  	registerCredentialManagementRoutes(adminProtected, credentialsProvider)
  	registerCredentialStatusRoutes(adminProtected, credentialStatusProvider)
  	registerCredentialPriorityRoutes(adminProtected, credentialPriorityProvider)
@@ -124,17 +124,17 @@ index 78f8a103..b1139203 100644
  	registerCPAAPIKeyRoutes(adminProtected, cpaAPIKeyProvider, usageProvider)
  	registerPricingRoutes(adminProtected, pricingProvider)
 diff --git a/internal/app/app.go b/internal/app/app.go
-index 1d8415fc..2283b3dd 100644
+index 0dc86c9d..240ff7cc 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
-@@ -307,6 +307,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+@@ -309,6 +309,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  			authHandler,
  			cfg.AppBasePath,
  			api.OptionalProviders{
 +				QuotaPolicies: cpaClient,
- 				Live:          liveHub,
- 				UsageIdentity: usageIdentityService,
- 				CostReadGate:  costReadGate,
+ 				Live: liveHub,
+ 				UsageIdentity:          usageIdentityService,
+ 				CostReadGate:           costReadGate,
 diff --git a/internal/cpa/quota_policy.go b/internal/cpa/quota_policy.go
 new file mode 100644
 index 00000000..585fb3bb
@@ -214,7 +214,7 @@ index 4f7cbfba..83200af6 100644
            <div className={styles.tabs} role="tablist" aria-label={t('usage_stats.credentials_detail_tabs')}>
              <button
 diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
-index e3a2ab97..d29ff7a2 100644
+index 7c09ba94..6f439caf 100644
 --- a/web/src/components/usage/credentials/CredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/CredentialsSection.tsx
 @@ -22,6 +22,7 @@ import { CredentialHealthPanel } from './CredentialHealthPanel'
@@ -225,7 +225,7 @@ index e3a2ab97..d29ff7a2 100644
  import { CredentialPriorityEditor } from './CredentialPriorityEditor'
  import { ProviderBrandIcon, providerBrandIconKey } from '@/components/ProviderBrandIcon'
  import { CredentialStatusToggle } from './CredentialStatusToggle'
-@@ -341,7 +342,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+@@ -343,7 +344,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
                </>
              )}
              health={<CredentialHealthPanel variant="compact" showCompactMeta displayName={row.displayName} health={row.credentialHealth} lastUsedAt={row.identity.last_used_at} windowCacheReadRate={row.windowCacheReadRate} />}

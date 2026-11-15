@@ -517,7 +517,7 @@ index 00000000..8ef1b0f7
 +	}
 +}
 diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
-index ad953615..2d43b18e 100644
+index 5596bbf2..1803c748 100644
 --- a/web/src/components/usage/credentials/CredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/CredentialsSection.tsx
 @@ -6,7 +6,7 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner'
@@ -537,7 +537,7 @@ index ad953615..2d43b18e 100644
  
  type Translate = (key: string, options?: Record<string, string>) => string
  type InspectionIndicatorTone = 'idle' | 'running' | 'completed'
-@@ -135,6 +136,7 @@ interface CredentialsSectionProps {
+@@ -137,6 +138,7 @@ interface CredentialsSectionProps {
  export function CredentialsSection({ reportingOnly = false, rows, timeZone, total, page, totalPages, pageSize, activeOnly, sort, loading, quotaRefreshing, quotaRefreshError, quotaInspectionStatus, quotaInspectionLoading, quotaInspectionStarting, quotaInspectionError, onPageChange, onPageSizeChange, onActiveOnlyChange, onSortChange, onRefreshQuota, onRefreshQuotaForAuthIndex, onResetQuotaForAuthIndex, editFallbackRef, onEdit, onOpenDetails, statusPendingIdentityIds, onToggleStatus, onSavePriority, onRefreshInspectionStatus, onStartInspection, onAfterInvalidAccountAction }: CredentialsSectionProps) {
    const { t } = useTranslation()
    const [inspectionOpen, setInspectionOpen] = useState(false)
@@ -545,7 +545,7 @@ index ad953615..2d43b18e 100644
    const [quotaUsageMode, setQuotaUsageMode] = useState<QuotaUsageMode>('current')
    const [expiryTooltip, setExpiryTooltip] = useState<CredentialExpiryTooltipState | null>(null)
    const expiryTooltipHoverTargetRef = useRef<CredentialExpiryTooltipTarget | null>(null)
-@@ -198,6 +200,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+@@ -200,6 +202,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
  
    return (
      <>
@@ -553,7 +553,7 @@ index ad953615..2d43b18e 100644
        <CredentialSectionShell
          title={t('usage_stats.credentials_title')}
          subtitle={reportingOnly ? '' : t('usage_stats.credentials_subtitle')}
-@@ -215,6 +218,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+@@ -217,6 +220,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
          )}
          actions={!reportingOnly && (
            <div className={styles.credentialSectionActionButtons}>
@@ -813,10 +813,10 @@ index 31f0fd60..8ef174fe 100644
 + expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({provider:'claude'})
 +})
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index b17a8e56..885f9a8e 100644
+index 5a127c8f..599a8c0a 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
-@@ -1199,13 +1199,26 @@ export async function fetchReadOnlyReport<T>(path: string, params = new URLSearc
+@@ -1233,13 +1233,26 @@ export async function fetchReadOnlyReport<T>(path: string, params = new URLSearc
   if(!response.ok) await parseApiError(response,'Unable to load reporting data');return response.json();
  }
  

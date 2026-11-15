@@ -2,9 +2,9 @@ FROM alpine:3.20 AS source
 RUN apk add --no-cache git
 WORKDIR /src
 RUN git init && git remote add origin https://github.com/router-for-me/CLIProxyAPI.git \
-    && git fetch --depth 1 origin be2563ff74a40979a9aadc59d0b24cedc6ba2e81 \
+    && git fetch --depth 1 origin e96d4c4818851cf0e96d27b2bc8b67379e449d9e \
     && git checkout --detach FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = be2563ff74a40979a9aadc59d0b24cedc6ba2e81
+    && test "$(git rev-parse HEAD)" = e96d4c4818851cf0e96d27b2bc8b67379e449d9e
 COPY patches/quota-traffic.patch /tmp/quota-traffic.patch
 RUN git apply --check /tmp/quota-traffic.patch && git apply /tmp/quota-traffic.patch
 COPY patches/key-names.patch /tmp/key-names.patch
@@ -19,8 +19,6 @@ COPY patches/session-cache-test.patch /tmp/session-cache-test.patch
 RUN git apply --check /tmp/session-cache-test.patch && git apply /tmp/session-cache-test.patch
 COPY patches/upstream-service-tier.patch /tmp/upstream-service-tier.patch
 RUN git apply --check /tmp/upstream-service-tier.patch && git apply /tmp/upstream-service-tier.patch
-COPY patches/interrupt-test-sync.patch /tmp/interrupt-test-sync.patch
-RUN git apply --check /tmp/interrupt-test-sync.patch && git apply /tmp/interrupt-test-sync.patch
 COPY patches/upstream-compatibility.patch /tmp/upstream-compatibility.patch
 RUN git apply --check /tmp/upstream-compatibility.patch && git apply /tmp/upstream-compatibility.patch
 COPY patches/oversized-codex-http.patch /tmp/oversized-codex-http.patch
@@ -33,8 +31,6 @@ COPY patches/live-stats.patch /tmp/live-stats.patch
 RUN git apply --check /tmp/live-stats.patch && git apply /tmp/live-stats.patch
 COPY patches/shared-quota-reset.patch /tmp/shared-quota-reset.patch
 RUN git apply --check /tmp/shared-quota-reset.patch && git apply /tmp/shared-quota-reset.patch
-COPY patches/websocket-test-sync.patch /tmp/websocket-test-sync.patch
-RUN git apply --check /tmp/websocket-test-sync.patch && git apply /tmp/websocket-test-sync.patch
 COPY patches/quota-observation-compat.patch /tmp/quota-observation-compat.patch
 RUN git apply --check /tmp/quota-observation-compat.patch && git apply /tmp/quota-observation-compat.patch
 COPY patches/quota-policy.patch /tmp/quota-policy.patch
@@ -66,6 +62,9 @@ RUN git apply --check /tmp/codex-desktop-voice.patch && git apply /tmp/codex-des
 COPY patches/model-whitelist.patch /tmp/model-whitelist.patch
 RUN git apply --check /tmp/model-whitelist.patch && git apply /tmp/model-whitelist.patch
 
+COPY patches/cpa-upstream-compatibility.patch /tmp/cpa-upstream-compatibility.patch
+RUN git apply --check /tmp/cpa-upstream-compatibility.patch && git apply /tmp/cpa-upstream-compatibility.patch
+
 FROM golang:1.26-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
@@ -74,19 +73,19 @@ RUN go mod download
 COPY --from=source /src/ ./
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/client/codex/live ./internal/api/middleware ./internal/translator/codex/openai/responses
 RUN --mount=type=cache,target=/root/.cache/go-build go vet ./internal/client/codex/live
-RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/promptpreview ./internal/routinglive ./internal/sessionrebalance ./internal/live ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
+RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/config ./internal/kvstore ./internal/promptpreview ./internal/routinglive ./internal/sessionrebalance ./internal/live ./internal/quotatraffic ./internal/logging ./internal/refreshdiagnostic ./internal/auth/codex ./sdk/cliproxy/auth ./internal/runtime/executor/helps ./internal/api/handlers/management
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/redisqueue ./sdk/cliproxy/usage ./internal/runtime/executor -run "TestCodex|TestUsageQueue"
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/api/handlers/openai
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./internal/api ./sdk/api/handlers -run 'TestManagementV8|TestRoutingActivity'
 RUN --mount=type=cache,target=/root/.cache/go-build go test ./sdk/cliproxy -run TestAccountWhitelistModelRegistration
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.51-main.be2563f-ha.17" -o /out/CLIProxyAPI ./cmd/server
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -buildvcs=false -ldflags="-s -w -X main.Version=8.0.72-ha.18" -o /out/CLIProxyAPI ./cmd/server
 FROM alpine:3.20 AS panel-source
 RUN apk add --no-cache git
 WORKDIR /src
 RUN git init && git remote add origin https://github.com/router-for-me/Cli-Proxy-API-Management-Center.git \
-    && git fetch --depth 1 origin f154fa9380825c4fe94bc577a9abaa7e505f8875 \
+    && git fetch --depth 1 origin 3d893ec88938c3ceef200a15be6af8cf972564b3 \
     && git checkout --detach FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = f154fa9380825c4fe94bc577a9abaa7e505f8875
+    && test "$(git rev-parse HEAD)" = 3d893ec88938c3ceef200a15be6af8cf972564b3
 COPY patches/cpamc-ha-integration.patch /tmp/cpamc-ha-integration.patch
 RUN git apply --check /tmp/cpamc-ha-integration.patch && git apply /tmp/cpamc-ha-integration.patch
 COPY patches/cpamc-live-stats.patch /tmp/cpamc-live-stats.patch
@@ -101,13 +100,15 @@ COPY patches/cpamc-quota-tooltip.patch /tmp/cpamc-quota-tooltip.patch
 RUN git apply --check /tmp/cpamc-quota-tooltip.patch && git apply /tmp/cpamc-quota-tooltip.patch
 COPY patches/cpamc-model-whitelist.patch /tmp/cpamc-model-whitelist.patch
 RUN git apply --check /tmp/cpamc-model-whitelist.patch && git apply /tmp/cpamc-model-whitelist.patch
+COPY patches/cpamc-upstream-compatibility.patch /tmp/cpamc-upstream-compatibility.patch
+RUN git apply --check /tmp/cpamc-upstream-compatibility.patch && git apply /tmp/cpamc-upstream-compatibility.patch
 FROM node:24-alpine AS panel-builder
 WORKDIR /src
 COPY --from=panel-source /src/package.json /src/bun.lock ./
 RUN npx --yes --package=bun@1.4.3 bun install --frozen-lockfile
 COPY --from=panel-source /src/ ./
 RUN npx --yes --package=bun@1.4.3 bun run verify
-FROM eceasy/cli-proxy-api:v8.0.51@sha256:15d13889e1a39a688be306dfbf2f6cf9003e99cd913b5070fa463f8ab2aa0031
+FROM eceasy/cli-proxy-api:v8.0.72@sha256:7cac48fd7f3ac0b7b6b73508d92179e29454087d9af81eb9a5c9fb50cdd87bc8
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-yaml nginx-light ffmpeg \
@@ -119,7 +120,7 @@ COPY run.sh bootstrap.py nginx.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 WORKDIR /data
 EXPOSE 8080 8317
-ARG BUILD_VERSION=0.1.32
+ARG BUILD_VERSION=0.1.34
 LABEL io.hass.name="CLIProxyAPI" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

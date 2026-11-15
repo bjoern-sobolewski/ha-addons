@@ -50,10 +50,10 @@ index 8379fab6..5898b0da 100644
  }
  
 diff --git a/internal/api/router.go b/internal/api/router.go
-index b1139203..cd5fe1c4 100644
+index cd9de6ea..11aa508c 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
-@@ -182,6 +182,7 @@ func NewRouter(
+@@ -192,6 +192,7 @@ func NewRouter(
  	registerCredentialPriorityRoutes(adminProtected, credentialPriorityProvider)
  	if len(optionalProviders) > 0 {
  		registerQuotaPolicyRoutes(adminProtected, optionalProviders[0].QuotaPolicies, optionalProviders[0].Live)
@@ -377,20 +377,20 @@ index c0cf2bd1..f0fb92d1 100644
          </div>,
          document.body,
 diff --git a/web/src/components/usage/credentials/CredentialSections.module.scss b/web/src/components/usage/credentials/CredentialSections.module.scss
-index 9f862e25..060e6813 100644
+index 4f2f6501..54394d3f 100644
 --- a/web/src/components/usage/credentials/CredentialSections.module.scss
 +++ b/web/src/components/usage/credentials/CredentialSections.module.scss
-@@ -3790,3 +3790,5 @@ $credential-provider-icon-size: 30px;
+@@ -3796,3 +3796,5 @@ $credential-health-tooltip-border-width: 1px;
  .credentialUsageLegend {display: flex;gap: 10px;font-size: 10px;font-variant-numeric: tabular-nums;line-height: 1.25;}
  .credentialUsagePeak {margin-left: auto;color: var(--text-tertiary);}
  @media(prefers-reduced-motion: reduce) {.credentialUsageStack,.credentialUsageSuccess,.credentialUsageFailure {transition: none;}}
 +
 +.credentialPrioritySave { width: auto; min-height: 30px; height: auto; padding: 4px 8px; font-size: 12px; white-space: normal; }
 diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
-index d29ff7a2..8982631c 100644
+index 6f439caf..8ba00090 100644
 --- a/web/src/components/usage/credentials/CredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/CredentialsSection.tsx
-@@ -130,7 +130,7 @@ interface CredentialsSectionProps {
+@@ -132,7 +132,7 @@ interface CredentialsSectionProps {
    /** 正在写入上游状态的 Keeper identity id 集合，用于阻止重复点击。 */
    statusPendingIdentityIds?: ReadonlySet<string>
    onToggleStatus?: (identityId: string, authIndex: string, disabled: boolean) => void
@@ -399,7 +399,7 @@ index d29ff7a2..8982631c 100644
    onRefreshInspectionStatus: () => Promise<void>
    onStartInspection: () => Promise<void>
    onAfterInvalidAccountAction?: () => Promise<void>
-@@ -328,7 +328,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+@@ -330,7 +330,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
                    priority={row.identity.priority}
                    displayName={row.displayName}
                    readOnly={reportingOnly || row.identity.is_deleted}
@@ -652,10 +652,10 @@ index c9f91edb..22d26604 100644
    const saveCredentialField = useCallback(async (kind: CredentialStatusKind, id: string, authIndex: string, change: CredentialEditChange) => {
      try {
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index aa594281..537d14b5 100644
+index 059912c1..aa15d447 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
-@@ -956,15 +956,17 @@ export async function setCredentialDisabled(kind: CredentialStatusKind, authInde
+@@ -976,15 +976,17 @@ export async function setCredentialDisabled(kind: CredentialStatusKind, authInde
  }
  
  export interface CredentialPriorityResponse {
@@ -697,7 +697,7 @@ index 70483f7f..fb241595 100644
        }
      }
 diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
-index eebd1790..0ee607c3 100644
+index b28357fa..5a301565 100644
 --- a/web/src/pages/UsagePage.tsx
 +++ b/web/src/pages/UsagePage.tsx
 @@ -1,5 +1,6 @@
@@ -707,7 +707,7 @@ index eebd1790..0ee607c3 100644
  import { CredentialEditModal } from '@/components/usage/credentials/CredentialEditModal';
  import { UsageComparisonCharts } from '@/components/usage/UsageComparisonCharts';
  import type { ModelSpeedRefreshSignal } from '@/components/usage/model-speed/modelSpeedAnimation';
-@@ -2328,7 +2329,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -2136,7 +2137,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
  
              {credentialSectionVisibility.enabled && (
                <>

@@ -1027,7 +1027,7 @@ index 2430b6ca..38f47ff6 100644
  		})
  	}
 diff --git a/internal/quota/types.go b/internal/quota/types.go
-index fe404e4f..42440652 100644
+index 058a9517..fe443e69 100644
 --- a/internal/quota/types.go
 +++ b/internal/quota/types.go
 @@ -18,7 +18,8 @@ type ManagementClient interface {
@@ -1272,7 +1272,7 @@ index 70b83a85..ffb478a8 100644
      <span
        style={{
 diff --git a/web/src/components/usage/RequestEventsDetailsCard.tsx b/web/src/components/usage/RequestEventsDetailsCard.tsx
-index 6ae73a71..89479848 100644
+index cb2cea89..17d00910 100644
 --- a/web/src/components/usage/RequestEventsDetailsCard.tsx
 +++ b/web/src/components/usage/RequestEventsDetailsCard.tsx
 @@ -1,3 +1,4 @@
@@ -1280,7 +1280,7 @@ index 6ae73a71..89479848 100644
  import React, {
    useCallback,
    useEffect,
-@@ -422,14 +423,11 @@ const toNumber = (value: unknown): number => {
+@@ -427,14 +428,11 @@ const toNumber = (value: unknown): number => {
    return parsed;
  };
  
@@ -1450,7 +1450,7 @@ index b0916085..cc713cc1 100644
  export function CredentialErrorEventsList({
    events,
 diff --git a/web/src/components/usage/credentials/CredentialHealthPanel.tsx b/web/src/components/usage/credentials/CredentialHealthPanel.tsx
-index 178efe4e..a78600ca 100644
+index 0159924e..ad0ce3a9 100644
 --- a/web/src/components/usage/credentials/CredentialHealthPanel.tsx
 +++ b/web/src/components/usage/credentials/CredentialHealthPanel.tsx
 @@ -1,3 +1,4 @@
@@ -1458,7 +1458,7 @@ index 178efe4e..a78600ca 100644
  import { useMemo } from 'react'
  import { useTranslation } from 'react-i18next'
  import type { UsageCredentialHealth } from '@/lib/types'
-@@ -398,52 +399,15 @@ function safeCount(value: number): number {
+@@ -403,52 +404,15 @@ function safeCount(value: number): number {
  }
  
  function formatHealthTime(date: Date): string {
@@ -1572,7 +1572,7 @@ index 7da6a7df..eab85b13 100644
    // TanStack Virtual 依赖内部可变测量状态，不参与 React Compiler 自动记忆化。
    // eslint-disable-next-line react-hooks/incompatible-library
 diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
-index 2d43b18e..e3a2ab97 100644
+index 1803c748..7c09ba94 100644
 --- a/web/src/components/usage/credentials/CredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/CredentialsSection.tsx
 @@ -1,3 +1,5 @@
@@ -1581,7 +1581,7 @@ index 2d43b18e..e3a2ab97 100644
  import { useCallback, useEffect, useId, useRef, useState, type Ref } from 'react'
  import { createPortal } from 'react-dom'
  import { useTranslation } from 'react-i18next'
-@@ -746,23 +748,8 @@ function ClaudeResetDetails({ details, failed, message, disabled, groupName, onS
+@@ -748,23 +750,8 @@ function ClaudeResetDetails({ details, failed, message, disabled, groupName, onS
    )
  }
  
@@ -1606,7 +1606,7 @@ index 2d43b18e..e3a2ab97 100644
  }
  
  function isRowRefreshing(row: CredentialRow): boolean {
-@@ -1621,7 +1608,7 @@ export function formatInspectionCompletedAt(value: string | undefined): string {
+@@ -1623,7 +1610,7 @@ export function formatInspectionCompletedAt(value: string | undefined): string {
    if (Number.isNaN(date.getTime())) {
      return ''
    }
@@ -1615,7 +1615,7 @@ index 2d43b18e..e3a2ab97 100644
  }
  
  function formatInspectionDate(value: string | undefined): string {
-@@ -1928,32 +1915,8 @@ function truncateQuotaErrorMessage(value: string): string {
+@@ -1930,32 +1917,8 @@ function truncateQuotaErrorMessage(value: string): string {
    return `${value.slice(0, QUOTA_ERROR_MESSAGE_MAX_LENGTH).trimEnd()}...`
  }
  
@@ -1650,7 +1650,7 @@ index 2d43b18e..e3a2ab97 100644
  }
  
  export function formatQuotaResetDuration(resetAt: string): string {
-@@ -2049,7 +2012,7 @@ function QuotaResetCountdown({ duration, resetLabel }: { duration: string; reset
+@@ -2051,7 +2014,7 @@ function QuotaResetCountdown({ duration, resetLabel }: { duration: string; reset
    const tooltipId = useId()
    const anchorRef = useRef<HTMLButtonElement>(null)
    const { tooltip, showOnMouseEnter, hideOnMouseLeave, showOnFocus, hideOnBlur, dismiss } = usePortalTooltip({ trackAnchor: true })
@@ -2025,7 +2025,7 @@ index d22d8a2b..c883baa6 100644
      expect(container.textContent).not.toContain('UTC-')
      fetchCodexQuotaHistory.mockResolvedValueOnce(fallbackResponse())
 diff --git a/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx b/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx
-index 7cce858e..ee6b922b 100644
+index 8496b706..50505821 100644
 --- a/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx
 +++ b/web/src/components/usage/credentials/test/CredentialCards.behavior.test.tsx
 @@ -1,3 +1,5 @@
@@ -2034,8 +2034,8 @@ index 7cce858e..ee6b922b 100644
  // @vitest-environment happy-dom
  
  import { act } from 'react'
-@@ -140,28 +142,28 @@ describe('credential compact card data', () => {
-     expect(container.textContent).toContain('Claude and GPT models explanation')
+@@ -243,28 +245,28 @@ describe('credential compact card data', () => {
+     expect(container.textContent).not.toContain('Argon')
    })
  
 -  it('refreshes the compact reset tooltip from the current snapshot in the project timezone', async () => {
@@ -2071,7 +2071,7 @@ index 7cce858e..ee6b922b 100644
    })
  })
 diff --git a/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx b/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx
-index 9188af8c..09d5ded1 100644
+index 4bb79ada..e9e2e593 100644
 --- a/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx
 +++ b/web/src/components/usage/credentials/test/CredentialHealthPanel.behavior.test.tsx
 @@ -1,3 +1,5 @@
@@ -2080,7 +2080,7 @@ index 9188af8c..09d5ded1 100644
  // @vitest-environment happy-dom
  
  import { act } from 'react'
-@@ -158,7 +160,7 @@ describe('CredentialHealthPanel health semantics', () => {
+@@ -157,7 +159,7 @@ describe('CredentialHealthPanel health semantics', () => {
      expect(quiet).toContain('usage_stats.credentials_health_summary_quiet')
      expect(quiet).toContain('0.0%')
      expect(quiet).toContain('—')
@@ -2089,7 +2089,7 @@ index 9188af8c..09d5ded1 100644
    })
  
    it('keeps the same ordered buckets and tooltip details in compact cards and the default full panel', () => {
-@@ -196,8 +198,8 @@ describe('CredentialHealthPanel health semantics', () => {
+@@ -195,8 +197,8 @@ describe('CredentialHealthPanel health semantics', () => {
      expect(bucketTooltips(compact)).toEqual(bucketTooltips(full))
      expect(full.textContent).toContain('Failed requests in 5h: 13 · latest 10:20 - 10:30')
      expect(full.textContent).toContain('37.50%')
@@ -2101,7 +2101,7 @@ index 9188af8c..09d5ded1 100644
  
    it('updates bucket details and accessible names when health data changes', async () => {
 diff --git a/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx b/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx
-index 6735c7c9..45086fbe 100644
+index ae0643e4..9c3d9ba4 100644
 --- a/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx
 +++ b/web/src/components/usage/credentials/test/CredentialHealthPanel.test.tsx
 @@ -1,3 +1,5 @@
@@ -2121,7 +2121,7 @@ index 6735c7c9..45086fbe 100644
      expect(html).not.toContain('>usage_stats.credentials_last_used<')
      expect(html).not.toContain('>usage_stats.credentials_stats_updated<')
      expect(html).toContain('Provider Key usage_stats.credentials_health_grid_aria')
-@@ -77,10 +79,10 @@ describe('CredentialHealthPanel', () => {
+@@ -77,11 +79,11 @@ describe('CredentialHealthPanel', () => {
      expect(html.match(/role="tooltip" aria-hidden="true"/g)).toHaveLength(30)
      expect(html).toContain('usage_stats.credentials_health_ok')
      expect(html).toContain('usage_stats.credentials_health_fail')
@@ -2135,6 +2135,7 @@ index 6735c7c9..45086fbe 100644
 +    expect(html).toContain('Failed requests in 5h: 1 · latest 02:10 - 02:20')
    })
  })
+ 
 diff --git a/web/src/components/usage/credentials/test/CredentialRequestEventsList.test.tsx b/web/src/components/usage/credentials/test/CredentialRequestEventsList.test.tsx
 index 77c5dcbb..80358c58 100644
 --- a/web/src/components/usage/credentials/test/CredentialRequestEventsList.test.tsx
@@ -2928,7 +2929,7 @@ index 15522e8f..1b64bb96 100644
      expect(html.match(new RegExp(sharedWindow, 'g'))).toHaveLength(1);
      expect(html.indexOf(sharedWindow)).toBeLessThan(html.indexOf('>Day</button>'));
 diff --git a/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
-index b3a13712..172b5217 100644
+index 583e2d59..77c4d72d 100644
 --- a/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
 +++ b/web/src/components/usage/test/RequestEventsDetailsCard.test.tsx
 @@ -1,3 +1,5 @@
@@ -2937,7 +2938,7 @@ index b3a13712..172b5217 100644
  import React from 'react';
  import { describe, expect, it } from 'vitest';
  import { renderToStaticMarkup } from 'react-dom/server';
-@@ -92,7 +94,7 @@ describe('RequestEventsDetailsCard', () => {
+@@ -94,7 +96,7 @@ describe('RequestEventsDetailsCard', () => {
  
    it('formats the API timestamp as compact numeric date and time', () => {
      const html = renderCard({ events: [{ ...events[0], timestamp: '2026-05-13T00:38:19+08:00' }] });
@@ -2946,7 +2947,7 @@ index b3a13712..172b5217 100644
    });
  
    it.each([undefined, 0])('keeps missing or zero TTFT %s visible within Latency', (ttft) => {
-@@ -241,7 +243,7 @@ describe('RequestEventsDetailsCard', () => {
+@@ -243,7 +245,7 @@ describe('RequestEventsDetailsCard', () => {
    ])('renders only the supplied column selection %j', (props) => {
      const html = renderCard(props);
      expect(tableValues(html)).toEqual({
@@ -3055,10 +3056,10 @@ index 9b4ae7b2..de5f1e2f 100644
 +  return new Intl.DateTimeFormat(browserDateLocale(), { dateStyle: 'medium', timeStyle: 'short' }).format(date);
  }
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index 8b55954f..decefdf0 100644
+index 3b44ef40..fdbc923d 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
-@@ -695,7 +695,7 @@ const resources = {
+@@ -712,7 +712,7 @@ const resources = {
          credentials_quota_reset_confirm: 'Reset',
          credentials_quota_reset_failed: 'Quota reset failed. Please try again later.',
          credentials_quota_reset_recovery_failed: 'Quota was reset, but CPA account recovery failed. Recover the account in CPA; do not reset quota again.',
@@ -3067,7 +3068,7 @@ index 8b55954f..decefdf0 100644
          credentials_quota_reset_expiry_loading: 'Loading expiry times...',
          credentials_quota_reset_expiry_item: 'Reset {{index}}',
          credentials_quota_reset_expiry_empty: 'No manual resets are currently available.',
-@@ -705,7 +705,7 @@ const resources = {
+@@ -722,7 +722,7 @@ const resources = {
          claude_reset_loading: 'Loading reset information...',
          claude_reset_grant: 'Grant {{index}}',
          claude_reset_grant_count: '{{left}} available',
@@ -3076,7 +3077,7 @@ index 8b55954f..decefdf0 100644
          claude_reset_no_expiry: 'No expiry provided',
          claude_reset_scope_unknown: 'Scope not provided',
          claude_reset_unknown: 'Could not confirm the reset result. Refresh and check quota before deciding whether to submit again.',
-@@ -1792,7 +1792,7 @@ const resources = {
+@@ -1827,7 +1827,7 @@ const resources = {
          credentials_quota_reset_confirm: '确认重置',
          credentials_quota_reset_failed: '重置限额失败，请稍后重试。',
          credentials_quota_reset_recovery_failed: '限额已重置，但 CPA 账号恢复失败。请在 CPA 中恢复账号，勿重复重置限额。',
@@ -3085,7 +3086,7 @@ index 8b55954f..decefdf0 100644
          credentials_quota_reset_expiry_loading: '正在获取过期时间…',
          credentials_quota_reset_expiry_item: '第 {{index}} 次',
          credentials_quota_reset_expiry_empty: '当前没有可用重置次数。',
-@@ -1802,7 +1802,7 @@ const resources = {
+@@ -1837,7 +1837,7 @@ const resources = {
          claude_reset_loading: '正在查询重置信息…',
          claude_reset_grant: '权益 {{index}}',
          claude_reset_grant_count: '可用 {{left}} 次',
@@ -3094,7 +3095,7 @@ index 8b55954f..decefdf0 100644
          claude_reset_no_expiry: '未提供到期时间',
          claude_reset_scope_unknown: '未提供范围',
          claude_reset_unknown: '无法确认重置结果，请先刷新并检查额度，再决定是否再次提交。',
-@@ -2888,7 +2888,7 @@ const resources = {
+@@ -2941,7 +2941,7 @@ const resources = {
          credentials_quota_reset_confirm: '確認重置',
          credentials_quota_reset_failed: '重置限額失敗，請稍後重試。',
          credentials_quota_reset_recovery_failed: '限額已重置，但 CPA 帳號恢復失敗。請在 CPA 中恢復帳號，勿重複重置限額。',
@@ -3103,7 +3104,7 @@ index 8b55954f..decefdf0 100644
          credentials_quota_reset_expiry_loading: '正在取得到期時間…',
          credentials_quota_reset_expiry_item: '第 {{index}} 次',
          credentials_quota_reset_expiry_empty: '目前沒有可用重置次數。',
-@@ -2898,7 +2898,7 @@ const resources = {
+@@ -2951,7 +2951,7 @@ const resources = {
          claude_reset_loading: '正在查詢重置資訊…',
          claude_reset_grant: '權益 {{index}}',
          claude_reset_grant_count: '可用 {{left}} 次',
@@ -3113,7 +3114,7 @@ index 8b55954f..decefdf0 100644
          claude_reset_scope_unknown: '未提供範圍',
          claude_reset_unknown: '無法確認重置結果，請先重新整理並檢查額度，再決定是否再次提交。',
 diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
-index 885f9a8e..aa594281 100644
+index 599a8c0a..059912c1 100644
 --- a/web/src/lib/api.ts
 +++ b/web/src/lib/api.ts
 @@ -1,3 +1,4 @@
@@ -3121,7 +3122,7 @@ index 885f9a8e..aa594281 100644
  import { type AnalysisLatencyDiagnostics, type AnalysisResponse, type CredentialsManagementResponse, type AuthManagedSessionsResponse, type AuthSessionResponse, type CodexQuotaHistoryResponse, type CpaApiKeyDisplayItem, type CpaApiKeyOptionsResponse, type CpaApiKeySettingsResponse, type CpaApiKeysResponse, type ErrorEventsResponse, type OverviewRealtimeBlock, type OverviewRealtimeWindow, type PricingSyncSource, type QuotaAutoRefreshSettings, type StatusResponse, type UpdateCheckResponse, type UsageActivityRequest, type UsageActivityResponse, type UsageEventModelFilterOptionsResponse, type UsageEventRequestLogResponse, type UsageEventSourceFilterOptionsResponse, type UsageRangeRequest, type UsageIdentitiesPageResponse, type UsageIdentitiesResponse, type UsageEventsResponse, type UsageIdentity, type UsageIdentityAuthType, type UsageOverviewComparisons, type UsageOverviewResponse, type UsageQuotaCacheResponse, type UsageQuotaInspectionStatusResponse, type UsageQuotaRefreshResponse, type UsageQuotaRefreshTaskResponse, type UsageQuotaResetCreditsResponse, type UsageQuotaResetResponse, type VersionResponse } from './types'
  import type { DeletePricingModelResponse, ModelPricingConfig, PricingErrorResponse, PricingFieldError, PricingModelOptionsResponse, PricingModelsResponse, PricingRecalculationOptions, PricingRecalculationTask, PricingSyncApplyRequest, PricingSyncApplyResponse, PricingSyncFetchResponse, SavePricingModelResponse, StartPricingRecalculationRequest, StartPricingRecalculationResponse } from './types'
  import { isCPAMCEmbed } from '@/embed/cpamcEmbed'
-@@ -857,19 +858,36 @@ export async function startUsageQuotaInspection(signal?: AbortSignal): Promise<U
+@@ -877,19 +878,36 @@ export async function startUsageQuotaInspection(signal?: AbortSignal): Promise<U
  }
  
  

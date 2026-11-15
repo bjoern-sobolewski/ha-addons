@@ -1,8 +1,8 @@
 diff --git a/internal/api/handlers/management/handler.go b/internal/api/handlers/management/handler.go
-index 7e8db2f7..2ba6eb27 100644
+index 40296eda..755a5bcb 100644
 --- a/internal/api/handlers/management/handler.go
 +++ b/internal/api/handlers/management/handler.go
-@@ -38,6 +38,12 @@ const attemptMaxIdleTime = 2 * time.Hour
+@@ -37,6 +37,12 @@ const attemptMaxIdleTime = 2 * time.Hour
  
  // Handler aggregates config reference, persistence path and helpers.
  type Handler struct {
@@ -917,7 +917,7 @@ index 00000000..15fdc744
 +	}
 +}
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index 892d97b4..a2aa3912 100644
+index 867b9cb1..f42661f4 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
 @@ -40,6 +40,8 @@ func (s *Server) registerManagementV8Routes() {

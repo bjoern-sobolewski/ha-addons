@@ -14,16 +14,21 @@ async function until(check, label, timeout=45000) {const end=Date.now()+timeout;
  page.on('response',r=>{if(r.url().includes('/api/v1/'))calls.push(r.url());});
  page.on('request',r=>{if(r.isNavigationRequest()&&r.frame()===page.mainFrame())documents++;});
  async function traffic() {const response=await fetch(f.api+'/v1/responses',{method:'POST',headers:{Authorization:'Bearer '+f.key,'Content-Type':'application/json'},body:JSON.stringify({model:'a/quota-test',input:'Reply briefly.',stream:false})});assert.equal(response.status,200);}
- for(const [route,endpoint] of [['overview','usage/overview?'],['realtime','usage/overview/realtime?'],['analysis','usage/analysis?'],['request-events','usage/events?'],['credentials','usage/identities/page?'],['ai-provider','usage/identities/page?']]) {
+ for(const [route,endpoint] of [['overview','usage/overview?'],['realtime','usage/overview/realtime?'],['analysis','usage/analysis?'],['request-events','usage/events/live?'],['credentials','usage/identities/page?'],['ai-provider','usage/identities/page?']]) {
   await page.goto(f.keeper+'/'+route);
   await until(()=>calls.some(u=>u.includes(endpoint)),'initial '+route);
   await pause(1500);
   const initial=calls.filter(u=>u.includes(endpoint)).length;
+  const eventCount=route==='request-events'?Number(await page.locator('table[aria-rowcount]').getAttribute('aria-rowcount')):0;
   const docCount=documents;
   await page.evaluate(()=>{window.sseCanvases=[...document.querySelectorAll('canvas')];window.sseBars=[...document.querySelectorAll('[data-usage-total]')];});
   const before=await page.locator('[data-usage-total]').evaluateAll(es=>es.map(e=>e.getAttribute('data-usage-total')).join(','));
   await traffic();
-  await until(()=>calls.filter(u=>u.includes(endpoint)).length>initial,'SSE refresh '+route);
+  if(route==='request-events') {
+   await until(async()=>Number(await page.locator('table[aria-rowcount]').getAttribute('aria-rowcount'))>eventCount,'native event stream append');
+  } else {
+   await until(()=>calls.filter(u=>u.includes(endpoint)).length>initial,'SSE refresh '+route);
+  }
   await pause(1200);
   assert.equal(documents,docCount,'page must not navigate on '+route);
   assert(await page.evaluate(()=>window.sseCanvases.every(e=>e.isConnected)),'chart remounted '+route);

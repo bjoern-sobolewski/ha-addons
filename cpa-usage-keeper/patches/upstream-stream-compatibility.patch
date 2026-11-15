@@ -1,0 +1,307 @@
+diff --git a/internal/api/email_privacy.go b/internal/api/email_privacy.go
+index 402b9776..d1949b09 100644
+--- a/internal/api/email_privacy.go
++++ b/internal/api/email_privacy.go
+@@ -19,9 +19,11 @@ type EmailPrivacySource interface {
+ 	KeeperEmailPrivacy(context.Context) ([]emailprivacy.Entry, error)
+ }
+ 
++const emailPrivacyStreamBoundaryKey = "keeperEmailPrivacyStreamBoundary"
++
+ // EmailPrivacyBoundary is applied to every data API, including download-token
+-// routes and viewer APIs. Live SSE carries topic names only and is registered
+-// before this boundary. No frontend reveal control can undo these replacements.
++// routes and viewer APIs. Topic-only SSE is registered before this boundary;
++// request-event SSE verifies and sanitizes each frame before writing it.
+ type EmailPrivacyBoundary struct {
+ 	source EmailPrivacySource
+ 	path   string
+@@ -85,6 +87,13 @@ func (b *EmailPrivacyBoundary) Middleware() gin.HandlerFunc {
+ 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "Invalid credential request"})
+ 			return
+ 		}
++		// Streaming events cannot use the buffered report writer. The stream owns
++		// the second policy check after encoding every payload, including heartbeats.
++		if strings.HasSuffix(c.FullPath(), "/api/v1/usage/events/live") {
++			c.Set(emailPrivacyStreamBoundaryKey, b)
++			c.Next()
++			return
++		}
+ 		original := c.Writer
+ 		buffered := &privacyWriter{ResponseWriter: original, status: http.StatusOK}
+ 		c.Writer = buffered
+diff --git a/internal/api/router.go b/internal/api/router.go
+index 527c5d4f..a47b1177 100644
+--- a/internal/api/router.go
++++ b/internal/api/router.go
+@@ -52,11 +52,11 @@ type StatusRouteConfig struct {
+ }
+ 
+ type OptionalProviders struct {
+-	EmailPrivacy       *EmailPrivacyBoundary
+-	QuotaPolicies      QuotaPolicyProvider
+-	Live *live.Hub
+-	Ranking rankinghttpapi.Provider
+-	LocalRanking rankinghttpapi.LocalProvider
++	EmailPrivacy           *EmailPrivacyBoundary
++	QuotaPolicies          QuotaPolicyProvider
++	Live                   *live.Hub
++	Ranking                rankinghttpapi.Provider
++	LocalRanking           rankinghttpapi.LocalProvider
+ 	CostReadGate           *service.CostReadGate
+ 	UsageEventsLive        *service.UsageEventsNotifier
+ 	UsageEventsLiveContext context.Context
+diff --git a/internal/api/test/usage_events_live_privacy_test.go b/internal/api/test/usage_events_live_privacy_test.go
+new file mode 100644
+index 00000000..7bff82d8
+--- /dev/null
++++ b/internal/api/test/usage_events_live_privacy_test.go
+@@ -0,0 +1,120 @@
++package test
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"cpa-usage-keeper/internal/api"
++	"cpa-usage-keeper/internal/emailprivacy"
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/service"
++)
++
++type livePrivacyPolicySource struct {
++	mu          sync.Mutex
++	entries     []emailprivacy.Entry
++	unavailable bool
++}
++
++func (s *livePrivacyPolicySource) KeeperEmailPrivacy(context.Context) ([]emailprivacy.Entry, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.unavailable {
++		return nil, errors.New("unavailable")
++	}
++	return append([]emailprivacy.Entry{}, s.entries...), nil
++}
++
++func TestUsageEventsLivePrivacyMasksEveryBatchAndFailsClosed(t *testing.T) {
++	const email = "example.secret@example.test"
++	db := openAPITestDatabase(t)
++	notifier := service.NewUsageEventsNotifier()
++	source := &livePrivacyPolicySource{entries: []emailprivacy.Entry{{Name: "codex-" + email + ".json", Email: email, Hidden: true}}}
++	insert := func() {
++		events := liveTestInsert(t, db, []entities.UsageEvent{{Timestamp: time.Now(), Model: "match", AuthType: "oauth", AuthIndex: "privacy-account", Source: email}})
++		notifier.NotifyUsageEventsCommitted(events)
++	}
++	insert()
++	provider := service.NewUsageService(db, emptyPricingCatalogForTest())
++	boundary := api.NewEmailPrivacyBoundary(source, filepath.Join(t.TempDir(), "privacy.json"))
++	server := httptest.NewServer(api.NewRouter(nil, nil, provider, nil, api.AuthConfig{}, nil, "", api.OptionalProviders{UsageEventsLive: notifier, EmailPrivacy: boundary}))
++	defer server.Close()
++	client := &http.Client{Timeout: 10 * time.Second}
++	target := server.URL + "/api/v1/usage/events/live?range=24h"
++	response, reader := liveTestConnect(t, client, target, nil)
++	defer response.Body.Close()
++	assertMasked := func(kind string) {
++		t.Helper()
++		payload, err := json.Marshal(liveTestReadKind(t, reader, kind).data)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if strings.Contains(string(payload), email) || !strings.Contains(string(payload), "exampl**@example.test") {
++			t.Fatalf("unsafe stream frame: %s", payload)
++		}
++	}
++	assertMasked("snapshot")
++	// Deleting the current credential does not expose its historical identity.
++	source.mu.Lock()
++	source.entries = nil
++	source.mu.Unlock()
++	insert()
++	assertMasked("append")
++	// A policy change on an already open stream is enforced before its next write.
++	source.mu.Lock()
++	source.entries = []emailprivacy.Entry{{Name: "codex-" + email + ".json", Email: email, Hidden: false}}
++	source.mu.Unlock()
++	insert()
++	cleared, _ := json.Marshal(liveTestReadKind(t, reader, "append").data)
++	if !strings.Contains(string(cleared), email) {
++		t.Fatalf("explicit visibility change not applied: %s", cleared)
++	}
++	source.mu.Lock()
++	source.entries[0].Hidden = true
++	source.mu.Unlock()
++	insert()
++	assertMasked("append")
++	// Unverified policy ends the established stream instead of delivering a batch.
++	source.mu.Lock()
++	source.unavailable = true
++	source.mu.Unlock()
++	insert()
++	remaining, err := io.ReadAll(response.Body)
++	if err != nil {
++		t.Fatalf("policy outage did not close cleanly: %v", err)
++	}
++	// A checkpoint may already have passed policy verification and reached the
++	// socket before the flag changed. Permit queued range metadata only; no
++	// event batch or hidden identity may follow the last verified append.
++	buffered := bufio.NewReader(strings.NewReader(string(remaining)))
++	for {
++		if _, err := buffered.Peek(1); errors.Is(err, io.EOF) {
++			break
++		} else if err != nil {
++			t.Fatal(err)
++		}
++		frame := readLiveTestFrame(t, buffered)
++		_, hasEvents := frame.data["events"]
++		if (frame.kind != "checkpoint" && frame.kind != "heartbeat") || hasEvents || strings.Contains(string(remaining), email) {
++			t.Fatalf("policy outage emitted an event batch or hidden identity: %s", remaining)
++		}
++	}
++	failed, err := client.Get(target)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer failed.Body.Close()
++	if failed.StatusCode != http.StatusServiceUnavailable {
++		t.Fatalf("initial policy outage status: %d", failed.StatusCode)
++	}
++}
+diff --git a/internal/api/usage_events_live.go b/internal/api/usage_events_live.go
+index 73a5436e..0a0fc3e3 100644
+--- a/internal/api/usage_events_live.go
++++ b/internal/api/usage_events_live.go
+@@ -204,7 +204,7 @@ func (s *usageEventsLiveStream) buildEvents(ctx context.Context, rows []serviced
+ 
+ func (s *usageEventsLiveStream) open() {
+ 	s.c.Header("Content-Type", "text/event-stream; charset=utf-8")
+-	s.c.Header("Cache-Control", "no-cache, no-transform")
++	s.c.Header("Cache-Control", "no-store, no-transform")
+ 	s.c.Header("X-Accel-Buffering", "no")
+ }
+ 
+@@ -216,6 +216,20 @@ func (s *usageEventsLiveStream) send(event string, payload any) error {
+ 	if err != nil {
+ 		return err
+ 	}
++	if value, exists := s.c.Get(emailPrivacyStreamBoundaryKey); exists {
++		boundary := value.(*EmailPrivacyBoundary)
++		policy, policyErr := boundary.policy(s.c.Request.Context())
++		if policyErr != nil {
++			if !s.c.Writer.Written() {
++				privacyUnavailable(s.c)
++			}
++			return errors.New("email visibility could not be verified")
++		}
++		data, err = policy.JSON(data)
++		if err != nil {
++			return err
++		}
++	}
+ 	controller := http.NewResponseController(s.c.Writer)
+ 	if err := controller.SetWriteDeadline(time.Now().Add(liveWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+ 		return err
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 918d9e2e..77ff24c6 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -310,9 +310,9 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+ 			authHandler,
+ 			cfg.AppBasePath,
+ 			api.OptionalProviders{
+-				EmailPrivacy:  api.NewEmailPrivacyBoundary(cpaClient, filepath.Join(cfg.WorkDir, "keeper-email-privacy.json")),
+-				QuotaPolicies: cpaClient,
+-				Live: liveHub,
++				EmailPrivacy:           api.NewEmailPrivacyBoundary(cpaClient, filepath.Join(cfg.WorkDir, "keeper-email-privacy.json")),
++				QuotaPolicies:          cpaClient,
++				Live:                   liveHub,
+ 				UsageIdentity:          usageIdentityService,
+ 				CostReadGate:           costReadGate,
+ 				UsageEventsLive:        usageEventsLive,
+diff --git a/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx b/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx
+index 82f30eda..8bd6127c 100644
+--- a/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx
++++ b/web/src/components/usage/test/RequestEventsDetailsCardSpeedMode.test.tsx
+@@ -67,9 +67,11 @@ const mountCard = async (events: UsageEvent[]) => {
+   };
+ };
+ 
+-const extractSpeedModeCells = (html: string) => (
+-  Array.from(html.matchAll(/<tr><td\b[^>]*>(.*?)<\/td><\/tr>/gs), (match) => match[1])
+-);
++const extractSpeedModeCells = (html: string) => {
++  const container = document.createElement('div');
++  container.innerHTML = html;
++  return Array.from(container.querySelectorAll('tbody tr td'), (cell) => cell.textContent);
++};
+ 
+ describe('RequestEventsDetailsCard Speed Mode column', () => {
+   it('shows an immediate localized tooltip with mapped and raw request and response modes', async () => {
+diff --git a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
+index 97fab66a..63b58f92 100644
+--- a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
++++ b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
+@@ -1,7 +1,6 @@
+ // @vitest-environment happy-dom
+ 
+ import {mockLiveStream} from '@/../test-helpers/liveStream';
+-let emit:ReturnType<typeof mockLiveStream>;
+ import React, { act } from 'react';
+ import { createRoot, type Root } from 'react-dom/client';
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+@@ -61,7 +60,7 @@ describe('UsagePage top API Key request event filter', () => {
+ 
+   beforeEach(async () => {
+     globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+- emit=mockLiveStream();
++ mockLiveStream();
+     await i18n.changeLanguage('en');
+     localStorage.clear();
+     window.history.replaceState(null, '', '/request-events');
+@@ -268,7 +267,7 @@ describe('UsagePage top API Key request event filter', () => {
+     await toggleKey();
+     expect(scopedCalls()).toHaveLength(1);
+ 
+-    await act(async () => {emit(['usage','quota']);await vi.advanceTimersByTimeAsync(200)});
++    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+     expect(scopedCalls()).toHaveLength(1);
+     await toggleKey();
+     expect(scopedCalls()).toHaveLength(1);
+@@ -370,8 +369,8 @@ describe('UsagePage top API Key request event filter', () => {
+     expect(storedRange()).toBe(overviewRange);
+ 
+     await navigate('/request-events');
+-    expect(api.fetchUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.any(AbortSignal), expect.objectContaining({ apiKeyId: '11' }));
+-    expect(api.fetchUsageEvents.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
++    expect(api.openUsageEventsLive).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.objectContaining({ apiKeyId: '11' }), expect.any(AbortSignal));
++    expect(api.openUsageEventsLive.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
+     await act(async () => topKey().click());
+     await act(async () => topKey().click());
+     expect(api.fetchCpaApiKeyOptions.mock.calls.filter(call => call[1]).at(-1)![1]).toMatchObject({ scope: 'request-events', range: { range: eventsRange } });
+@@ -380,13 +379,13 @@ describe('UsagePage top API Key request event filter', () => {
+     await act(async () => button('Export CSV').click());
+     expect(api.exportUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), 'csv', expect.objectContaining({ apiKeyId: '11' }));
+ 
+-    api.fetchUsageEvents.mockClear();
++    api.openUsageEventsLive.mockClear();
+     await act(async () => root.unmount());
+     root = createRoot(container);
+     await render();
+     expect(window.location.pathname).toBe('/request-events');
+-    expect(api.fetchUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.any(AbortSignal), expect.objectContaining({ apiKeyId: '11' }));
+-    expect(api.fetchUsageEvents.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
++    expect(api.openUsageEventsLive).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.objectContaining({ apiKeyId: '11' }), expect.any(AbortSignal));
++    expect(api.openUsageEventsLive.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
+     expect(storedRange()).toBe(overviewRange);
+     await act(async () => button('Export').click());
+     await act(async () => button('Export JSON').click());

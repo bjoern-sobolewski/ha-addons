@@ -237,10 +237,10 @@ index 00000000..7734f2d2
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_websockets_executor.go b/internal/runtime/executor/codex_websockets_executor.go
-index b7a2c832..86a59292 100644
+index 199bb2d8..0cd0b656 100644
 --- a/internal/runtime/executor/codex_websockets_executor.go
 +++ b/internal/runtime/executor/codex_websockets_executor.go
-@@ -75,7 +75,7 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
+@@ -78,7 +78,7 @@ func (e *CodexAutoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
  	if e == nil || e.httpExec == nil || e.wsExec == nil {
  		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: executor is nil")
  	}
@@ -249,7 +249,7 @@ index b7a2c832..86a59292 100644
  		return e.wsExec.Execute(ctx, auth, req, opts)
  	}
  	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
-@@ -88,7 +88,7 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
+@@ -91,7 +91,7 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
  	if e == nil || e.httpExec == nil || e.wsExec == nil {
  		return nil, fmt.Errorf("codex auto executor: executor is nil")
  	}
@@ -355,19 +355,19 @@ index 00000000..f10ad8a7
 +	}
 +}
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
-index 71b849f9..3cbdd20b 100644
+index 125f2045..f28526ca 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket.go
-@@ -390,6 +390,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
- 	wsDone := make(chan struct{})
- 	defer close(wsDone)
+@@ -481,6 +481,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+ 	var disconnectWg sync.WaitGroup
+ 	var recordedDisconnectErr atomic.Pointer[interfaces.ErrorMessage]
  	var codexDuplexStream atomic.Bool
 +	// Sticky for this downstream socket: subsequent deltas use retained HTTP history.
 +	var codexHTTPOnly atomic.Bool
  
  	if h != nil && h.AuthManager != nil {
  		type upstreamDisconnectSubscriber interface {
-@@ -408,7 +410,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -501,7 +503,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  						case <-wsDone:
  							return
  						case disconnectErr := <-disconnectCh:
@@ -376,7 +376,7 @@ index 71b849f9..3cbdd20b 100644
  								// Only the selected credential's duplex stream owns closure:
  								// drain its acknowledgements and pending events in order.
  								// OAuth-only steering still leaves API keys in normal mode.
-@@ -478,6 +480,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -580,6 +582,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  	upstreamModeForAuth := func(auth *coreauth.Auth) string {
  		if auth != nil && websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
  			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
@@ -386,7 +386,7 @@ index 71b849f9..3cbdd20b 100644
  			if provider == "codex" || provider == "xai" {
  				return responsesWebsocketUpstreamModeWS
  			}
-@@ -632,6 +637,24 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -735,6 +740,24 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  				useUpstreamWebsocketPassthrough = provider == "codex" || provider == "xai"
  			}
  		}
@@ -411,7 +411,7 @@ index 71b849f9..3cbdd20b 100644
  		nativeWebsocketPassthrough := !routeOverridesModelResolution && responsesWebsocketNativePassthroughAllowed(
  			upstreamMode,
  			useUpstreamWebsocketPassthrough,
-@@ -786,6 +809,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -891,6 +914,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  			continue
  		}
  
@@ -427,12 +427,12 @@ index 71b849f9..3cbdd20b 100644
 +			log.Infof("responses websocket: routing oversized Codex request over HTTP id=%s bytes=%d", passthroughSessionID, len(payload))
 +		}
 +
- 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
- 		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
- 
-@@ -833,6 +868,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
- 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, executionParent)
+ 		reqDoc := ojson.NewDoc(requestJSON)
+ 		toolsChanged := h.prepareCodexMultiAgentV2ToolsDoc(c, reqDoc)
+ 		orphanChanged := h.prepareCodexOrphanDelegationDoc(c, reqDoc)
+@@ -944,6 +979,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+ 		cliCtx = cliproxyexecutor.WithLocalWebsocketTurnTracker(cliCtx)
  		cliCtx = cliproxyexecutor.WithWebsocketInputEpoch(cliCtx, &inputEpoch, msgEpoch)
 +		if forceCodexHTTP {
 +			cliCtx = cliproxyexecutor.WithRequiredUpstreamHTTP(cliCtx)
@@ -440,7 +440,7 @@ index 71b849f9..3cbdd20b 100644
  		if duplexInput != nil {
  			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
  			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
-@@ -1059,6 +1097,10 @@ func responsesWebsocketHTTPReplayRequiredError() error {
+@@ -1203,6 +1241,10 @@ func responsesWebsocketHTTPReplayRequiredError() error {
  	return cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
  }
  
@@ -449,10 +449,10 @@ index 71b849f9..3cbdd20b 100644
 +const responsesWebsocketCodexHTTPThreshold = 8 * 1024 * 1024
 +
  func responsesWebsocketRequestRequiresCurrentUpstream(payload []byte) bool {
- 	return strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" ||
- 		strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeAppend
+ 	var fieldsBuf [2]ojson.Result
+ 	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "previous_response_id", "type")
 diff --git a/sdk/cliproxy/executor/context.go b/sdk/cliproxy/executor/context.go
-index 30cbebf5..fa7adebb 100644
+index eca0abf8..67320050 100644
 --- a/sdk/cliproxy/executor/context.go
 +++ b/sdk/cliproxy/executor/context.go
 @@ -7,6 +7,7 @@ import (
@@ -461,11 +461,11 @@ index 30cbebf5..fa7adebb 100644
  type requireUpstreamWebsocketContextKey struct{}
 +type requireUpstreamHTTPContextKey struct{}
  type upstreamAttemptTrackerContextKey struct{}
+ type localWebsocketTurnTrackerContextKey struct{}
  
- type upstreamAttemptTracker struct {
-@@ -77,3 +78,21 @@ func UpstreamAttempted(ctx context.Context) bool {
- 	tracker, ok := ctx.Value(upstreamAttemptTrackerContextKey{}).(*upstreamAttemptTracker)
- 	return ok && tracker != nil && tracker.attempted.Load()
+@@ -127,3 +128,21 @@ func LocalWebsocketTurnExecuted(ctx context.Context) bool {
+ 	tracker, ok := ctx.Value(localWebsocketTurnTrackerContextKey{}).(*localWebsocketTurnTracker)
+ 	return ok && tracker != nil && tracker.executed.Load()
  }
 +
 +// WithRequiredUpstreamHTTP selects HTTP after the caller has assembled replayable

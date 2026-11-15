@@ -1,0 +1,457 @@
+diff --git a/src/features/quota/components/QuotaCard.tsx b/src/features/quota/components/QuotaCard.tsx
+index ea16d42..42635e9 100644
+--- a/src/features/quota/components/QuotaCard.tsx
++++ b/src/features/quota/components/QuotaCard.tsx
+@@ -194,8 +194,15 @@ export function QuotaCard(props: QuotaCardProps) {
+ 
+       <div className={styles.body}>
+         {hasDisplay && displayQuota ? (
+-          <AuthFileObservation.Provider value={{ ...displayQuota, showAge: readAuthFilesUiState()?.showQuotaAge ?? true }}>
+-            <adapter.Body quota={displayQuota} classes={quotaClasses} planItems={claudePlanItems} afterPlan={claudeAfterPlan} />
++          <AuthFileObservation.Provider
++            value={{ ...displayQuota, showAge: readAuthFilesUiState()?.showQuotaAge ?? true }}
++          >
++            <adapter.Body
++              quota={displayQuota}
++              classes={quotaClasses}
++              planItems={claudePlanItems}
++              afterPlan={entry.type === 'codex' ? codexAfterPlan : claudeAfterPlan}
++            />
+             {status !== 'success' && (
+               <div className={quotaClasses.quotaMessage}>{t('quota_traffic.account_missing')}</div>
+             )}
+diff --git a/src/features/quota/providers/claude/ClaudeResetGrants.tsx b/src/features/quota/providers/claude/ClaudeResetGrants.tsx
+index df5e962..dac8465 100644
+--- a/src/features/quota/providers/claude/ClaudeResetGrants.tsx
++++ b/src/features/quota/providers/claude/ClaudeResetGrants.tsx
+@@ -94,6 +94,7 @@ export function useClaudeResetGrants(
+     if (!current() || useAuthStore.getState().connectionStatus !== 'connected') return;
+     lock.current = true;
+     setBusy(true);
++    let confirmedReset = false;
+     try {
+       const answer = await resetGrantOperations.run(key, authIndex, selected);
+       if (!current()) return;
+@@ -103,6 +104,7 @@ export function useClaudeResetGrants(
+           answer.code === 'already_used' ||
+           answer.code === 'cooldown_clear_failed')
+       ) {
++        confirmedReset = true;
+         setDialog(null);
+       }
+       showNotification(
+@@ -135,8 +137,10 @@ export function useClaudeResetGrants(
+       // A concurrent page-wide refresh can invalidate this read generation.
+       // Release the local lock regardless, but never refresh a replacement account.
+       setBusy(false);
+-      setReload((value) => value + 1);
+-      if (current()) onRefresh();
++      if (current() && confirmedReset) {
++        setReload((value) => value + 1);
++        onRefresh();
++      }
+     }
+   };
+   return {
+diff --git a/src/features/quota/providers/claude/resetGrantOperations.ts b/src/features/quota/providers/claude/resetGrantOperations.ts
+index 192f1ed..ac1965b 100644
+--- a/src/features/quota/providers/claude/resetGrantOperations.ts
++++ b/src/features/quota/providers/claude/resetGrantOperations.ts
+@@ -143,7 +143,13 @@ export function createResetGrantOperations(deps = defaultDependencies) {
+         const code = await deps.claim(authIndex, organization, grantId, operation.requestId);
+         assertSession();
+         // A refusal on a retry cannot prove that the earlier ambiguous POST did not spend.
+-        if (!wasRetry || code === 'reset' || code === 'already_used' || code === 'cooldown_clear_failed') operation.code = code;
++        if (
++          !wasRetry ||
++          code === 'reset' ||
++          code === 'already_used' ||
++          code === 'cooldown_clear_failed'
++        )
++          operation.code = code;
+         return { code, unresolved: !operation.code };
+       } finally {
+         if (deps.revision() === session) busy.delete(key);
+diff --git a/src/features/quota/providers/codex/creditOverage.ts b/src/features/quota/providers/codex/creditOverage.ts
+index 09b904b..ba575d6 100644
+--- a/src/features/quota/providers/codex/creditOverage.ts
++++ b/src/features/quota/providers/codex/creditOverage.ts
+@@ -1,3 +1,4 @@
++import { formatBrowserDateTime } from '@/utils/browserDateTime';
+ /**
+  * Codex account-level "use credits after the usage limit" setting
+  * (`can_consume_personal_credits_chatpass`).
+@@ -78,10 +79,9 @@ export function formatCodexCreditOverageConfirmedAt(at: number, now: number = Da
+     confirmed.getMonth() === current.getMonth() &&
+     confirmed.getDate() === current.getDate();
+   if (!sameDay) return formatInstantShort(at);
+-  return confirmed.toLocaleTimeString(undefined, {
++  return formatBrowserDateTime(confirmed, {
+     hour: '2-digit',
+     minute: '2-digit',
+-    hour12: false,
+   });
+ }
+ 
+diff --git a/tests/claudeResetGrants.test.ts b/tests/claudeResetGrants.test.ts
+index 0e6db49..eb61865 100644
+--- a/tests/claudeResetGrants.test.ts
++++ b/tests/claudeResetGrants.test.ts
+@@ -113,11 +113,10 @@ function setup() {
+   };
+ }
+ 
+-test('confirmed Claude resets clear only the redeemed credential cooldown before returning', async () => {
+-  for (const code of ['reset', 'already_used'] as const) {
++test('shared backend settles confirmed outcomes and exposes recovery failure without another mutation', async () => {
++  for (const code of ['reset', 'already_used', 'cooldown_clear_failed'] as const) {
+     const h = setup();
+     h.deps.claim = async (_auth, _org, _grant, id) => {
+-      expect(h.cleared).toEqual([]);
+       h.ids.push(id);
+       return code;
+     };
+@@ -126,54 +125,12 @@ test('confirmed Claude resets clear only the redeemed credential cooldown before
+       code,
+       unresolved: false,
+     });
+-    expect(h.cleared).toEqual(['credential-a']);
+     expect(h.ids).toEqual(['request-1']);
+     expect(operations.inspect('account')?.code).toBe(code);
+   }
+ });
+ 
+-test('refused or unknown reset outcomes never clear routing cooldowns', async () => {
+-  const h = setup();
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow();
+-  expect(h.cleared).toEqual([]);
+-  for (const code of [...ANTHROPIC_RESET_RESULTS, 'auth_error', 'rate_limited'] as const) {
+-    if (code === 'reset' || code === 'already_used') continue;
+-    h.deps.claim = async () => code;
+-    await operations.run('account', 'a', grant.id);
+-    expect(h.cleared).toEqual([]);
+-  }
+-});
+-
+-test('cooldown clear failures keep the reset settled and report manual recovery', async () => {
+-  for (const failure of ['network', 'status', 'credential']) {
+-    const h = setup();
+-    h.deps.claim = async (_auth, _org, _grant, id) => {
+-      h.ids.push(id);
+-      return 'reset';
+-    };
+-    h.deps.resetCooldown = async (authIndex) => {
+-      h.cleared.push(authIndex);
+-      if (failure === 'network') throw new Error('unavailable');
+-      return JSON.parse(
+-        JSON.stringify({
+-          status: failure === 'status' ? 'error' : 'ok',
+-          auth_index: failure === 'credential' ? 'other' : authIndex,
+-          models: [],
+-        })
+-      );
+-    };
+-    const operations = createResetGrantOperations(h.deps);
+-    expect(await operations.run('account', 'a', grant.id)).toEqual({
+-      code: 'cooldown_clear_failed',
+-      unresolved: false,
+-    });
+-    expect(operations.inspect('account')?.code).toBe('reset');
+-    expect(h.ids).toEqual(['request-1']);
+-    }
+-});
+-
+-test('connection changes after a claim prevent cooldown clearing on the replacement connection', async () => {
++test('connection change after the shared claim cannot settle a replacement session', async () => {
+   const h = setup();
+   h.deps.claim = async () => {
+     h.nextSession();
+@@ -181,19 +138,6 @@ test('connection changes after a claim prevent cooldown clearing on the replacem
+   };
+   const operations = createResetGrantOperations(h.deps);
+   await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('session');
+-  expect(h.cleared).toEqual([]);
+-  expect(operations.inspect('account')).toBeUndefined();
+-});
+-
+-test('a connection change during cooldown clearing cannot report success for the new session', async () => {
+-  const h = setup();
+-  h.deps.claim = async () => 'reset';
+-  h.deps.resetCooldown = async (authIndex) => {
+-    h.nextSession();
+-    return { status: 'ok', auth_index: authIndex, models: [] };
+-  };
+-  const operations = createResetGrantOperations(h.deps);
+-  await expect(operations.run('account', 'a', grant.id)).rejects.toThrow('session');
+   expect(operations.inspect('account')).toBeUndefined();
+ });
+ 
+@@ -388,8 +332,6 @@ test('expiry and cooldown failures have distinct safe diagnostic codes', async (
+   expect(h.ids).toHaveLength(0);
+ });
+ 
+-
+-
+ test('all grant messages and confirmation are translated in six locales', async () => {
+   const locales = await Promise.all(
+     ['en', 'zh-CN', 'zh-TW', 'ru', 'vi', 'ko'].map(
+@@ -462,6 +404,7 @@ test('card retains one dialog trigger with explicit selection and no second conf
+   expect(hook).not.toContain('showConfirmation');
+   expect(hook).not.toContain('selectResetGrant');
+   expect(hook).toContain('setDialog({ key, selected: null })');
++  expect(hook).toContain('if (current() && confirmedReset)');
+   expect(hook).toContain('if (!open || !selected || !canRedeemGrant(selected) || lock.current');
+   expect(hook).toContain(
+     "if (!current() || useAuthStore.getState().connectionStatus !== 'connected') return"
+@@ -485,8 +428,6 @@ test('cooldown clear failures reuse existing messages without new locale keys',
+   }
+ });
+ 
+-
+-
+ describe('explicit reset kinds and model refill usage', () => {
+   test('preserves type and weekly give-back without treating it as a full reset', () => {
+     for (const type of ['weekly', 'session', 'full']) {
+@@ -536,19 +477,40 @@ describe('explicit reset kinds and model refill usage', () => {
+   test.each(['weekly-choice', 'model-choice'])(
+     'shared backend spends exactly %s even when another grant is recommended',
+     async (chosen) => {
+-      const grants = [{ ...grant, id: 'weekly-choice', type: 'weekly' },
+-        { ...grant, id: 'model-choice', type: 'full', gives_back_weekly: true,
+-          percent_used: { seven_day_overage_included: 35 } }];
+-      quotaResetApi.options = async () => ({provider: 'claude', organizationId: organization,
+-        usage: {cedar_ember: {...block, grants}}, status: {grants}, selectedGrantId: 'weekly-choice'});
+-      using redeem = spyOn(quotaResetApi, 'redeem').mockResolvedValue({code: 'reset'});
++      const grants = [
++        { ...grant, id: 'weekly-choice', type: 'weekly' },
++        {
++          ...grant,
++          id: 'model-choice',
++          type: 'full',
++          gives_back_weekly: true,
++          percent_used: { seven_day_overage_included: 35 },
++        },
++      ];
++      quotaResetApi.options = async () => ({
++        provider: 'claude',
++        organizationId: organization,
++        usage: { cedar_ember: { ...block, grants } },
++        status: { grants },
++        selectedGrantId: 'weekly-choice',
++      });
++      using redeem = spyOn(quotaResetApi, 'redeem').mockResolvedValue({ code: 'reset' });
+       using passthrough = spyOn(apiCallApi, 'request');
+-      const operations = createResetGrantOperations({...setup().deps,
+-        readOrganization: readClaudeOrganization, readStatus: readClaudeResetGrants, claim: claimClaudeResetGrant});
++      const operations = createResetGrantOperations({
++        ...setup().deps,
++        readOrganization: readClaudeOrganization,
++        readStatus: readClaudeResetGrants,
++        claim: claimClaudeResetGrant,
++      });
+       await operations.run('account', 'index', chosen);
+       expect(redeem).toHaveBeenCalledTimes(1);
+-      expect(redeem).toHaveBeenCalledWith({auth_index:'index', provider:'claude',
+-        organization_id:organization, grant_id:chosen, request_id:'request-1'});
++      expect(redeem).toHaveBeenCalledWith({
++        auth_index: 'index',
++        provider: 'claude',
++        organization_id: organization,
++        grant_id: chosen,
++        request_id: 'request-1',
++      });
+       expect(passthrough).not.toHaveBeenCalled();
+     }
+   );
+@@ -616,6 +578,7 @@ test('reads shared options and sends choices only to CPA', async () => {
+     grant_id: grant.id,
+   });
+   expect(passthrough).not.toHaveBeenCalled();
++  expect(options).toHaveBeenCalledWith('index');
+ });
+ test('reports backend recovery failure and keeps unknown outcomes ambiguous', async () => {
+   using redeem = spyOn(quotaResetApi, 'redeem').mockResolvedValue({
+@@ -631,3 +594,121 @@ test('reports backend recovery failure and keeps unknown outcomes ambiguous', as
+     claimClaudeResetGrant('index', organization, grant.id, 'request-1')
+   ).rejects.toBeInstanceOf(AnthropicResetGrantUnknownOutcome);
+ });
++
++async function withGlobalCrypto(source: unknown, run: () => Promise<void>) {
++  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
++  try {
++    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: source });
++    await run();
++  } finally {
++    if (descriptor) Object.defineProperty(globalThis, 'crypto', descriptor);
++    else Reflect.deleteProperty(globalThis, 'crypto');
++  }
++}
++
++function mockSharedResetOptions() {
++  return spyOn(quotaResetApi, 'options').mockResolvedValue({
++    provider: 'claude',
++    organizationId: organization,
++    usage: { cedar_ember: block },
++    status: { grants: [{ id: grant.id }] },
++    selectedGrantId: grant.id,
++  });
++}
++
++describe('Claude shared-backend default request ID integration', () => {
++  test('HTTP crypto fallback sends a secure request ID to CPA without provider passthrough', async () => {
++    using options = mockSharedResetOptions();
++    using redeem = spyOn(quotaResetApi, 'redeem').mockResolvedValue({ code: 'reset' });
++    using passthrough = spyOn(apiCallApi, 'request');
++    await withGlobalCrypto(
++      {
++        getRandomValues(bytes: Uint8Array) {
++          bytes.fill(10);
++          return bytes;
++        },
++      },
++      async () => {
++        const operations = createResetGrantOperations();
++        expect(await operations.run('account', 'index', grant.id)).toEqual({
++          code: 'reset',
++          unresolved: false,
++        });
++        expect(redeem).toHaveBeenCalledWith({
++          auth_index: 'index',
++          provider: 'claude',
++          organization_id: organization,
++          grant_id: grant.id,
++          request_id: '0a'.repeat(16),
++        });
++        expect(operations.inspect('account')).toMatchObject({
++          requestId: '0a'.repeat(16),
++          code: 'reset',
++        });
++      }
++    );
++    expect(options).toHaveBeenCalledTimes(2);
++    expect(redeem).toHaveBeenCalledTimes(1);
++    expect(passthrough).not.toHaveBeenCalled();
++  });
++
++  test('unknown shared claims retain the secure ID and selected grant until the same retry settles', async () => {
++    using options = mockSharedResetOptions();
++    using redeem = spyOn(quotaResetApi, 'redeem').mockResolvedValue({ code: 'unknown' });
++    let randomCalls = 0;
++    await withGlobalCrypto(
++      {
++        getRandomValues(bytes: Uint8Array) {
++          bytes.fill(++randomCalls);
++          return bytes;
++        },
++      },
++      async () => {
++        const operations = createResetGrantOperations();
++        await expect(operations.run('account', 'index', grant.id)).rejects.toBeInstanceOf(
++          AnthropicResetGrantUnknownOutcome
++        );
++        const pending = operations.inspect('account');
++        expect(pending?.grant.id).toBe(grant.id);
++        expect(pending?.requestId).toBe('01'.repeat(16));
++        await expect(operations.run('account', 'index', 'different-grant')).rejects.toThrow(
++          'expired'
++        );
++        options.mockResolvedValue({
++          provider: 'claude',
++          organizationId: organization,
++          status: { grants: [] },
++        });
++        redeem.mockResolvedValue({ code: 'already_used' });
++        expect(await operations.run('account', 'index', grant.id)).toEqual({
++          code: 'already_used',
++          unresolved: false,
++        });
++        expect(
++          redeem.mock.calls.map(([request]) => [request.request_id, request.grant_id])
++        ).toEqual([
++          ['01'.repeat(16), grant.id],
++          ['01'.repeat(16), grant.id],
++        ]);
++        expect(randomCalls).toBe(1);
++      }
++    );
++  });
++
++  test('missing secure randomness prevents shared spending and journaling without leaving busy state', async () => {
++    using options = mockSharedResetOptions();
++    using redeem = spyOn(quotaResetApi, 'redeem');
++    await withGlobalCrypto({}, async () => {
++      const operations = createResetGrantOperations();
++      for (let attempt = 0; attempt < 2; attempt++) {
++        await expect(operations.run('account', 'index', grant.id)).rejects.toMatchObject({
++          stage: 'request_id',
++          reason: 'generation_failed',
++        });
++        expect(operations.inspect('account')).toBeUndefined();
++      }
++    });
++    expect(options).toHaveBeenCalledTimes(4);
++    expect(redeem).not.toHaveBeenCalled();
++  });
++});
+diff --git a/tests/codexCreditOverage.test.ts b/tests/codexCreditOverage.test.ts
+index 0118fbd..c18d8f0 100644
+--- a/tests/codexCreditOverage.test.ts
++++ b/tests/codexCreditOverage.test.ts
+@@ -1,3 +1,4 @@
++import { formatBrowserDateTime } from '../src/utils/browserDateTime';
+ /**
+  * Codex account-level "use credits after the usage limit" setting: request contract,
+  * outcome classification, and the account-user state kept in the quota store.
+@@ -459,7 +460,7 @@ describe('Codex credit overage presentation', () => {
+       confirmed,
+       new Date(2026, 10, 8, 23, 0).getTime()
+     );
+-    expect(sameDay).toMatch(/18\D?49/);
++    expect(sameDay).toBe(formatBrowserDateTime(confirmed, { hour: '2-digit', minute: '2-digit' }));
+     expect(sameDay).not.toMatch(/11\D08|08\D11/);
+ 
+     const nextDay = formatCodexCreditOverageConfirmedAt(
+@@ -467,7 +468,14 @@ describe('Codex credit overage presentation', () => {
+       new Date(2026, 10, 9, 0, 5).getTime()
+     );
+     expect(nextDay).toMatch(/11\D08|08\D11/);
+-    expect(nextDay).toMatch(/18\D?49/);
++    expect(nextDay).toBe(
++      formatBrowserDateTime(confirmed, {
++        month: '2-digit',
++        day: '2-digit',
++        hour: '2-digit',
++        minute: '2-digit',
++      })
++    );
+   });
+ 
+   test('describes each failure with a localized message', () => {
+diff --git a/tests/codexCreditOverageUi.test.ts b/tests/codexCreditOverageUi.test.ts
+index ff0e3a2..adeea8e 100644
+--- a/tests/codexCreditOverageUi.test.ts
++++ b/tests/codexCreditOverageUi.test.ts
+@@ -4,6 +4,7 @@
+  */
+ 
+ import { beforeAll, describe, expect, test } from 'bun:test';
++import { readFileSync } from 'node:fs';
+ import { createElement } from 'react';
+ import { renderToStaticMarkup } from 'react-dom/server';
+ import i18n from '@/i18n';
+@@ -328,3 +329,14 @@ describe('CodexCreditOverageDialog', () => {
+     expect(warning).not.toContain('role="alert"');
+   });
+ });
++
++// Bun cannot bind the host CSS modules; rendered row/body coverage is above.
++test('traffic-enriched quota cards retain the native Codex credit settings slot', () => {
++  const card = readFileSync('src/features/quota/components/QuotaCard.tsx', 'utf8');
++  const trafficBody = card
++    .split('{hasDisplay && displayQuota ? (')[1]
++    .split('</AuthFileObservation.Provider>')[0];
++  expect(trafficBody).toContain(
++    "afterPlan={entry.type === 'codex' ? codexAfterPlan : claudeAfterPlan}"
++  );
++});

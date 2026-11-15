@@ -1,8 +1,8 @@
 diff --git a/sdk/cliproxy/auth/selector_test.go b/sdk/cliproxy/auth/selector_test.go
-index 18ed81f3..8b50f04d 100644
+index 37678684..ca4ba710 100644
 --- a/sdk/cliproxy/auth/selector_test.go
 +++ b/sdk/cliproxy/auth/selector_test.go
-@@ -2043,36 +2043,44 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
+@@ -2041,36 +2041,44 @@ func TestSessionAffinitySelector_CrossProviderIsolation(t *testing.T) {
  func TestSessionCache_GetAndRefresh(t *testing.T) {
  	t.Parallel()
  

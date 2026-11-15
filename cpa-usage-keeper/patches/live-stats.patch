@@ -113,7 +113,7 @@ index 00000000..269dfae0
 +	return session.Role == auth.RoleAdmin || session.Role == auth.RoleReadOnly
 +}
 diff --git a/internal/api/router.go b/internal/api/router.go
-index 77a595b8..78f8a103 100644
+index f25ec4c0..2f215168 100644
 --- a/internal/api/router.go
 +++ b/internal/api/router.go
 @@ -13,6 +13,7 @@ import (
@@ -128,11 +128,11 @@ index 77a595b8..78f8a103 100644
  }
  
  type OptionalProviders struct {
-+	Live               *live.Hub
- 	Ranking            rankinghttpapi.Provider
- 	LocalRanking       rankinghttpapi.LocalProvider
- 	CostReadGate       *service.CostReadGate
-@@ -132,6 +134,9 @@ func NewRouter(
++	Live *live.Hub
+ 	Ranking rankinghttpapi.Provider
+ 	LocalRanking rankinghttpapi.LocalProvider
+ 	CostReadGate           *service.CostReadGate
+@@ -141,6 +143,9 @@ func NewRouter(
  		statusConfig = optionalProviders[0].Status
  	}
  	authHandler.setCPAAPIKeyProvider(cpaAPIKeyProvider)
@@ -142,7 +142,7 @@ index 77a595b8..78f8a103 100644
  	requestLogDownloadTokens := newRequestLogDownloadTokenStore()
  
  	registerUsageEventRequestLogDownloadTokenRoutes(apiV1, requestLogProvider, requestLogDownloadTokens, statusConfig.CPARequestLogAccessEnabled)
-@@ -150,6 +155,18 @@ func NewRouter(
+@@ -159,6 +164,18 @@ func NewRouter(
  
  	adminProtected := apiV1.Group("")
  	adminProtected.Use(authHandler.adminMiddleware())
@@ -266,7 +266,7 @@ index 00000000..8f4527d4
 +	}
 +}
 diff --git a/internal/app/app.go b/internal/app/app.go
-index f9b0c26e..1d8415fc 100644
+index c0793bc2..0dc86c9d 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
 @@ -15,6 +15,7 @@ import (
@@ -277,7 +277,7 @@ index f9b0c26e..1d8415fc 100644
  	"cpa-usage-keeper/internal/logging"
  	"cpa-usage-keeper/internal/oidc"
  	"cpa-usage-keeper/internal/poller"
-@@ -156,13 +157,15 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+@@ -157,13 +158,15 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  	if err != nil {
  		return nil, err
  	}
@@ -294,7 +294,7 @@ index f9b0c26e..1d8415fc 100644
  	prepared := false
  	defer func() {
  		if !prepared {
-@@ -173,11 +176,13 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+@@ -174,11 +177,13 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  	}()
  	// 单 writer aggregation runner 只维护 rollups/Identity，并在 App.Run 时主动追平。
  	usageAggregationRunner := poller.NewUsageAggregationRunner(db)
@@ -308,7 +308,7 @@ index f9b0c26e..1d8415fc 100644
  		BaseURL:               cfg.CPABaseURL,
  		Client:                cpaClient,
  		PricingCatalog:        pricingCatalog,
-@@ -197,7 +202,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+@@ -199,7 +204,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  	// redisProcessRunner 仍然只处理本地 inbox 到 usage_events 的消费。
  	redisProcessRunner := poller.NewRedisProcessRunner(syncService)
  	// errorEventService 同时承担 Errors runner 的直接写入和详情 API 的分页读取。
@@ -317,14 +317,14 @@ index f9b0c26e..1d8415fc 100644
  	// Errors 使用独立 RESP source，固定订阅 errors channel，不修改或复用 Usage subscriber 生命周期。
  	redisErrorSubscribeSource := poller.NewRedisErrorSubscribeSource(poller.RedisSubscribeOptions{
  		BaseURL:       cfg.CPABaseURL,
-@@ -302,6 +307,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+@@ -304,6 +309,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
  			authHandler,
  			cfg.AppBasePath,
  			api.OptionalProviders{
-+				Live:          liveHub,
- 				UsageIdentity: usageIdentityService,
- 				CostReadGate:  costReadGate,
- 				ErrorEvents:   errorEventService,
++				Live: liveHub,
+ 				UsageIdentity:          usageIdentityService,
+ 				CostReadGate:           costReadGate,
+ 				UsageEventsLive:        usageEventsLive,
 diff --git a/internal/cpa/live.go b/internal/cpa/live.go
 new file mode 100644
 index 00000000..e8330cc8
@@ -799,7 +799,7 @@ index e9a07079..2825106a 100644
  		AuthIndex:      authIndex,
  		AvailableCount: output.AvailableCount,
 diff --git a/internal/quota/service.go b/internal/quota/service.go
-index fe9172bd..54dd90f7 100644
+index 0b3be8cc..2dd4645f 100644
 --- a/internal/quota/service.go
 +++ b/internal/quota/service.go
 @@ -2,6 +2,7 @@ package quota
@@ -1077,7 +1077,7 @@ index 475e02b8..24365dc9 100644
  		if s.usageAggregation != nil {
  			// notifier 只写内存并发 wake，不在 metadata 热路径执行 SQLite 聚合事务。
 diff --git a/internal/service/sync.go b/internal/service/sync.go
-index 49975158..f6242f5f 100644
+index 3fbabbc9..bd5ed272 100644
 --- a/internal/service/sync.go
 +++ b/internal/service/sync.go
 @@ -2,6 +2,7 @@ package service
@@ -1096,7 +1096,7 @@ index 49975158..f6242f5f 100644
  	usageWork             usageWorkGate
  	db                    *gorm.DB
  	client                CPAClientFetcher
-@@ -94,6 +96,7 @@ func NewSyncService(db *gorm.DB, cfg config.Config) *SyncService {
+@@ -95,6 +97,7 @@ func NewSyncService(db *gorm.DB, cfg config.Config) *SyncService {
  
  // SyncServiceOptions 提供测试和局部调用需要替换的依赖。
  type SyncServiceOptions struct {
@@ -1104,7 +1104,7 @@ index 49975158..f6242f5f 100644
  	BaseURL         string
  	Client          CPAClientFetcher
  	MetadataFetcher MetadataFetcher
-@@ -123,6 +126,7 @@ func NewSyncServiceWithOptions(db *gorm.DB, opts SyncServiceOptions) *SyncServic
+@@ -125,6 +128,7 @@ func NewSyncServiceWithOptions(db *gorm.DB, opts SyncServiceOptions) *SyncServic
  		metadataFetcher = opts.Client
  	}
  	return &SyncService{
@@ -1112,20 +1112,20 @@ index 49975158..f6242f5f 100644
  		db:                    db,
  		client:                opts.Client,
  		metadataFetcher:       metadataFetcher,
-@@ -435,6 +439,13 @@ func (s *SyncService) processRedisInboxRows(ctx context.Context, writeDB *gorm.D
- 	}
- 	// 事务已经同时提交 usage_events 与对应 inbox processed，只有此时事件级 Token 日志才代表真实入库事件。
- 	logCommittedTokenProcessingEvents(normalizedItems)
-+	if result.InsertedEvents > 0 {
+@@ -443,6 +447,13 @@ func (s *SyncService) processRedisInboxRows(ctx context.Context, writeDB *gorm.D
+ 		if s.usageEventsLive != nil {
+ 			s.usageEventsLive.NotifyUsageEventsCommitted(events)
+ 		}
 +		groups := make([]string, 0, len(events))
 +		for _, event := range events {
 +			groups = append(groups, event.APIGroupKey)
 +		}
 +		s.live.Publish("usage", groups...)
 +	}
- 	if result.InsertedEvents > 0 {
++	if result.InsertedEvents > 0 {
  		if s.pluginAPIKeys != nil && len(pluginIdentities) > 0 {
  			// 独立切片只包含真正提交的 ready 事件身份；登记失败不影响用量提交。
+ 			s.pluginAPIKeys.NotifyPluginAPIKeys(append([]entities.PluginAPIKeyIdentity(nil), pluginIdentities...))
 diff --git a/web/dist/.gitkeep b/web/dist/.gitkeep
 deleted file mode 100644
 index e69de29b..00000000
@@ -1582,7 +1582,7 @@ index 178efe4e..0159924e 100644
          <div className={`${styles.credentialHealthCompactMeta} ${healthMetaToneClassName[summary.tone]}`.trim()}>
            <span className={styles.credentialHealthMetaStatus}>{summary.label}</span>
 diff --git a/web/src/components/usage/credentials/CredentialSections.module.scss b/web/src/components/usage/credentials/CredentialSections.module.scss
-index 2381aaaf..9f862e25 100644
+index 8a8f036e..4f2f6501 100644
 --- a/web/src/components/usage/credentials/CredentialSections.module.scss
 +++ b/web/src/components/usage/credentials/CredentialSections.module.scss
 @@ -288,10 +288,10 @@ $credential-provider-icon-size: 30px;
@@ -1611,7 +1611,7 @@ index 2381aaaf..9f862e25 100644
    box-shadow: none;
    cursor: default;
    transform-origin: center bottom;
-@@ -3448,7 +3448,7 @@ $credential-provider-icon-size: 30px;
+@@ -3454,7 +3454,7 @@ $credential-health-tooltip-border-width: 1px;
  
    .credentialHealthGrid {
      grid-template-columns: repeat(30, minmax(0, 1fr));
@@ -1620,7 +1620,7 @@ index 2381aaaf..9f862e25 100644
      gap: 2px;
      width: 100%;
      padding: 0;
-@@ -3780,3 +3780,13 @@ $credential-provider-icon-size: 30px;
+@@ -3786,3 +3786,13 @@ $credential-health-tooltip-border-width: 1px;
      transition: none;
    }
  }
@@ -2125,7 +2125,7 @@ index 00000000..99dce321
 + useEffect(() => { if (!enabled) return; return startLiveRefresh(async () => current.current(), key.split(',') as LiveTopic[], false); }, [enabled, key]);
 +}
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index ab2b42e3..95efa315 100644
+index 4efcf08a..3b44ef40 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
 @@ -20,6 +20,8 @@ const getInitialLanguage = (): SupportedLanguage => {
@@ -2137,7 +2137,7 @@ index ab2b42e3..95efa315 100644
        overview_limits: { window: 'Window', observed_ago: '{{minutes}}m {{seconds}}s ago', title: 'Usage Limits', account: 'Provider / account', remaining: 'Remaining', resets: 'Resets in', unavailable: 'Quota unavailable', capture_unknown: 'Capture time unavailable', stale: 'Stale observation', awaiting: 'Awaiting update', info: 'Quota details', rpm_avg: 'RPM avg' },
        read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
        auto_refresh: { settings: 'Auto-refresh settings', off: 'Off', paused: 'Paused', every: 'Every {{seconds}}s' },
-@@ -1115,6 +1117,8 @@ const resources = {
+@@ -1132,6 +1134,8 @@ const resources = {
    },
    zh: {
      translation: {
@@ -2146,7 +2146,7 @@ index ab2b42e3..95efa315 100644
        overview_limits: { window: '窗口', observed_ago: '{{minutes}}分 {{seconds}}秒前', title: '用量限额', account: '提供商 / 账号', remaining: '剩余', resets: '重置倒计时', unavailable: '限额不可用', capture_unknown: '采集时间不可用', stale: '数据已过期', awaiting: '等待更新', info: '限额详情', rpm_avg: 'RPM 平均' },
        read_only: {password_placeholder: 'Enter read-only password', sign_out_title: 'Sign out read-only session?', sign_out_body: 'This session will lose access to the overview.',"title": "Read-only overview", "login_tab": "Read-only overview", "login_submit": "Open overview", "password": "Read-only password", "scope": "Usage across all client keys. Estimated API costs are not subscription charges.", "keys": "Client key usage", "requests": "Requests", "tokens": "Tokens", "failures": "Failures", "cost": "Estimated API cost", "range": "Time range", "empty": "No client key usage in this period.", "error": "Usage data is unavailable. Try refreshing.", "trend": "Requests over time", "hours": "Last 24 hours", "week": "Last 7 days", "month": "Last 30 days"},
        auto_refresh: { settings: '自动刷新设置', off: '关闭', paused: '已暂停', every: '每 {{seconds}} 秒' },
-@@ -2210,6 +2214,8 @@ const resources = {
+@@ -2244,6 +2248,8 @@ const resources = {
    },
    'zh-TW': {
      translation: {
@@ -2513,69 +2513,28 @@ index 640dae1f..8e8e0480 100644
   </KeyViewerShell>;
  }
 diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
-index 4d1b9d50..eebd1790 100644
+index fe07d2b9..b28357fa 100644
 --- a/web/src/pages/UsagePage.tsx
 +++ b/web/src/pages/UsagePage.tsx
-@@ -17,7 +17,7 @@ import { MainActionButton } from '@/components/ui/MainActionButton';
+@@ -19,7 +19,7 @@ import { MainActionButton } from '@/components/ui/MainActionButton';
  import { Modal } from '@/components/ui/Modal';
  import { IconRefreshCw } from '@/components/ui/icons';
  import { updateCredentialDetailStats } from '@/components/usage/credentials/credentialViewModels';
 -import { CREDENTIAL_PAGES_REFRESH_INTERVAL_MS } from '@/components/usage/credentials/useCredentialPages';
 +import { startLiveRefresh } from '@/lib/live';
  import { PricingSettings, type PricingSettingsHandle } from '@/components/usage/pricing/PricingSettings';
- import { buildCredentialProviderSearch } from '@/components/usage/credentials/credentialProviderFilters';
- import { useMediaQuery } from '@/hooks/useMediaQuery';
-@@ -238,8 +238,8 @@ export const shouldAutoRefreshUsageTab = ({
-   activeTab: UsageTab;
-   eventsPage: number;
- }) => {
--  if (activeTab === 'overview' || activeTab === 'realtime') return true;
--  if (activeTab === 'events') return eventsPage === 1;
-+  if (activeTab === 'overview' || activeTab === 'realtime' || activeTab === 'analysis') return true;
-+  if (activeTab === 'events') return eventsPage >= 1;
-   return false;
- };
+ import { ModelCatalog, type ModelCatalogHandle } from '@/components/usage/models/ModelCatalog';
+ import { useModelCatalogData } from '@/components/usage/models/useModelCatalogData';
+@@ -237,7 +237,7 @@ type TopNoticeKind = 'success' | 'info' | 'error';
+ export const getUpdateCheckToastDuration = (kind: TopNoticeKind) => (kind === 'error' ? 6_000 : 4_000);
  
-@@ -1453,7 +1453,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
-     }
-   }, [onAuthRequired]);
+ export const shouldAutoRefreshUsageTab = ({ activeTab }: { activeTab: UsageTab }) => (
+-  activeTab === 'overview' || activeTab === 'realtime'
++  activeTab === 'overview' || activeTab === 'realtime' || activeTab === 'analysis'
+ );
  
--  const loadEvents = useCallback(async () => {
-+  const loadEvents = useCallback(async (background = false) => {
-     if (!usageRangeQuery.valid || !apiKeyFilterReady) return;
-     const scope = JSON.stringify([usageRangeQuery, requestApiKeyId, eventsModelFilter, eventsSourceFilter, eventsResultFilter]);
-     const sameScope = eventsLoadedScopeRef.current === scope;
-@@ -1463,7 +1463,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
-     const controller = new AbortController();
-     eventsRequestControllerRef.current = controller;
- 
--    setEventsLoading(true);
-+    if (!background) setEventsLoading(true);
-     setEventsLoadingMore(false);
-     setEventsError('');
-     setEventsAutoLoadMore(true);
-@@ -1485,17 +1485,16 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
-         return;
-       }
-       eventsLoadedScopeRef.current = scope;
--      setEventsData(response.events);
-+      setEventsData(previous => background && sameScope ? [...response.events, ...previous.filter(event => !response.events.some(fresh => fresh.id === event.id))] : response.events);
-       setEventsTotalCount(Math.max(response.total_count, 0));
--      setEventsNextCursor(response.has_more === true ? response.next_cursor?.trim() || null : null);
--      setEventsPage(1);
-+      if (!background || !sameScope) {setEventsNextCursor(response.has_more === true ? response.next_cursor?.trim() || null : null);setEventsPage(1);}
-     } catch (error) {
-       if (controller.signal.aborted) {
-         return;
-       }
-       if (isCostsBusy(error)) setEventsAutoLoadMore(false);
-       if (eventsRequestControllerRef.current === controller) {
--        if (!isCostsBusy(error) || !sameScope) {
-+        if ((!background && !isCostsBusy(error)) || !sameScope) {
-           setEventsData([]);
-           setEventsTotalCount(0);
-           setEventsNextCursor(null);
-@@ -1702,9 +1701,9 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+ type RequestEventFilterState = {
+@@ -1529,9 +1529,9 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
      if (!credentialDetailOpen) return;
      // 详情按稳定 ID 独立刷新，凭证因重置移出当前分页后仍能观察新增用量。
      void refreshCredentialDetail();
@@ -2587,7 +2546,7 @@ index 4d1b9d50..eebd1790 100644
        credentialDetailRequestRef.current?.controller.abort();
        credentialDetailRequestRef.current = null;
      };
-@@ -1783,13 +1782,14 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -1614,6 +1614,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
  
    const refreshAutoRefreshTab = useCallback(async () => {
      invalidateScopedApiKeys();
@@ -2595,43 +2554,26 @@ index 4d1b9d50..eebd1790 100644
      if (!apiKeyFilterReady && shouldShowApiKeyFilter(activeTab)) return;
      if (activeTab === 'realtime') {
        await loadRealtime();
-       return;
-     }
-     if (activeTab === 'events') {
--      await loadEvents();
-+      await loadEvents(true);
-       return;
-     }
-     if (credentialSectionVisibility.enabled) {
-@@ -1797,7 +1797,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -1624,7 +1625,7 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
        return;
      }
      await Promise.all([loadUsage(), loadActivity({ skipIfInFlight: true }), loadComparisons({ skipIfInFlight: true })]);
--  }, [activeTab, apiKeyFilterReady, credentialSectionVisibility.enabled, loadActivity, loadComparisons, loadEvents, loadRealtime, loadUsage, refreshCredentials, invalidateScopedApiKeys]);
-+  }, [activeTab, apiKeyFilterReady, credentialSectionVisibility.enabled, loadActivity, loadAnalysis, loadComparisons, loadEvents, loadRealtime, loadUsage, refreshCredentials, invalidateScopedApiKeys]);
+-  }, [activeTab, apiKeyFilterReady, credentialSectionVisibility.enabled, loadActivity, loadComparisons, loadRealtime, loadUsage, refreshCredentials, invalidateScopedApiKeys]);
++  }, [activeTab, apiKeyFilterReady, credentialSectionVisibility.enabled, loadActivity, loadAnalysis, loadComparisons, loadRealtime, loadUsage, refreshCredentials, invalidateScopedApiKeys]);
  
    const handleAutoRefreshError = useCallback((error: unknown) => {
      if (recoverRangeBoundsConflict(error)) return;
 diff --git a/web/src/pages/test/UsagePage.logic.test.ts b/web/src/pages/test/UsagePage.logic.test.ts
-index fa70bb2e..22453e44 100644
+index 65de8a9a..d10c81ee 100644
 --- a/web/src/pages/test/UsagePage.logic.test.ts
 +++ b/web/src/pages/test/UsagePage.logic.test.ts
-@@ -541,7 +541,7 @@ describe('UsagePage visibility guard', () => {
- describe('UsagePage active tab auto-refresh guard', () => {
-   it('allows Request Events auto-refresh only on the first page', () => {
-     expect(shouldAutoRefreshUsageTab({ activeTab: 'events', eventsPage: 1 })).toBe(true);
--    expect(shouldAutoRefreshUsageTab({ activeTab: 'events', eventsPage: 2 })).toBe(false);
-+    expect(shouldAutoRefreshUsageTab({ activeTab: 'events', eventsPage: 2 })).toBe(true);
-   });
- 
-   it('does not auto-refresh credential detail tabs', () => {
-@@ -552,7 +552,7 @@ describe('UsagePage active tab auto-refresh guard', () => {
+@@ -477,7 +477,7 @@ describe('UsagePage active tab auto-refresh guard', () => {
    it('keeps Overview auto-refresh enabled and does not auto-refresh other tabs', () => {
-     expect(shouldAutoRefreshUsageTab({ activeTab: 'overview', eventsPage: 2 })).toBe(true);
-     expect(shouldAutoRefreshUsageTab({ activeTab: 'realtime', eventsPage: 2 })).toBe(true);
--    expect(shouldAutoRefreshUsageTab({ activeTab: 'analysis', eventsPage: 1 })).toBe(false);
-+    expect(shouldAutoRefreshUsageTab({ activeTab: 'analysis', eventsPage: 1 })).toBe(true);
-     expect(shouldAutoRefreshUsageTab({ activeTab: 'settings', eventsPage: 1 })).toBe(false);
+     expect(shouldAutoRefreshUsageTab({ activeTab: 'overview' })).toBe(true);
+     expect(shouldAutoRefreshUsageTab({ activeTab: 'realtime' })).toBe(true);
+-    expect(shouldAutoRefreshUsageTab({ activeTab: 'analysis' })).toBe(false);
++    expect(shouldAutoRefreshUsageTab({ activeTab: 'analysis' })).toBe(true);
+     expect(shouldAutoRefreshUsageTab({ activeTab: 'settings' })).toBe(false);
    });
  });
 diff --git a/web/src/pages/test/UsagePageCredentialStats.test.tsx b/web/src/pages/test/UsagePageCredentialStats.test.tsx
@@ -2673,7 +2615,7 @@ index 62159e1e..c3e77e24 100644
      const trigger = Array.from(container.querySelectorAll<HTMLButtonElement>('[data-credential-detail-trigger]')).find((node) => node.querySelector('span')?.textContent === label);
      expect(trigger).toBeDefined();
 diff --git a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
-index 185d855d..b789488f 100644
+index 6cd9f969..884ae20b 100644
 --- a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
 +++ b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
 @@ -1,5 +1,7 @@
@@ -2684,7 +2626,7 @@ index 185d855d..b789488f 100644
  import React, { act } from 'react';
  import { createRoot, type Root } from 'react-dom/client';
  import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-@@ -30,7 +32,7 @@ vi.mock('react-chartjs-2', () => ({
+@@ -32,7 +34,7 @@ vi.mock('react-chartjs-2', () => ({
  
  vi.mock('@/lib/api', async (importOriginal) => ({
    ...await importOriginal<typeof import('@/lib/api')>(),
@@ -2693,7 +2635,7 @@ index 185d855d..b789488f 100644
    fetchStatus: async () => ({ timezone: 'UTC' }),
    fetchVersion: async () => ({ version: 'test' }),
    fetchUsageEventModelFilterOptions: async () => ({ models: ['gpt-5'] }),
-@@ -56,6 +58,7 @@ describe('UsagePage top API Key request event filter', () => {
+@@ -58,6 +60,7 @@ describe('UsagePage top API Key request event filter', () => {
  
    beforeEach(async () => {
      globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -2701,29 +2643,20 @@ index 185d855d..b789488f 100644
      await i18n.changeLanguage('en');
      localStorage.clear();
      window.history.replaceState(null, '', '/request-events');
-@@ -226,7 +229,7 @@ describe('UsagePage top API Key request event filter', () => {
-     expect(button('Load more')).toBeUndefined();
-     await act(async () => resolveNew({ ...firstPage, next_cursor: 'cursor-new-key' }));
-     const calls = api.fetchUsageEvents.mock.calls.length;
--    await act(async () => vi.advanceTimersByTimeAsync(15_000));
-+    await act(async () => {emit(['usage']);await vi.advanceTimersByTimeAsync(200)});
-     expect(api.fetchUsageEvents.mock.calls.length).toBeGreaterThan(calls);
-     expect(api.fetchUsageEvents.mock.lastCall![2]).toMatchObject({ apiKeyId: '33' });
-     expect(api.fetchUsageEvents.mock.lastCall![2].cursor).toBeUndefined();
-@@ -257,7 +260,7 @@ describe('UsagePage top API Key request event filter', () => {
+@@ -264,7 +267,7 @@ describe('UsagePage top API Key request event filter', () => {
      await toggleKey();
      expect(scopedCalls()).toHaveLength(1);
  
 -    await act(async () => vi.advanceTimersByTimeAsync(10_000));
 +    await act(async () => {emit(['usage','quota']);await vi.advanceTimersByTimeAsync(200)});
      expect(scopedCalls()).toHaveLength(1);
-     let finish!: (value: typeof keyOptions) => void;
-     api.fetchCpaApiKeyOptions.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+     await toggleKey();
+     expect(scopedCalls()).toHaveLength(1);
 diff --git a/web/src/pages/test/UsagePageRuntime.test.tsx b/web/src/pages/test/UsagePageRuntime.test.tsx
-index fd2f1dbd..497a2620 100644
+index 2d41a603..f4e97ce1 100644
 --- a/web/src/pages/test/UsagePageRuntime.test.tsx
 +++ b/web/src/pages/test/UsagePageRuntime.test.tsx
-@@ -113,7 +113,7 @@ describe('UsagePage runtime behavior', () => {
+@@ -114,7 +114,7 @@ describe('UsagePage runtime behavior', () => {
      await act(async () => next.click());
      expect(window.location.pathname).toBe('/settings');
      expect(trigger.getAttribute('aria-expanded')).toBe('false');

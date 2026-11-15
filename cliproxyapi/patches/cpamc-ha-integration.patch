@@ -1,5 +1,5 @@
 diff --git a/src/features/authFiles/AuthFilesPage.tsx b/src/features/authFiles/AuthFilesPage.tsx
-index 01ec04b..81c04fd 100644
+index 8e2db4b..e932595 100644
 --- a/src/features/authFiles/AuthFilesPage.tsx
 +++ b/src/features/authFiles/AuthFilesPage.tsx
 @@ -1,6 +1,8 @@
@@ -11,23 +11,23 @@ index 01ec04b..81c04fd 100644
  import { useInterval } from '@/hooks/useInterval';
  import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
  import { useRevealOnScroll } from '@/hooks/motion';
-@@ -89,6 +91,7 @@ export function AuthFilesPage() {
-   const [filter, setFilter] = useState<'all' | string>('all');
-   const [statusFilterMode, setStatusFilterMode] = useState<AuthFilesStatusFilterMode>('all');
-   const [compactMode, setCompactMode] = useState(false);
+@@ -98,6 +100,7 @@ export function AuthFilesPage() {
+   const [layout, setLayout] = useState<CardLayout>('even');
+   // Compact is the page's existing compact card; it keeps its own page size.
+   const compactMode = layout === 'compact';
 +  const [showQuotaAge, setShowQuotaAge] = useState(true);
    const [search, setSearch] = useState('');
    const [page, setPage] = useState(1);
    const [pageSizeByMode, setPageSizeByMode] = useState({
-@@ -230,6 +233,7 @@ export function AuthFilesPage() {
+@@ -229,6 +232,7 @@ export function AuthFilesPage() {
        if (typeof persistedCompactMode !== 'boolean' && typeof persisted.compactMode === 'boolean') {
-         setCompactMode(persisted.compactMode);
+         compactFallback = persisted.compactMode;
        }
 +      if (typeof persisted.showQuotaAge === 'boolean') setShowQuotaAge(persisted.showQuotaAge);
        if (typeof persisted.search === 'string') {
          setSearch(persisted.search);
        }
-@@ -269,6 +273,7 @@ export function AuthFilesPage() {
+@@ -270,6 +274,7 @@ export function AuthFilesPage() {
        problemOnly,
        disabledOnly,
        compactMode,
@@ -35,46 +35,46 @@ index 01ec04b..81c04fd 100644
        search,
        page,
        pageSize,
-@@ -279,6 +284,7 @@ export function AuthFilesPage() {
-     writePersistedAuthFilesCompactMode(compactMode);
+@@ -282,6 +287,7 @@ export function AuthFilesPage() {
    }, [
      compactMode,
+     layout,
 +    showQuotaAge,
      disabledOnly,
      filter,
      page,
-@@ -641,6 +647,8 @@ export function AuthFilesPage() {
+@@ -582,6 +588,7 @@ export function AuthFilesPage() {
+       key={getQuotaCacheKey(file)}
+       file={file}
+       compact={compactMode}
++      showQuotaAge={showQuotaAge}
+       selected={selectedFiles.has(file.name)}
+       resolvedTheme={resolvedTheme}
+       disableControls={disableControls}
+@@ -595,6 +602,14 @@ export function AuthFilesPage() {
+       onShowModels={showModels}
+       onDownload={handleDownload}
+       onManualRefresh={handleManualRefresh}
++      onReconnect={(item) => {
++        const target = makeCodexReconnectTarget(
++          item,
++          apiClient.getConnectionRevision(),
++          useAuthStore.getState().apiBase
++        );
++        if (target) navigate('/auth-files/reconnect', { state: target });
++      }}
+       onCooldownReset={handleCooldownReset}
+       onOpenPrefixProxyEditor={openPrefixProxyEditor}
+       onDelete={handleDelete}
+@@ -663,6 +678,8 @@ export function AuthFilesPage() {
            onPageSizeCommit={commitPageSizeInput}
-           compactMode={compactMode}
-           onCompactModeChange={setCompactMode}
+           layout={layout}
+           onLayoutChange={setLayout}
 +          showQuotaAge={showQuotaAge}
 +          onShowQuotaAgeChange={setShowQuotaAge}
            deleteLabel={deleteAllButtonLabel}
            deleteDisabled={disableControls || loading || deletingAll || files.length === 0}
            deleteLoading={deletingAll}
-@@ -706,6 +714,7 @@ export function AuthFilesPage() {
-                 key={getQuotaCacheKey(file)}
-                 file={file}
-                 compact={compactMode}
-+                showQuotaAge={showQuotaAge}
-                 selected={selectedFiles.has(file.name)}
-                 resolvedTheme={resolvedTheme}
-                 disableControls={disableControls}
-@@ -719,6 +728,14 @@ export function AuthFilesPage() {
-                 onShowModels={showModels}
-                 onDownload={handleDownload}
-                 onManualRefresh={handleManualRefresh}
-+                onReconnect={(item) => {
-+                  const target = makeCodexReconnectTarget(
-+                    item,
-+                    apiClient.getConnectionRevision(),
-+                    useAuthStore.getState().apiBase
-+                  );
-+                  if (target) navigate('/auth-files/reconnect', { state: target });
-+                }}
-                 onCooldownReset={handleCooldownReset}
-                 onOpenPrefixProxyEditor={openPrefixProxyEditor}
-                 onDelete={handleDelete}
 diff --git a/src/features/authFiles/CodexReconnectPage.module.scss b/src/features/authFiles/CodexReconnectPage.module.scss
 new file mode 100644
 index 0000000..d9bc772
@@ -485,7 +485,7 @@ index 69690d0..8ba911e 100644
                )}
                <Button
 diff --git a/src/features/authFiles/components/AuthFileQuota.module.scss b/src/features/authFiles/components/AuthFileQuota.module.scss
-index 4b90b07..2535120 100644
+index b186ac8..7c356fd 100644
 --- a/src/features/authFiles/components/AuthFileQuota.module.scss
 +++ b/src/features/authFiles/components/AuthFileQuota.module.scss
 @@ -61,12 +61,47 @@ button.quotaMessageAction {
@@ -818,12 +818,16 @@ index 7fb45be..2b0bb49 100644
        )}
      </div>
 diff --git a/src/features/authFiles/components/AuthFilesToolbar.tsx b/src/features/authFiles/components/AuthFilesToolbar.tsx
-index a3fbff4..bed6fc7 100644
+index 2d41689..89e746a 100644
 --- a/src/features/authFiles/components/AuthFilesToolbar.tsx
 +++ b/src/features/authFiles/components/AuthFilesToolbar.tsx
-@@ -5,14 +5,8 @@ import { Select } from '@/components/ui/Select';
+@@ -3,17 +3,12 @@ import { useTranslation } from 'react-i18next';
+ import { Input } from '@/components/ui/Input';
+ import { Select } from '@/components/ui/Select';
  import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
- import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
++import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
+ import { CardLayoutSwitch } from '@/components/ui/CardLayoutSwitch';
+ import type { CardLayout } from '@/components/ui/cardLayout';
  import { IconSearch, IconSlidersHorizontal, IconTrash2 } from '@/components/ui/icons';
 -import {
 -  MAX_CARD_PAGE_SIZE,
@@ -838,25 +842,25 @@ index a3fbff4..bed6fc7 100644
  import styles from './AuthFilesToolbar.module.scss';
  
  export type AuthFilesToolbarProps = {
-@@ -28,6 +22,8 @@ export type AuthFilesToolbarProps = {
-   onPageSizeInputChange: (event: ChangeEvent<HTMLInputElement>) => void;
+@@ -30,6 +25,8 @@ export type AuthFilesToolbarProps = {
    onPageSizeCommit: (rawValue: string) => void;
-   compactMode: boolean;
+   layout: CardLayout;
+   onLayoutChange: (layout: CardLayout) => void;
 +  showQuotaAge?: boolean;
 +  onShowQuotaAgeChange?: (value: boolean) => void;
-   onCompactModeChange: (value: boolean) => void;
    deleteLabel: string;
    deleteDisabled: boolean;
-@@ -53,6 +49,8 @@ export function AuthFilesToolbar(props: AuthFilesToolbarProps) {
-     onPageSizeInputChange,
+   deleteLoading: boolean;
+@@ -55,6 +52,8 @@ export function AuthFilesToolbar(props: AuthFilesToolbarProps) {
      onPageSizeCommit,
-     compactMode,
+     layout,
+     onLayoutChange,
 +    showQuotaAge = true,
 +    onShowQuotaAgeChange,
-     onCompactModeChange,
      deleteLabel,
      deleteDisabled,
-@@ -138,7 +136,7 @@ export function AuthFilesToolbar(props: AuthFilesToolbarProps) {
+     deleteLoading,
+@@ -139,7 +138,7 @@ export function AuthFilesToolbar(props: AuthFilesToolbarProps) {
            aria-expanded={displaySettingsOpen}
            aria-controls="auth-files-display-settings"
            title={t('auth_files.display_options_label')}
@@ -865,7 +869,7 @@ index a3fbff4..bed6fc7 100644
          >
            <IconSlidersHorizontal size={15} />
            <span>{t('auth_files.display_options_label')}</span>
-@@ -165,6 +163,14 @@ export function AuthFilesToolbar(props: AuthFilesToolbarProps) {
+@@ -166,6 +165,14 @@ export function AuthFilesToolbar(props: AuthFilesToolbarProps) {
                  }}
                />
              </div>
@@ -878,8 +882,8 @@ index a3fbff4..bed6fc7 100644
 +              />
 +            </div>
              <div className={styles.popoverRow}>
-               <span>{t('auth_files.compact_mode_label')}</span>
-               <ToggleSwitch
+               <span>{t('card_layout.label')}</span>
+               <CardLayoutSwitch value={layout} onChange={onLayoutChange} />
 diff --git a/src/features/authFiles/reconnect.ts b/src/features/authFiles/reconnect.ts
 new file mode 100644
 index 0000000..9003565
@@ -938,7 +942,7 @@ index 0000000..9003565
 +  return undefined;
 +}
 diff --git a/src/features/authFiles/uiState.ts b/src/features/authFiles/uiState.ts
-index 034b809..ef803c6 100644
+index 38d9976..60503d3 100644
 --- a/src/features/authFiles/uiState.ts
 +++ b/src/features/authFiles/uiState.ts
 @@ -1,10 +1,5 @@
@@ -1498,7 +1502,7 @@ index 0000000..2b0da26
 +    .find((part) => part.type === 'timeZoneName')?.value;
 +}
 diff --git a/src/features/quota/components/QuotaCard.tsx b/src/features/quota/components/QuotaCard.tsx
-index 64538b5..c111465 100644
+index c334b3f..ea16d42 100644
 --- a/src/features/quota/components/QuotaCard.tsx
 +++ b/src/features/quota/components/QuotaCard.tsx
 @@ -1,3 +1,8 @@
@@ -1510,7 +1514,7 @@ index 64538b5..c111465 100644
  /**
   * Provider quota card: identity, loading/error state, quota body, and actions.
   * Claude observations remain visible while refreshing or after a failed read.
-@@ -53,6 +58,13 @@ export function QuotaCard(props: QuotaCardProps) {
+@@ -68,6 +73,13 @@ export function QuotaCard(props: QuotaCardProps) {
    const { t } = useTranslation();
    const adapter = QUOTA_ADAPTERS[entry.type];
    const file = entry.file;
@@ -1524,7 +1528,7 @@ index 64538b5..c111465 100644
    const retainedClaudeUsage =
      entry.type === 'claude' && hasClaudeUsageData(quota as ClaudeQuotaState | undefined);
    const displayName = getQuotaDisplayName(file);
-@@ -137,7 +149,19 @@ export function QuotaCard(props: QuotaCardProps) {
+@@ -181,7 +193,19 @@ export function QuotaCard(props: QuotaCardProps) {
        </header>
  
        <div className={styles.body}>
@@ -1545,7 +1549,7 @@ index 64538b5..c111465 100644
            <button
              type="button"
              className={styles.idleBody}
-@@ -176,7 +200,7 @@ export function QuotaCard(props: QuotaCardProps) {
+@@ -220,7 +244,7 @@ export function QuotaCard(props: QuotaCardProps) {
              {t(`${adapter.i18nPrefix}.loading`)}
            </div>
          )}
@@ -1554,12 +1558,12 @@ index 64538b5..c111465 100644
            <adapter.Body
              quota={quota}
              classes={quotaClasses}
-@@ -186,7 +210,7 @@ export function QuotaCard(props: QuotaCardProps) {
+@@ -230,7 +254,7 @@ export function QuotaCard(props: QuotaCardProps) {
          )}
        </div>
  
--      {status !== 'idle' && (
-+      {(status !== 'idle' || hasDisplay) && (
+-      {status !== 'idle' && !glance && (
++      {(status !== 'idle' || hasDisplay) && !glance && (
          <footer className={styles.actionRow}>
            {entry.type === 'claude' && (
              <button
@@ -1739,7 +1743,7 @@ index 0000000..886cdae
 +  };
 +}
 diff --git a/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx b/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx
-index 34e3a9f..2568ad2 100644
+index 0a5dc25..17826f4 100644
 --- a/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx
 +++ b/src/features/quota/providers/antigravity/AntigravityQuotaBody.tsx
 @@ -1,3 +1,4 @@
@@ -1759,7 +1763,7 @@ index 34e3a9f..2568ad2 100644
                            className={
                              soon
 diff --git a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
-index 5d16c83..9124354 100644
+index 2c11c16..da8a872 100644
 --- a/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
 +++ b/src/features/quota/providers/claude/ClaudeQuotaBody.tsx
 @@ -1,3 +1,5 @@
@@ -1785,7 +1789,7 @@ index 5d16c83..9124354 100644
    const now = useNow();
    const soonestRowId = useMemo(
      () => pickUrgentRowId(collectQuotaRowInstants('claude', quota), now),
-@@ -186,9 +189,11 @@ export function ClaudeQuotaBody({
+@@ -187,9 +190,11 @@ export function ClaudeQuotaBody({
                <div className={classes.quotaRowHeader}>
                  <span className={classes.quotaModel}>{windowLabel}</span>
                  <div className={classes.quotaMeta}>
@@ -1800,14 +1804,14 @@ index 5d16c83..9124354 100644
                  </div>
                </div>
 diff --git a/src/features/quota/providers/codex/CodexQuotaBody.tsx b/src/features/quota/providers/codex/CodexQuotaBody.tsx
-index 486dc09..f7b04a6 100644
+index 844e837..60f55e1 100644
 --- a/src/features/quota/providers/codex/CodexQuotaBody.tsx
 +++ b/src/features/quota/providers/codex/CodexQuotaBody.tsx
 @@ -1,3 +1,5 @@
 +import { QuotaObservedPercent } from '../../QuotaObservedPercent';
 +import { useAuthFileResetDisplay, useAuthFileTimeZone } from '../../authFileObservation';
  /**
-  * Codex 额度渲染体：套餐 chip 行（档位见 cardTier.ts）、重置积分明细、用量窗口水位条。
+  * Codex 额度渲染体：套餐 chip 行（档位见 cardTier.ts）、宿主插槽、重置积分明细、用量窗口水位条。
   */
 @@ -11,7 +13,6 @@ import {
    PRO_CODEX_PLAN_TYPE,
@@ -1817,16 +1821,16 @@ index 486dc09..f7b04a6 100644
    formatInstantShort,
    parseIsoToMs,
    resolveResetMs,
-@@ -27,6 +28,8 @@ import type { QuotaBodyProps } from '../../types';
- 
- export function CodexQuotaBody({ quota, classes }: QuotaBodyProps<CodexQuotaState>) {
+@@ -32,6 +33,8 @@ export function CodexQuotaBody({
+   afterPlan,
+ }: QuotaBodyProps<CodexQuotaState>) {
    const { t, i18n } = useTranslation();
 +  const buildResetDisplay = useAuthFileResetDisplay();
 +  const browserTimeZone = useAuthFileTimeZone(quota.rateLimitResetCredits?.[0]?.expiresAt);
    const now = useNow();
    const locale = i18n.resolvedLanguage;
    // Windows and reset credits compete for the same emphasis, but only during
-@@ -121,7 +124,9 @@ export function CodexQuotaBody({ quota, classes }: QuotaBodyProps<CodexQuotaStat
+@@ -129,7 +132,9 @@ export function CodexQuotaBody({
        {rateLimitResetCredits.length > 0 ? (
          <div className={classes.codexResetCredits}>
            <div className={classes.codexResetCreditsTitle}>
@@ -1837,7 +1841,7 @@ index 486dc09..f7b04a6 100644
            </div>
            {rateLimitResetCredits.map((credit, index) => {
              const expiresAtMs = parseIsoToMs(credit.expiresAt);
-@@ -189,9 +194,11 @@ export function CodexQuotaBody({ quota, classes }: QuotaBodyProps<CodexQuotaStat
+@@ -197,9 +202,11 @@ export function CodexQuotaBody({
                <div className={classes.quotaRowHeader}>
                  <span className={classes.quotaModel}>{windowLabel}</span>
                  <div className={classes.quotaMeta}>
@@ -1852,7 +1856,7 @@ index 486dc09..f7b04a6 100644
                  </div>
                </div>
 diff --git a/src/features/quota/providers/codex/data.ts b/src/features/quota/providers/codex/data.ts
-index b237dff..f96a846 100644
+index 5f87cf3..2061580 100644
 --- a/src/features/quota/providers/codex/data.ts
 +++ b/src/features/quota/providers/codex/data.ts
 @@ -52,6 +52,7 @@ type CodexResetCreditsData = {
@@ -1936,7 +1940,7 @@ index b237dff..f96a846 100644
      planType: data.planType,
      subscriptionActiveUntil: data.subscriptionActiveUntil,
 diff --git a/src/features/quota/providers/devin/DevinQuotaBody.tsx b/src/features/quota/providers/devin/DevinQuotaBody.tsx
-index d2329b2..aad501c 100644
+index ddef81f..bbfcd9a 100644
 --- a/src/features/quota/providers/devin/DevinQuotaBody.tsx
 +++ b/src/features/quota/providers/devin/DevinQuotaBody.tsx
 @@ -1,7 +1,8 @@
@@ -1988,7 +1992,7 @@ index 4b4b3a6..e81f812 100644
    error?: string;
    errorStatus?: number;
 diff --git a/src/features/quota/providers/kimi/KimiQuotaBody.tsx b/src/features/quota/providers/kimi/KimiQuotaBody.tsx
-index defa322..cfe9ec0 100644
+index 9b590d8..3147d7a 100644
 --- a/src/features/quota/providers/kimi/KimiQuotaBody.tsx
 +++ b/src/features/quota/providers/kimi/KimiQuotaBody.tsx
 @@ -1,3 +1,5 @@
@@ -2070,7 +2074,7 @@ index 6f2dabd..9b89635 100644
                </div>
              </div>
 diff --git a/src/features/quota/providers/xai/XaiQuotaBody.tsx b/src/features/quota/providers/xai/XaiQuotaBody.tsx
-index 3eb8753..ead33c6 100644
+index 1fad049..5a321b0 100644
 --- a/src/features/quota/providers/xai/XaiQuotaBody.tsx
 +++ b/src/features/quota/providers/xai/XaiQuotaBody.tsx
 @@ -1,3 +1,5 @@
@@ -2096,7 +2100,7 @@ index 3eb8753..ead33c6 100644
    // Ahead of the early return below — hooks cannot be conditional.
    const now = useNow();
    const locale = i18n.resolvedLanguage;
-@@ -191,13 +194,18 @@ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>)
+@@ -193,13 +196,18 @@ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>)
            <div className={classes.quotaRowHeader}>
              <span className={classes.quotaModel}>{t('xai_quota.weekly_limit')}</span>
              <div className={classes.quotaMeta}>
@@ -2118,7 +2122,7 @@ index 3eb8753..ead33c6 100644
                )}
              </div>
            </div>
-@@ -225,7 +233,9 @@ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>)
+@@ -227,7 +235,9 @@ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>)
            <div className={classes.quotaRowHeader}>
              <span className={classes.quotaModel}>{t('xai_quota.pay_as_you_go_label')}</span>
              <div className={classes.quotaMeta}>
@@ -2129,7 +2133,7 @@ index 3eb8753..ead33c6 100644
                <span className={classes.quotaAmount}>{onDemandAmountLabel}</span>
              </div>
            </div>
-@@ -237,10 +247,12 @@ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>)
+@@ -239,10 +249,12 @@ export function XaiQuotaBody({ quota, classes }: QuotaBodyProps<XaiQuotaState>)
            <div className={classes.quotaRowHeader}>
              <span className={classes.quotaModel}>{t('xai_quota.monthly_credits')}</span>
              <div className={classes.quotaMeta}>
@@ -2410,13 +2414,13 @@ index 0000000..c957d86
 +    : snapshot.filter((item) => item.auth_index === index && item.provider === provider);
 +}
 diff --git a/src/i18n/locales/en.json b/src/i18n/locales/en.json
-index 4d97873..7477ed4 100644
+index b90f2fa..b804c19 100644
 --- a/src/i18n/locales/en.json
 +++ b/src/i18n/locales/en.json
-@@ -222,6 +222,27 @@
-     "routing_strategy_fill_first": "fill-first (prioritize)"
-   },
-   "auth_files": {
+@@ -224,6 +224,27 @@
+     "sync_catalog_success": "Model catalog synced. Updated providers: {{providers}}",
+     "sync_catalog_unchanged": "Model catalog synced. No changes.",
+     "sync_catalog_failed": "Failed to sync model catalog",
 +    "reconnect_button": "Reconnect",
 +    "reconnect_account": "Reconnect {{name}}",
 +    "reconnect_title": "Reconnect Codex account",
@@ -2441,7 +2445,7 @@ index 4d97873..7477ed4 100644
      "title": "Auth Files Management",
      "meta_total": "{{count}} credentials",
      "meta_active": "{{count}} active",
-@@ -440,7 +461,13 @@
+@@ -441,7 +462,13 @@
      "quota_refresh_single": "Refresh quota",
      "quota_refresh_hint": "Refresh quota only for this credential",
      "quota_refresh_success": "Quota refreshed for \"{{name}}\"",
@@ -2456,7 +2460,7 @@ index 4d97873..7477ed4 100644
    },
    "antigravity_subscription": {
      "plan_unknown": "Unknown",
-@@ -1494,8 +1521,8 @@
+@@ -1527,8 +1554,8 @@
          "input_placeholder": "Paste your API key",
          "name_label": "Name / description (optional)",
          "name_placeholder": "For example: Alice's laptop",
@@ -2467,7 +2471,7 @@ index 4d97873..7477ed4 100644
          "input_hint": "Changes take effect after saving the configuration. Upstream provider keys are managed separately.",
          "error_empty": "Please enter an API key",
          "error_invalid": "API key contains invalid characters",
-@@ -1506,7 +1533,9 @@
+@@ -1539,7 +1566,9 @@
            "fair": "Fair",
            "good": "Good",
            "strong": "Strong"
@@ -2478,7 +2482,7 @@ index 4d97873..7477ed4 100644
        },
        "payload_rules": {
          "rule": "Rule",
-@@ -2423,5 +2452,20 @@
+@@ -2489,5 +2518,20 @@
      "error": "Binding failed. Please start over.",
      "unsupported": "This backend does not support SIWC binding.",
      "expired": "The binding session expired. Please start over."
@@ -2500,13 +2504,13 @@ index 4d97873..7477ed4 100644
    }
  }
 diff --git a/src/i18n/locales/ko.json b/src/i18n/locales/ko.json
-index 0342f37..b516606 100644
+index 39d3b18..5a0ce45 100644
 --- a/src/i18n/locales/ko.json
 +++ b/src/i18n/locales/ko.json
-@@ -222,6 +222,24 @@
-     "routing_strategy_fill_first": "fill-first (우선 채우기)"
-   },
-   "auth_files": {
+@@ -224,6 +224,24 @@
+     "sync_catalog_success": "모델 카탈로그가 동기화되었습니다. 업데이트된 제공업체: {{providers}}",
+     "sync_catalog_unchanged": "모델 카탈로그가 동기화되었습니다. 변경 사항이 없습니다.",
+     "sync_catalog_failed": "모델 카탈로그 동기화 실패",
 +    "reconnect_button": "다시 로그인",
 +    "reconnect_account": "다시 로그인 {{name}}",
 +    "reconnect_title": "Codex 계정 다시 로그인",
@@ -2528,7 +2532,7 @@ index 0342f37..b516606 100644
      "title": "인증 파일 관리",
      "meta_total": "자격 증명 {{count}}개",
      "meta_active": "활성 {{count}}개",
-@@ -440,7 +458,16 @@
+@@ -441,7 +459,16 @@
      "quota_refresh_single": "할당량 새로 고침",
      "quota_refresh_hint": "이 자격 증명의 할당량만 새로 고침합니다",
      "quota_refresh_success": "\"{{name}}\"의 할당량을 새로 고쳤습니다",
@@ -2546,7 +2550,7 @@ index 0342f37..b516606 100644
    },
    "antigravity_subscription": {
      "plan_unknown": "알 수 없음",
-@@ -1506,7 +1533,9 @@
+@@ -1539,7 +1566,9 @@
            "fair": "보통",
            "good": "좋음",
            "strong": "강함"
@@ -2557,7 +2561,7 @@ index 0342f37..b516606 100644
        },
        "payload_rules": {
          "rule": "규칙",
-@@ -2423,5 +2452,20 @@
+@@ -2489,5 +2518,20 @@
      "error": "바인딩에 실패했습니다. 다시 시작하세요.",
      "unsupported": "이 서버는 SIWC 바인딩을 지원하지 않습니다.",
      "expired": "바인딩 세션이 만료되었습니다. 다시 시작하세요."
@@ -2579,13 +2583,13 @@ index 0342f37..b516606 100644
    }
  }
 diff --git a/src/i18n/locales/ru.json b/src/i18n/locales/ru.json
-index 62f21a0..9b1d990 100644
+index 7bc9704..e579cff 100644
 --- a/src/i18n/locales/ru.json
 +++ b/src/i18n/locales/ru.json
-@@ -221,6 +221,27 @@
-     "routing_strategy_fill_first": "fill-first (приоритет)"
-   },
-   "auth_files": {
+@@ -223,6 +223,27 @@
+     "sync_catalog_success": "Каталог моделей синхронизирован. Обновлены провайдеры: {{providers}}",
+     "sync_catalog_unchanged": "Каталог моделей синхронизирован. Изменений нет.",
+     "sync_catalog_failed": "Не удалось синхронизировать каталог моделей",
 +    "reconnect_button": "Войти снова",
 +    "reconnect_account": "Повторный вход: {{name}}",
 +    "reconnect_title": "Повторный вход в аккаунт Codex",
@@ -2610,7 +2614,7 @@ index 62f21a0..9b1d990 100644
      "title": "Управление файлами авторизации",
      "meta_total": "{{count}} учётных данных",
      "meta_active": "{{count}} активно",
-@@ -443,7 +464,13 @@
+@@ -444,7 +465,13 @@
      "quota_refresh_single": "Обновить квоту",
      "quota_refresh_hint": "Обновить квоту только для этих учётных данных",
      "quota_refresh_success": "Квота для \"{{name}}\" обновлена",
@@ -2625,7 +2629,7 @@ index 62f21a0..9b1d990 100644
    },
    "antigravity_subscription": {
      "plan_unknown": "Неизвестно",
-@@ -1497,8 +1524,8 @@
+@@ -1540,8 +1567,8 @@
          "input_placeholder": "Вставьте API-ключ",
          "name_label": "Имя / описание (необязательно)",
          "name_placeholder": "Например: ноутбук Анны",
@@ -2636,7 +2640,7 @@ index 62f21a0..9b1d990 100644
          "input_hint": "Изменения вступают в силу после сохранения конфигурации. Ключи провайдеров управляются отдельно.",
          "error_empty": "Введите API-ключ",
          "error_invalid": "API-ключ содержит недопустимые символы",
-@@ -1509,7 +1536,9 @@
+@@ -1552,7 +1579,9 @@
            "fair": "Средний",
            "good": "Хороший",
            "strong": "Надёжный"
@@ -2647,7 +2651,7 @@ index 62f21a0..9b1d990 100644
        },
        "payload_rules": {
          "rule": "Правило",
-@@ -2417,5 +2446,20 @@
+@@ -2493,5 +2522,20 @@
      "error": "Привязка не удалась. Начните заново.",
      "unsupported": "Этот сервер не поддерживает привязку SIWC.",
      "expired": "Сеанс привязки истёк. Начните заново."
@@ -2669,10 +2673,10 @@ index 62f21a0..9b1d990 100644
    }
  }
 diff --git a/src/i18n/locales/tr.json b/src/i18n/locales/tr.json
-index c64a7fc..be13040 100644
+index fec1790..e7cdf73 100644
 --- a/src/i18n/locales/tr.json
 +++ b/src/i18n/locales/tr.json
-@@ -440,7 +440,34 @@
+@@ -441,7 +441,34 @@
      "quota_refresh_single": "Kotayı Yenile",
      "quota_refresh_hint": "Yalnızca Bu Kimlik Bilgisinin Kotasını Yenile",
      "quota_refresh_success": "“{{name}}” için Kota Yenilendi",
@@ -2708,7 +2712,7 @@ index c64a7fc..be13040 100644
    },
    "antigravity_subscription": {
      "plan_unknown": "Bilinmiyor",
-@@ -1506,7 +1533,9 @@
+@@ -1539,7 +1566,9 @@
            "fair": "Orta",
            "good": "İyi",
            "strong": "Güçlü"
@@ -2719,7 +2723,7 @@ index c64a7fc..be13040 100644
        },
        "payload_rules": {
          "rule": "Kural",
-@@ -2423,5 +2452,20 @@
+@@ -2489,5 +2518,20 @@
      "error": "Bağlama Başarısız Oldu. Lütfen Yeniden Başla.",
      "unsupported": "Bu Arka Uç SIWC Bağlamayı Desteklemiyor.",
      "expired": "Bağlama Oturumunun Süresi Doldu. Lütfen Yeniden Başla."
@@ -2741,13 +2745,13 @@ index c64a7fc..be13040 100644
    }
  }
 diff --git a/src/i18n/locales/vi.json b/src/i18n/locales/vi.json
-index d7663a3..4107e18 100644
+index be1206d..243640e 100644
 --- a/src/i18n/locales/vi.json
 +++ b/src/i18n/locales/vi.json
-@@ -222,6 +222,24 @@
-     "routing_strategy_fill_first": "fill-first (ưu tiên lấp đầy)"
-   },
-   "auth_files": {
+@@ -224,6 +224,24 @@
+     "sync_catalog_success": "Đã đồng bộ danh mục mô hình. Nhà cung cấp được cập nhật: {{providers}}",
+     "sync_catalog_unchanged": "Đã đồng bộ danh mục mô hình. Không có thay đổi.",
+     "sync_catalog_failed": "Không thể đồng bộ danh mục mô hình",
 +    "reconnect_button": "Đăng nhập lại",
 +    "reconnect_account": "Đăng nhập lại {{name}}",
 +    "reconnect_title": "Đăng nhập lại tài khoản Codex",
@@ -2769,7 +2773,7 @@ index d7663a3..4107e18 100644
      "title": "Quản lý File xác thực",
      "meta_total": "{{count}} credential",
      "meta_active": "{{count}} đang hoạt động",
-@@ -440,7 +458,16 @@
+@@ -441,7 +459,16 @@
      "policy_rules_hint": "Các quy tắc tùy chỉnh được ưu tiên theo thứ tự danh sách. Kế thừa hoặc danh sách trống sẽ sử dụng quy tắc kế thừa; điều này không vô hiệu hóa chúng. Mẫu biểu thức chính quy (Regex) dùng cú pháp của Go.",
      "policy_retry_invalid": "Nhập một số nguyên an toàn không âm, hoặc chọn Kế thừa.",
      "policy_aliases_invalid": "Nhập tên model và bí danh không để trống cho mỗi hàng mới hoặc đã chỉnh sửa.",
@@ -2787,7 +2791,7 @@ index d7663a3..4107e18 100644
    },
    "antigravity_subscription": {
      "plan_unknown": "Không rõ",
-@@ -1298,7 +1325,9 @@
+@@ -1331,7 +1358,9 @@
          "name_label": "Tên / mô tả (tùy chọn)",
          "name_placeholder": "Ví dụ: Laptop của Alice",
          "name_hint": "Được lưu ngay trong trình duyệt này, riêng cho từng máy chủ. Không bao gồm trong cấu hình máy chủ. Xóa trường này để xóa tên.",
@@ -2798,7 +2802,7 @@ index d7663a3..4107e18 100644
        },
        "payload_rules": {
          "rule": "Quy tắc",
-@@ -2429,5 +2458,20 @@
+@@ -2495,5 +2524,20 @@
      "error": "Liên kết thất bại. Hãy bắt đầu lại.",
      "unsupported": "Máy chủ này không hỗ trợ liên kết SIWC.",
      "expired": "Phiên liên kết đã hết hạn. Hãy bắt đầu lại."
@@ -2820,13 +2824,13 @@ index d7663a3..4107e18 100644
    }
  }
 diff --git a/src/i18n/locales/zh-CN.json b/src/i18n/locales/zh-CN.json
-index 6e76801..63f943a 100644
+index babe0d5..59d3923 100644
 --- a/src/i18n/locales/zh-CN.json
 +++ b/src/i18n/locales/zh-CN.json
-@@ -222,6 +222,27 @@
-     "routing_strategy_fill_first": "fill-first (优先填充)"
-   },
-   "auth_files": {
+@@ -224,6 +224,27 @@
+     "sync_catalog_success": "模型目录同步成功，已更新提供商：{{providers}}",
+     "sync_catalog_unchanged": "模型目录同步成功，无变化。",
+     "sync_catalog_failed": "同步模型目录失败",
 +    "reconnect_button": "重新登录",
 +    "reconnect_account": "重新登录 {{name}}",
 +    "reconnect_title": "重新登录 Codex 账号",
@@ -2851,7 +2855,7 @@ index 6e76801..63f943a 100644
      "title": "认证文件管理",
      "meta_total": "{{count}} 个凭证",
      "meta_active": "{{count}} 个启用",
-@@ -438,7 +459,13 @@
+@@ -439,7 +460,13 @@
      "quota_refresh_single": "刷新额度",
      "quota_refresh_hint": "仅刷新该认证文件的额度",
      "quota_refresh_success": "已刷新 \"{{name}}\" 的额度",
@@ -2866,7 +2870,7 @@ index 6e76801..63f943a 100644
    },
    "antigravity_subscription": {
      "plan_unknown": "未知",
-@@ -1493,8 +1520,8 @@
+@@ -1521,8 +1548,8 @@
          "input_placeholder": "粘贴你的 API 密钥",
          "name_label": "名称 / 说明（可选）",
          "name_placeholder": "例如：小明的笔记本",
@@ -2877,7 +2881,7 @@ index 6e76801..63f943a 100644
          "input_hint": "保存配置后生效。上游提供商密钥独立管理，不受此处修改影响。",
          "error_empty": "请输入 API 密钥",
          "error_invalid": "API 密钥包含无效字符",
-@@ -1505,7 +1532,9 @@
+@@ -1533,7 +1560,9 @@
            "fair": "一般",
            "good": "良好",
            "strong": "很强"
@@ -2888,7 +2892,7 @@ index 6e76801..63f943a 100644
        },
        "payload_rules": {
          "rule": "规则",
-@@ -2422,5 +2451,20 @@
+@@ -2483,5 +2512,20 @@
      "error": "绑定失败，请重新开始。",
      "unsupported": "当前后端不支持 SIWC 绑定。",
      "expired": "绑定会话已过期，请重新开始。"
@@ -2910,13 +2914,13 @@ index 6e76801..63f943a 100644
    }
  }
 diff --git a/src/i18n/locales/zh-TW.json b/src/i18n/locales/zh-TW.json
-index 9d60d8d..a3c32e6 100644
+index 032c8e6..17857f3 100644
 --- a/src/i18n/locales/zh-TW.json
 +++ b/src/i18n/locales/zh-TW.json
-@@ -222,6 +222,27 @@
-     "routing_strategy_fill_first": "fill-first（優先填充）"
-   },
-   "auth_files": {
+@@ -224,6 +224,27 @@
+     "sync_catalog_success": "模型目錄同步成功，已更新供應商：{{providers}}",
+     "sync_catalog_unchanged": "模型目錄同步成功，無變更。",
+     "sync_catalog_failed": "同步模型目錄失敗",
 +    "reconnect_button": "重新登入",
 +    "reconnect_account": "重新登入 {{name}}",
 +    "reconnect_title": "重新登入 Codex 帳號",
@@ -2941,7 +2945,7 @@ index 9d60d8d..a3c32e6 100644
      "title": "驗證檔案管理",
      "meta_total": "{{count}} 個憑證",
      "meta_active": "{{count}} 個啟用",
-@@ -438,7 +459,13 @@
+@@ -439,7 +460,13 @@
      "quota_refresh_single": "重新整理配額",
      "quota_refresh_hint": "僅重新整理該驗證檔案的配額",
      "quota_refresh_success": "已重新整理「{{name}}」的配額",
@@ -2956,7 +2960,7 @@ index 9d60d8d..a3c32e6 100644
    },
    "antigravity_subscription": {
      "plan_unknown": "未知",
-@@ -1521,8 +1548,8 @@
+@@ -1549,8 +1576,8 @@
          "input_placeholder": "貼上你的 API 金鑰",
          "name_label": "名稱 / 說明（選填）",
          "name_placeholder": "例如：小明的筆記型電腦",
@@ -2967,7 +2971,7 @@ index 9d60d8d..a3c32e6 100644
          "input_hint": "儲存設定後生效。上游提供商金鑰獨立管理，不受此處修改影響。",
          "error_empty": "請輸入 API 金鑰",
          "error_invalid": "API 金鑰包含無效字元",
-@@ -1533,7 +1560,9 @@
+@@ -1561,7 +1588,9 @@
            "fair": "一般",
            "good": "良好",
            "strong": "很強"
@@ -2978,7 +2982,7 @@ index 9d60d8d..a3c32e6 100644
        },
        "payload_rules": {
          "rule": "規則",
-@@ -2450,5 +2479,20 @@
+@@ -2511,5 +2540,20 @@
      "error": "綁定失敗，請重新開始。",
      "unsupported": "目前後端不支援 SIWC 綁定。",
      "expired": "綁定工作階段已過期，請重新開始。"
@@ -3000,7 +3004,7 @@ index 9d60d8d..a3c32e6 100644
    }
  }
 diff --git a/src/router/MainRoutes.tsx b/src/router/MainRoutes.tsx
-index e6eca2b..9d16d8a 100644
+index 4cb38e1..5f1b064 100644
 --- a/src/router/MainRoutes.tsx
 +++ b/src/router/MainRoutes.tsx
 @@ -2,6 +2,7 @@ import { Navigate, useRoutes, type Location } from 'react-router-dom';
@@ -3103,7 +3107,7 @@ index 5b320f5..78550e7 100644
    });
  };
 diff --git a/src/services/api/client.ts b/src/services/api/client.ts
-index 5377483..17c46ed 100644
+index c481448..4768151 100644
 --- a/src/services/api/client.ts
 +++ b/src/services/api/client.ts
 @@ -16,11 +16,14 @@ import {
@@ -3121,7 +3125,7 @@ index 5377483..17c46ed 100644
  
    constructor(private readonly emitEvents: () => boolean = () => true) {
      this.instance = axios.create({
-@@ -125,6 +128,7 @@ class ApiClient {
+@@ -126,6 +129,7 @@ class ApiClient {
        (config) => {
          // Set baseURL
          config.baseURL = this.apiBase;
@@ -3129,7 +3133,7 @@ index 5377483..17c46ed 100644
  
          // Add authorization header
          if (this.managementKey) {
-@@ -183,8 +187,40 @@ class ApiClient {
+@@ -184,8 +188,40 @@ class ApiClient {
        apiError.details = responseData;
        apiError.data = responseData;
  
@@ -3173,7 +3177,7 @@ index 5377483..17c46ed 100644
        }
  
 diff --git a/src/services/api/oauth.ts b/src/services/api/oauth.ts
-index 32cb109..99076e0 100644
+index cebe67e..8042949 100644
 --- a/src/services/api/oauth.ts
 +++ b/src/services/api/oauth.ts
 @@ -19,6 +19,16 @@ export interface OAuthStartResponse {
@@ -3193,7 +3197,7 @@ index 32cb109..99076e0 100644
  export interface OAuthCallbackResponse {
    status: 'ok';
  }
-@@ -50,6 +60,11 @@ export const oauthApi = {
+@@ -58,6 +68,11 @@ export const oauthApi = {
    startSiwcBind: (name: string, signal?: AbortSignal) =>
      apiClient.post<SiwcBindResponse>('/oauth/siwc/bind', { name }, signal ? { signal } : undefined),
  
@@ -3202,10 +3206,10 @@ index 32cb109..99076e0 100644
 +      params: { name: target.name, auth_index: target.authIndex, is_webui: true },
 +      ...(signal ? { signal } : {}),
 +    }),
-   startAuth: (provider: string, signal?: AbortSignal) => {
+   startAuth: (provider: string, signal?: AbortSignal, options: OAuthStartOptions = {}) => {
      const providerKey = normalizeProviderForManagementPath(provider);
      const params: Record<string, string | boolean> = { provider: providerKey };
-@@ -63,7 +78,7 @@ export const oauthApi = {
+@@ -80,7 +95,7 @@ export const oauthApi = {
    },
  
    getAuthStatus: (state: string, signal?: AbortSignal) =>
@@ -3214,7 +3218,7 @@ index 32cb109..99076e0 100644
        params: { state },
        ...(signal ? { signal } : {}),
      }),
-@@ -92,3 +107,20 @@ export function captureSiwcBindingApi() {
+@@ -109,3 +124,20 @@ export function captureSiwcBindingApi() {
      cancel: (state: string) => client.delete('/oauth/session', { params: { state } }),
    };
  }
@@ -3248,10 +3252,10 @@ index 847ddb7..fe93e60 100644
    modified?: number;
    priority?: number;
 diff --git a/src/types/quota.ts b/src/types/quota.ts
-index bacb831..cbfdf97 100644
+index 219ebe9..82ceda4 100644
 --- a/src/types/quota.ts
 +++ b/src/types/quota.ts
-@@ -195,6 +195,8 @@ export interface ClaudeProfileResponse {
+@@ -197,6 +197,8 @@ export interface ClaudeProfileResponse {
  }
  
  export interface ClaudeQuotaWindow {
@@ -3260,7 +3264,7 @@ index bacb831..cbfdf97 100644
    id: string;
    label: string;
    labelKey?: string;
-@@ -281,6 +283,8 @@ export interface PluginQuotaState extends AntigravityQuotaState {
+@@ -283,6 +285,8 @@ export interface PluginQuotaState extends AntigravityQuotaState {
  }
  
  export interface CodexQuotaWindow {
@@ -3269,7 +3273,7 @@ index bacb831..cbfdf97 100644
    id: string;
    label: string;
    labelKey?: string;
-@@ -294,6 +298,8 @@ export interface CodexQuotaWindow {
+@@ -296,6 +300,8 @@ export interface CodexQuotaWindow {
  }
  
  export interface CodexQuotaState {
@@ -3504,21 +3508,8 @@ index 0000000..baf7e7a
 +    expect(results).toEqual([{ id: 'codex.json', success: false, reauthRequired: true }]);
 +  });
 +}
-diff --git a/tests/authFileCooldowns.test.ts b/tests/authFileCooldowns.test.ts
-index 58d2915..9d8244b 100644
---- a/tests/authFileCooldowns.test.ts
-+++ b/tests/authFileCooldowns.test.ts
-@@ -225,7 +225,7 @@ describe('cooldown section rendering', () => {
- 
-     const available = render(snapshot, { onReset: () => {} });
-     expect(available).toContain(i18n.t('auth_files.cooldown_reset_button'));
--    expect(available).toContain(i18n.t('auth_files.cooldown_reset_hint'));
-+    expect(available).toContain(i18n.t('auth_files.cooldown_reset_hint').replaceAll("'", '&#x27;'));
-     expect(available).not.toContain('disabled=""');
- 
-     const pending = render(snapshot, { onReset: () => {}, resetting: true });
 diff --git a/tests/claudeOAuthUsage.test.ts b/tests/claudeOAuthUsage.test.ts
-index f407234..12a8efe 100644
+index 738a103..a4939f3 100644
 --- a/tests/claudeOAuthUsage.test.ts
 +++ b/tests/claudeOAuthUsage.test.ts
 @@ -405,17 +405,16 @@ describe('Claude usage snapshot rendering and retention', () => {

@@ -167,10 +167,10 @@ index 00000000..24ad2f61
 +	}
 +}
 diff --git a/internal/api/server.go b/internal/api/server.go
-index b1c8e7e2..6e82f7bf 100644
+index dca66925..43dec2b6 100644
 --- a/internal/api/server.go
 +++ b/internal/api/server.go
-@@ -310,6 +310,9 @@ func (s *Server) Start() error {
+@@ -338,6 +338,9 @@ func (s *Server) Start() error {
  		return fmt.Errorf("failed to start HTTP server: server not initialized")
  	}
  
@@ -181,7 +181,7 @@ index b1c8e7e2..6e82f7bf 100644
  	listener, errListen := net.Listen("tcp", addr)
  	if errListen != nil {
 diff --git a/internal/api/server_management_v8.go b/internal/api/server_management_v8.go
-index c5139fa2..ef459b1b 100644
+index 6846537a..92bc2861 100644
 --- a/internal/api/server_management_v8.go
 +++ b/internal/api/server_management_v8.go
 @@ -27,6 +27,8 @@ func (s *Server) registerManagementV8Routes() {
@@ -428,10 +428,10 @@ index 00000000..4adac588
 +	}
 +}
 diff --git a/internal/runtime/executor/codex_websockets_duplex.go b/internal/runtime/executor/codex_websockets_duplex.go
-index faa656b9..27d06287 100644
+index 382189c9..daa6e74f 100644
 --- a/internal/runtime/executor/codex_websockets_duplex.go
 +++ b/internal/runtime/executor/codex_websockets_duplex.go
-@@ -307,7 +307,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -369,7 +369,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  		}
  		processCreatePayload := func(payload []byte) bool {
  			consumedPayload = payload
@@ -441,9 +441,9 @@ index faa656b9..27d06287 100644
  				return rejectQuotaPolicy()
  			}
  			if allowed, keepOpen := authorizePayload(payload, false); !allowed {
-@@ -469,7 +470,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -712,7 +713,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  				}
- 				switch gjson.GetBytes(payload, "type").String() {
+ 				switch ojson.GetBytesNoCopy(payload, "type").String() {
  				case "response.steer":
 -					if !cliproxyauth.QuotaPolicyAllows(auth, time.Now()) {
 +					cliproxyauth.CheckSessionRebalanceQuota(ctx)
@@ -451,7 +451,7 @@ index faa656b9..27d06287 100644
  						if !rejectQuotaPolicy() {
  							return
  						}
-@@ -543,7 +545,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
+@@ -798,7 +800,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
  					continue
  
  				case "response.create", "response.append":
@@ -938,10 +938,10 @@ index 00000000..71b1073d
 +	}
 +}
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
-index f2fa2a0e..76c7e3d1 100644
+index cdc24690..4952c2a2 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket.go
-@@ -20,6 +20,7 @@ import (
+@@ -21,6 +21,7 @@ import (
  	"github.com/gorilla/websocket"
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
@@ -949,7 +949,7 @@ index f2fa2a0e..76c7e3d1 100644
  	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
  	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-@@ -121,9 +122,10 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
+@@ -123,9 +124,10 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
  }
  
  type responsesWebsocketWriter struct {
@@ -963,7 +963,7 @@ index f2fa2a0e..76c7e3d1 100644
  }
  
  func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
-@@ -355,10 +357,25 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+@@ -426,10 +428,25 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
  	}
  	writer := newResponsesWebsocketWriter(conn)
  	passthroughSessionID := uuid.NewString()
@@ -988,8 +988,8 @@ index f2fa2a0e..76c7e3d1 100644
 +	})
  	c.Request = c.Request.WithContext(socketCtx)
  	upgradeRequest := c.Request.Clone(socketCtx)
- 	// The reader owns the client socket so an in-flight interrupt is not stuck
-@@ -606,9 +623,10 @@ requestLoop:
+ 	// Start Ping at upgrade, before opening an upstream stream can block.
+@@ -709,9 +726,10 @@ requestLoop:
  		)
  		pluginExecutorID := handlers.PreparedStreamPluginExecutor(executionParent)
  		isPluginExecutorRoute := pluginExecutorID != ""
@@ -1001,7 +1001,7 @@ index f2fa2a0e..76c7e3d1 100644
  				if errWrite := writeResponsesWebsocketQuotaPolicyExcluded(writer, wsTimelineLog, payload); errWrite != nil {
  					wsTerminateErr = errWrite
  					return
-@@ -620,7 +638,7 @@ requestLoop:
+@@ -723,7 +741,7 @@ requestLoop:
  				providerKey = strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
  			}
  			state, hasState := pinnedAuthByProvider[providerKey]
@@ -1010,7 +1010,7 @@ index f2fa2a0e..76c7e3d1 100644
  				pinnedAuthID = ""
  			}
  		}
-@@ -630,14 +648,14 @@ requestLoop:
+@@ -733,14 +751,14 @@ requestLoop:
  				for providerKey := range providerSet {
  					state, ok := pinnedAuthByProvider[providerKey]
  					candidateAuth, homeRuntime, okAuth := sessionAuthByIDWithSource(state.authID)
@@ -1027,7 +1027,7 @@ index f2fa2a0e..76c7e3d1 100644
  						pinnedAuthID = state.authID
  					} else {
  						delete(pinnedAuthByProvider, providerKey)
-@@ -925,6 +943,7 @@ requestLoop:
+@@ -1037,6 +1055,7 @@ requestLoop:
  			if !ok || selectedAuth == nil {
  				return
  			}
@@ -1036,7 +1036,7 @@ index f2fa2a0e..76c7e3d1 100644
  			codexDuplexStream.Store(duplexInput != nil && attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
  			preserveNativeOutput.Store(nativeRequest && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_input.go b/sdk/api/handlers/openai/openai_responses_websocket_input.go
-index 5ea827eb..be60f283 100644
+index 5e14b9f0..0a201c8a 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_input.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_input.go
 @@ -193,6 +193,9 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
@@ -1050,10 +1050,10 @@ index 5ea827eb..be60f283 100644
  			select {
  			case input <- message:
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_session.go b/sdk/api/handlers/openai/openai_responses_websocket_session.go
-index 7a5a0aae..cd78dbc0 100644
+index d42bf703..9654eec1 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_session.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_session.go
-@@ -131,7 +131,7 @@ func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {
+@@ -139,7 +139,7 @@ func responsesWebsocketAuthSupportsIncrementalInput(auth *coreauth.Auth) bool {
  	return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
  }
  
@@ -1062,7 +1062,7 @@ index 7a5a0aae..cd78dbc0 100644
  	if auth == nil {
  		return false
  	}
-@@ -142,7 +142,7 @@ func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName str
+@@ -150,7 +150,7 @@ func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName str
  			return false
  		}
  	}
@@ -1071,19 +1071,17 @@ index 7a5a0aae..cd78dbc0 100644
  		return false
  	}
  
-@@ -207,8 +207,8 @@ func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
+@@ -215,6 +215,6 @@ func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
  	return strings.EqualFold(strings.TrimSpace(auth.Provider), "codex")
  }
  
 -func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {
--	if auth == nil || !coreauth.QuotaPolicyAllows(auth, now) {
+-	return coreauth.QuotaPolicyAllows(auth, now) && coreauth.IsAuthAvailableForModel(auth, modelName, now)
 +func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time, draining ...bool) bool {
-+	if auth == nil || (!(len(draining) > 0 && draining[0]) && !coreauth.QuotaPolicyAllows(auth, now)) {
- 		return false
- 	}
- 	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
++	return auth != nil && ((len(draining) > 0 && draining[0]) || coreauth.QuotaPolicyAllows(auth, now)) && coreauth.IsAuthAvailableForModel(auth, modelName, now)
+ }
 diff --git a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
-index 70ee202e..6931c648 100644
+index ef2fc843..54103451 100644
 --- a/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
 +++ b/sdk/api/handlers/openai/openai_responses_websocket_timeline.go
 @@ -303,7 +303,11 @@ func writeResponsesWebsocketPayload(writer *responsesWebsocketWriter, wsTimeline
@@ -1100,13 +1098,13 @@ index 70ee202e..6931c648 100644
  
  func appendWebsocketTimelineDisconnect(timeline websocketTimelineAppender, err error, timestamp time.Time) {
 diff --git a/sdk/cliproxy/auth/conductor.go b/sdk/cliproxy/auth/conductor.go
-index 3f485fcf..c073d1f9 100644
+index 7fed87d7..e2fb4eb2 100644
 --- a/sdk/cliproxy/auth/conductor.go
 +++ b/sdk/cliproxy/auth/conductor.go
-@@ -172,6 +172,9 @@ type resultPolicyHolder struct {
- 
+@@ -177,6 +177,9 @@ type resultPolicyHolder struct {
  // Manager orchestrates auth lifecycle, selection, execution, and persistence.
  type Manager struct {
+ 	inFlightTracker           *inFlightTracker
 +	quotaRebalanceMu          sync.Mutex
 +	quotaRebalancePrevious    map[string]bool
 +	quotaRecoveryState        *quotaRebalanceState
@@ -1114,7 +1112,7 @@ index 3f485fcf..c073d1f9 100644
  	cooldownStore             CooldownStateStore
  	pendingCooldownStateStore CooldownStateStore
 diff --git a/sdk/cliproxy/auth/conductor_selection.go b/sdk/cliproxy/auth/conductor_selection.go
-index 246f0963..137e8d60 100644
+index a5111dfe..3d9d9473 100644
 --- a/sdk/cliproxy/auth/conductor_selection.go
 +++ b/sdk/cliproxy/auth/conductor_selection.go
 @@ -84,6 +84,8 @@ type requiredAuthKindContextKey struct{}
@@ -1137,7 +1135,7 @@ index 246f0963..137e8d60 100644
  	if ctx != nil {
  		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
  		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
-@@ -1908,6 +1914,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
+@@ -2302,6 +2308,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
  	}
  
  	opts.EnsureMetadata()
@@ -1145,15 +1143,15 @@ index 246f0963..137e8d60 100644
  	clearSchedulerSelectionID(opts.Metadata)
  	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
  
-@@ -1947,6 +1954,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
- 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+@@ -2346,6 +2353,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
+ 		if !trackPinnedAccounting && pinnedAuthID != "" && candidate.ID != pinnedAuthID {
  			continue
  		}
 +		candidate = eligibility.forDrain(candidate)
  		if !eligibility.allows(candidate) {
  			continue
  		}
-@@ -2174,6 +2182,7 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
+@@ -2651,6 +2659,7 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
  
  func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
  	opts.EnsureMetadata()
@@ -1161,7 +1159,7 @@ index 246f0963..137e8d60 100644
  	clearSchedulerSelectionID(opts.Metadata)
  	if m.HomeEnabled() {
  		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
-@@ -2182,7 +2191,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
+@@ -2659,7 +2668,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
  	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
  	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
  
@@ -1170,7 +1168,7 @@ index 246f0963..137e8d60 100644
  		return m.pickNextLegacy(ctx, provider, model, opts, tried)
  	}
  	eligibility := authSelectionEligibilityForRequest(ctx, opts)
-@@ -2193,6 +2202,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
+@@ -2670,6 +2679,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
  			if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
  				continue
  			}
@@ -1178,7 +1176,7 @@ index 246f0963..137e8d60 100644
  			if !eligibility.allows(candidate) {
  				continue
  			}
-@@ -2241,6 +2251,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
+@@ -2784,6 +2794,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
  	}
  
  	opts.EnsureMetadata()
@@ -1186,15 +1184,15 @@ index 246f0963..137e8d60 100644
  	clearSchedulerSelectionID(opts.Metadata)
  	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
  
-@@ -2286,6 +2297,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
- 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+@@ -2834,6 +2845,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
+ 		if !trackPinnedAccounting && pinnedAuthID != "" && candidate.ID != pinnedAuthID {
  			continue
  		}
 +		candidate = eligibility.forDrain(candidate)
  		if !eligibility.allows(candidate) {
  			continue
  		}
-@@ -2363,6 +2375,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
+@@ -2993,6 +3005,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
  
  func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
  	opts.EnsureMetadata()
@@ -1202,7 +1200,7 @@ index 246f0963..137e8d60 100644
  	clearSchedulerSelectionID(opts.Metadata)
  	if m.HomeEnabled() {
  		return m.pickNextViaHome(ctx, model, opts, tried)
-@@ -2370,7 +2383,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
+@@ -3000,7 +3013,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
  	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
  	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
  
@@ -1211,7 +1209,7 @@ index 246f0963..137e8d60 100644
  		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
  	}
  
-@@ -2407,6 +2420,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
+@@ -3038,6 +3051,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
  			if _, ok := providerSet[canonicalSchedulingProvider(executorKeyFromAuth(candidate))]; !ok {
  				continue
  			}
@@ -1219,7 +1217,7 @@ index 246f0963..137e8d60 100644
  			if !eligibility.allows(candidate) {
  				continue
  			}
-@@ -2525,6 +2539,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
+@@ -3300,6 +3314,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
  		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
  			continue
  		}
@@ -1227,7 +1225,7 @@ index 246f0963..137e8d60 100644
  		if !eligibility.allows(candidate) {
  			continue
  		}
-@@ -2555,3 +2570,11 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
+@@ -3330,3 +3345,11 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
  		}
  	}
  }
@@ -1265,33 +1263,23 @@ index b7417778..c5fe127a 100644
 +
 +func CheckSessionRebalanceQuota(ctx context.Context) { sessionrebalance.CheckQuota(ctx) }
 diff --git a/sdk/cliproxy/auth/selector.go b/sdk/cliproxy/auth/selector.go
-index 3e28c38a..f74b11af 100644
+index 547dba4c..69c38a51 100644
 --- a/sdk/cliproxy/auth/selector.go
 +++ b/sdk/cliproxy/auth/selector.go
-@@ -913,11 +913,14 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
+@@ -1406,6 +1406,9 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
  // It extracts session ID from multiple sources and maintains session-to-auth
  // mappings with automatic failover when the bound auth becomes unavailable.
  type SessionAffinitySelector struct {
--	fallback          Selector
--	cache             *SessionCache
--	matcher           *cliproxysession.MerklePrefixMatcher
--	subagentAffinity  bool
--	rebindOnQuotaOnly bool
 +	rebalanceMu        sync.Mutex
 +	rebalanceEpoch     uint64
 +	authRebalanceEpoch map[string]uint64
-+	fallback           Selector
-+	cache              *SessionCache
-+	matcher            *cliproxysession.MerklePrefixMatcher
-+	subagentAffinity   bool
-+	rebindOnQuotaOnly  bool
- }
- 
- const (
-@@ -1101,10 +1104,35 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
- // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
- // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
- func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+ 	fallback          Selector
+ 	cache             *SessionCache
+ 	matcher           *cliproxysession.MerklePrefixMatcher
+@@ -1635,10 +1638,35 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
+ 	var reservation *weightedReservation
+ 	// Local bindings complete inside Pick; failed selections release speculative credit.
+ 	defer func() { reservation.finish(selected != nil && errPick == nil) }()
 +	s.rebalanceMu.Lock()
 +	defer s.rebalanceMu.Unlock()
  	entry := selectorLogEntry(ctx)
@@ -1324,7 +1312,7 @@ index 3e28c38a..f74b11af 100644
  	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
  	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
  
-@@ -1661,6 +1689,18 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
+@@ -2269,6 +2297,18 @@ func (s *SessionAffinitySelector) LookupAffinity(provider, model, sessionID stri
  
  // OnResult handles session affinity binding or release based on execution outcome.
  func (s *SessionAffinitySelector) OnResult(res Result) {
@@ -1861,7 +1849,7 @@ index 00000000..a5192361
 +	}
 +}
 diff --git a/sdk/cliproxy/auth/types.go b/sdk/cliproxy/auth/types.go
-index 5da6a3da..03ce8fdc 100644
+index 959264e1..49bf878e 100644
 --- a/sdk/cliproxy/auth/types.go
 +++ b/sdk/cliproxy/auth/types.go
 @@ -51,6 +51,8 @@ func GetRequestInfo(ctx context.Context) *RequestInfo {

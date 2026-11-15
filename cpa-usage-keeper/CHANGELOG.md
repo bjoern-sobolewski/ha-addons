@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.11
+
+- Update to Keeper 2.1.0 with the upstream Argon Ultra Lite quota and live-event capacity fixes.
+- Retain native Models/pricing navigation and live Request Events alongside existing reporting roles, history, time ranges and analytics.
+- Verify and mask email identities before each live-event frame; close streams when privacy policy cannot be verified. Keep live events and model administration outside the public viewer gateway.
+
 ## 0.2.10
 
 - Add Weeks (1–52) and Months (1–12) to the shared time-range slider and retain the saved Overview/Analysis selection across reloads.

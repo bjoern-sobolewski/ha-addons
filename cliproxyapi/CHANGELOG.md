@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.34
+
+- Update CLIProxyAPI to 8.0.72 and Management Center to 1.28.0, retaining account whitelists, quota policies, reconnect, voice and terminal usage receipts.
+- Preserve caller token ceilings and automatic compaction across the updated request pipeline. Retain native model rules, card layouts and credit controls alongside shared quota resets.
+- Keep the new server key-value store under the persistent authentication directory and verify stopped backup/restore behavior.
+
 ## 0.1.33
 
 - Add an optional per-account model whitelist in Auth Files. Only listed upstream models and their aliases remain eligible; an empty list keeps existing routing.

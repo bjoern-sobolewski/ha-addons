@@ -414,10 +414,10 @@ index 090b07f7..16f34968 100644
      await renderControl('8h');
  
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
-index ac62349a..f486860c 100644
+index e5292dac..3cfab1f4 100644
 --- a/web/src/i18n/index.ts
 +++ b/web/src/i18n/index.ts
-@@ -339,6 +339,22 @@ const resources = {
+@@ -355,6 +355,22 @@ const resources = {
          range_custom_now: 'Now',
          range_unit_hour: 'Hours',
          range_unit_day: 'Days',
@@ -440,7 +440,7 @@ index ac62349a..f486860c 100644
          range_value_hour_one: 'Hour',
          range_value_hour_other: 'Hours',
          range_value_day_one: 'Day',
-@@ -1438,6 +1454,22 @@ const resources = {
+@@ -1471,6 +1487,22 @@ const resources = {
          range_custom_now: '当前',
          range_unit_hour: '小时',
          range_unit_day: '天',
@@ -463,7 +463,7 @@ index ac62349a..f486860c 100644
          range_value_hour_one: '小时',
          range_value_hour_other: '小时',
          range_value_day_one: '天',
-@@ -2537,6 +2569,22 @@ const resources = {
+@@ -2587,6 +2619,22 @@ const resources = {
          range_custom_now: '目前',
          range_unit_hour: '小時',
          range_unit_day: '天',
@@ -513,10 +513,10 @@ index 8e8e0480..5ffbff5e 100644
    {page==='events'&&<RequestEventsDetailsCard events={events?.events??[]} loading={loading&&!events} totalCount={events?.total_count??0} modelOptions={options.models} sourceOptions={options.sources}
     modelFilter={model} sourceFilter={source} resultFilter={result} onModelFilterChange={setModel} onSourceFilterChange={setSource} onResultFilterChange={setResult}
 diff --git a/web/src/pages/UsagePage.tsx b/web/src/pages/UsagePage.tsx
-index f4b0169d..7d31e3ba 100644
+index 2116b70c..5a99ebda 100644
 --- a/web/src/pages/UsagePage.tsx
 +++ b/web/src/pages/UsagePage.tsx
-@@ -54,7 +54,7 @@ import {
+@@ -58,7 +58,7 @@ import {
    type RequestEventColumnId,
  } from '@/components/usage/RequestEventsDetailsCard';
  import { clampCustomRangeToCurrentBounds, clampStoredUsageRangeStateToCurrentBounds, parseLegacyCustomRange, parseStoredUsageRangeState, resolveUsageRangeRecoveryTimeZone, serializeUsageRangeState, type StoredUsageRangeState } from '@/utils/usage/customRange';
@@ -525,7 +525,7 @@ index f4b0169d..7d31e3ba 100644
  import type { Theme } from '@/types';
  import { BrandLink } from '@/components/BrandLink';
  import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
-@@ -754,7 +754,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
+@@ -712,7 +712,8 @@ export function UsagePage({ onAuthRequired }: { onAuthRequired?: () => void }) {
    const [loadedTimeRange] = useState(loadTimeRange);
    const pendingLegacyCustomRangeRef = useRef(loadedTimeRange.pendingLegacyCustomRange);
    const [timeRangeState, setTimeRangeState] = useState<StoredUsageRangeState>(loadedTimeRange.state);
@@ -556,6 +556,84 @@ index 8036f9e0..ec28ae9b 100644
      expect(modeButton).toContain('width: auto;')
      expect(modeButton).toContain('white-space: nowrap;')
      expect(modeButton).not.toContain('text-overflow: ellipsis;')
+diff --git a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
+index 884ae20b..97fab66a 100644
+--- a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
++++ b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
+@@ -37,6 +37,7 @@ vi.mock('@/lib/api', async (importOriginal) => ({
+   ...api, apiFetch:vi.fn(),
+   fetchStatus: async () => ({ timezone: 'UTC' }),
+   fetchVersion: async () => ({ version: 'test' }),
++  fetchAdminProviderQuota: async () => ({ accounts: [] }),
+   fetchUsageEventModelFilterOptions: async () => ({ models: ['gpt-5'] }),
+   fetchUsageEventSourceFilterOptions: async () => ({ sources: [{ value: 'source-1', label: 'Team source' }] }),
+ }));
+@@ -341,4 +342,65 @@ describe('UsagePage top API Key request event filter', () => {
+     expect(api.openUsageEventsLive.mock.lastCall![1].apiKeyId).toBe('');
+     expect(localStorage.getItem(TOP_KEY_STORAGE)).toBe('');
+   });
++
++  it.each([
++    { mode: 'week', maximum: '52', overviewRange: '52w', eventsRange: '12w' },
++    { mode: 'month', maximum: '12', overviewRange: '12mo', eventsRange: '3mo' },
++  ])('caps $mode event queries and exports without replacing the saved Overview range across reloads', async ({ mode, maximum, overviewRange, eventsRange }) => {
++    window.history.replaceState(null, '', '/overview');
++    await render();
++    const rangeTrigger = () => container.querySelector<HTMLButtonElement>('[data-time-range-trigger="desktop"]')!;
++    const storedRange = () => JSON.parse(localStorage.getItem('cli-proxy-usage-time-range-v1')!).range;
++    const navigate = async (path: string) => {
++      await act(async () => container.querySelector<HTMLAnchorElement>(`[data-dashboard-toolbar] a[href="${path}"]`)!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })));
++      expect(window.location.pathname).toBe(path);
++    };
++
++    await act(async () => rangeTrigger().click());
++    await act(async () => document.querySelector<HTMLButtonElement>(`[data-time-range-mode="${mode}"]`)!.click());
++    const slider = document.querySelector<HTMLInputElement>('[data-time-range-slider]')!;
++    expect(slider.max).toBe(maximum);
++    await act(async () => {
++      slider.value = maximum;
++      slider.dispatchEvent(new Event('input', { bubbles: true }));
++    });
++    await act(async () => slider.dispatchEvent(new KeyboardEvent('keyup', { key: 'End', bubbles: true })));
++    await act(async () => rangeTrigger().click());
++    expect(api.fetchUsageOverview).toHaveBeenLastCalledWith(expect.objectContaining({ range: overviewRange }), expect.any(AbortSignal), '11');
++    expect(storedRange()).toBe(overviewRange);
++
++    await navigate('/request-events');
++    expect(api.fetchUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.any(AbortSignal), expect.objectContaining({ apiKeyId: '11' }));
++    expect(api.fetchUsageEvents.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
++    await act(async () => topKey().click());
++    await act(async () => topKey().click());
++    expect(api.fetchCpaApiKeyOptions.mock.calls.filter(call => call[1]).at(-1)![1]).toMatchObject({ scope: 'request-events', range: { range: eventsRange } });
++    expect(storedRange()).toBe(overviewRange);
++    await act(async () => button('Export').click());
++    await act(async () => button('Export CSV').click());
++    expect(api.exportUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), 'csv', expect.objectContaining({ apiKeyId: '11' }));
++
++    api.fetchUsageEvents.mockClear();
++    await act(async () => root.unmount());
++    root = createRoot(container);
++    await render();
++    expect(window.location.pathname).toBe('/request-events');
++    expect(api.fetchUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.any(AbortSignal), expect.objectContaining({ apiKeyId: '11' }));
++    expect(api.fetchUsageEvents.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
++    expect(storedRange()).toBe(overviewRange);
++    await act(async () => button('Export').click());
++    await act(async () => button('Export JSON').click());
++    expect(api.exportUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), 'json', expect.objectContaining({ apiKeyId: '11' }));
++
++    const overviewRequestsBeforeReturn = api.fetchUsageOverview.mock.calls.length;
++    await navigate('/overview');
++    expect(api.fetchUsageOverview.mock.calls.length).toBeGreaterThan(overviewRequestsBeforeReturn);
++    expect(api.fetchUsageOverview).toHaveBeenLastCalledWith(expect.objectContaining({ range: overviewRange }), expect.any(AbortSignal), '11');
++    await act(async () => topKey().click());
++    await act(async () => topKey().click());
++    expect(api.fetchCpaApiKeyOptions.mock.calls.filter(call => call[1]).at(-1)![1]).toMatchObject({ scope: 'overview', range: { range: overviewRange } });
++    expect(storedRange()).toBe(overviewRange);
++    await act(async () => rangeTrigger().click());
++    expect(document.querySelector<HTMLInputElement>('[data-time-range-slider]')?.value).toBe(maximum);
++  });
+ });
 diff --git a/web/src/utils/usage.ts b/web/src/utils/usage.ts
 index 86b2d127..12903ed0 100644
 --- a/web/src/utils/usage.ts
@@ -699,81 +777,3 @@ index 046a3ceb..124c76ca 100644
        expect(rangeQuery.normalizeUsageRange(value)).toBe('8h');
      }
    });
-diff --git a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
-index b789488f..3a8a57c9 100644
---- a/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
-+++ b/web/src/pages/test/UsagePageRequestEventsAPIKey.test.tsx
-@@ -35,6 +35,7 @@ vi.mock('@/lib/api', async (importOriginal) => ({
-   ...api, apiFetch:vi.fn(),
-   fetchStatus: async () => ({ timezone: 'UTC' }),
-   fetchVersion: async () => ({ version: 'test' }),
-+  fetchAdminProviderQuota: async () => ({ accounts: [] }),
-   fetchUsageEventModelFilterOptions: async () => ({ models: ['gpt-5'] }),
-   fetchUsageEventSourceFilterOptions: async () => ({ sources: [{ value: 'source-1', label: 'Team source' }] }),
- }));
-@@ -335,4 +336,65 @@ describe('UsagePage top API Key request event filter', () => {
-     expect(api.fetchUsageEvents.mock.lastCall![2].apiKeyId).toBe('');
-     expect(localStorage.getItem(TOP_KEY_STORAGE)).toBe('');
-   });
-+
-+  it.each([
-+    { mode: 'week', maximum: '52', overviewRange: '52w', eventsRange: '12w' },
-+    { mode: 'month', maximum: '12', overviewRange: '12mo', eventsRange: '3mo' },
-+  ])('caps $mode event queries and exports without replacing the saved Overview range across reloads', async ({ mode, maximum, overviewRange, eventsRange }) => {
-+    window.history.replaceState(null, '', '/overview');
-+    await render();
-+    const rangeTrigger = () => container.querySelector<HTMLButtonElement>('[data-time-range-trigger="desktop"]')!;
-+    const storedRange = () => JSON.parse(localStorage.getItem('cli-proxy-usage-time-range-v1')!).range;
-+    const navigate = async (path: string) => {
-+      await act(async () => container.querySelector<HTMLAnchorElement>(`[data-dashboard-toolbar] a[href="${path}"]`)!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })));
-+      expect(window.location.pathname).toBe(path);
-+    };
-+
-+    await act(async () => rangeTrigger().click());
-+    await act(async () => document.querySelector<HTMLButtonElement>(`[data-time-range-mode="${mode}"]`)!.click());
-+    const slider = document.querySelector<HTMLInputElement>('[data-time-range-slider]')!;
-+    expect(slider.max).toBe(maximum);
-+    await act(async () => {
-+      slider.value = maximum;
-+      slider.dispatchEvent(new Event('input', { bubbles: true }));
-+    });
-+    await act(async () => slider.dispatchEvent(new KeyboardEvent('keyup', { key: 'End', bubbles: true })));
-+    await act(async () => rangeTrigger().click());
-+    expect(api.fetchUsageOverview).toHaveBeenLastCalledWith(expect.objectContaining({ range: overviewRange }), expect.any(AbortSignal), '11');
-+    expect(storedRange()).toBe(overviewRange);
-+
-+    await navigate('/request-events');
-+    expect(api.fetchUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.any(AbortSignal), expect.objectContaining({ apiKeyId: '11' }));
-+    expect(api.fetchUsageEvents.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
-+    await act(async () => topKey().click());
-+    await act(async () => topKey().click());
-+    expect(api.fetchCpaApiKeyOptions.mock.calls.filter(call => call[1]).at(-1)![1]).toMatchObject({ scope: 'request-events', range: { range: eventsRange } });
-+    expect(storedRange()).toBe(overviewRange);
-+    await act(async () => button('Export').click());
-+    await act(async () => button('Export CSV').click());
-+    expect(api.exportUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), 'csv', expect.objectContaining({ apiKeyId: '11' }));
-+
-+    api.fetchUsageEvents.mockClear();
-+    await act(async () => root.unmount());
-+    root = createRoot(container);
-+    await render();
-+    expect(window.location.pathname).toBe('/request-events');
-+    expect(api.fetchUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), expect.any(AbortSignal), expect.objectContaining({ apiKeyId: '11' }));
-+    expect(api.fetchUsageEvents.mock.calls.every(call => call[0].range === eventsRange)).toBe(true);
-+    expect(storedRange()).toBe(overviewRange);
-+    await act(async () => button('Export').click());
-+    await act(async () => button('Export JSON').click());
-+    expect(api.exportUsageEvents).toHaveBeenLastCalledWith(expect.objectContaining({ range: eventsRange }), 'json', expect.objectContaining({ apiKeyId: '11' }));
-+
-+    const overviewRequestsBeforeReturn = api.fetchUsageOverview.mock.calls.length;
-+    await navigate('/overview');
-+    expect(api.fetchUsageOverview.mock.calls.length).toBeGreaterThan(overviewRequestsBeforeReturn);
-+    expect(api.fetchUsageOverview).toHaveBeenLastCalledWith(expect.objectContaining({ range: overviewRange }), expect.any(AbortSignal), '11');
-+    await act(async () => topKey().click());
-+    await act(async () => topKey().click());
-+    expect(api.fetchCpaApiKeyOptions.mock.calls.filter(call => call[1]).at(-1)![1]).toMatchObject({ scope: 'overview', range: { range: overviewRange } });
-+    expect(storedRange()).toBe(overviewRange);
-+    await act(async () => rangeTrigger().click());
-+    expect(document.querySelector<HTMLInputElement>('[data-time-range-slider]')?.value).toBe(maximum);
-+  });
- });

@@ -172,10 +172,10 @@ index ffb478a8..472854ae 100644
 +  </>;
  }
 diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
-index 8982631c..a0a6c36b 100644
+index 8ba00090..87bfd142 100644
 --- a/web/src/components/usage/credentials/CredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/CredentialsSection.tsx
-@@ -1970,8 +1970,7 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
+@@ -1972,8 +1972,7 @@ function QuotaBar({ quota, quotaUsageMode, timeZone, showGroupMetadata = true, t
              {resetDuration && (compact && resetLabel
                ? <QuotaResetCountdown duration={resetDuration} resetLabel={resetLabel} />
                : <span className={styles.credentialQuotaResetDuration}>{resetDuration}</span>)}

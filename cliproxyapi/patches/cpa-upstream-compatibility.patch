@@ -1,0 +1,500 @@
+diff --git a/go.mod b/go.mod
+index c466c052..9ce00e21 100644
+--- a/go.mod
++++ b/go.mod
+@@ -56,6 +56,8 @@ require (
+ 	github.com/pion/transport/v4 v4.0.2 // indirect
+ 	github.com/pion/turn/v5 v5.0.12 // indirect
+ 	github.com/rogpeppe/go-internal v1.15.0 // indirect
++	github.com/tidwall/match v1.1.1 // indirect
++	github.com/tidwall/pretty v1.2.0 // indirect
+ 	github.com/wlynxg/anet v0.0.5 // indirect
+ 	go.uber.org/atomic v1.11.0 // indirect
+ 	golang.org/x/time v0.14.0 // indirect
+@@ -113,6 +115,8 @@ require (
+ 	github.com/rivo/uniseg v0.4.7 // indirect
+ 	github.com/rs/xid v1.5.0 // indirect
+ 	github.com/sergi/go-diff v1.4.0 // indirect
++	github.com/tidwall/gjson v1.18.0
++	github.com/tidwall/sjson v1.2.5
+ 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
+ 	github.com/ugorji/go/codec v1.2.12 // indirect
+ 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+diff --git a/go.sum b/go.sum
+index 9e8e45ee..5627125e 100644
+--- a/go.sum
++++ b/go.sum
+@@ -226,6 +226,15 @@ github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO
+ github.com/stretchr/testify v1.8.1/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
+ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+ github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
++github.com/tidwall/gjson v1.14.2/go.mod h1:/wbyibRr2FHMks5tjHJ5F8dMZh3AcwJEMf5vlfC0lxk=
++github.com/tidwall/gjson v1.18.0 h1:FIDeeyB800efLX89e5a8Y0BNH+LOngJyGrIWxG2FKQY=
++github.com/tidwall/gjson v1.18.0/go.mod h1:/wbyibRr2FHMks5tjHJ5F8dMZh3AcwJEMf5vlfC0lxk=
++github.com/tidwall/match v1.1.1 h1:+Ho715JplO36QYgwN9PGYNhgZvoUSc9X2c80KVTi+GA=
++github.com/tidwall/match v1.1.1/go.mod h1:eRSPERbgtNPcGhD8UCthc6PmLEQXEWd3PRB5JTxsfmM=
++github.com/tidwall/pretty v1.2.0 h1:RWIZEg2iJ8/g6fDDYzMpobmaoGh5OLl4AXtGUGPcqCs=
++github.com/tidwall/pretty v1.2.0/go.mod h1:ITEVvHYasfjBbM0u2Pg8T2nJnzm8xPwvNhhsoaGGjNU=
++github.com/tidwall/sjson v1.2.5 h1:kLy8mja+1c9jlljvWTlSazM7cKDRfJuR/bOJhcY5NcY=
++github.com/tidwall/sjson v1.2.5/go.mod h1:Fvgq9kS/6ociJEDnK0Fk1cpYF4FIW6ZF7LAe+6jwd28=
+ github.com/tiktoken-go/tokenizer v0.8.1 h1:4obDoB6/dhdBt9xMweX4nww5cjdOq/nYF4ecwPq2+mg=
+ github.com/tiktoken-go/tokenizer v0.8.1/go.mod h1:eLA0t6nGvn9mDc7gt90qt7pMat+gE9ViqwQ6l9B+tA4=
+ github.com/twitchyliquid64/golang-asm v0.15.1 h1:SU5vSMR7hnwNxj24w34ZyCi/FmDZTkS4MhqMhdFk5YI=
+diff --git a/internal/auth/codex/openai_auth.go b/internal/auth/codex/openai_auth.go
+index ba157d79..943edc26 100644
+--- a/internal/auth/codex/openai_auth.go
++++ b/internal/auth/codex/openai_auth.go
+@@ -381,7 +381,9 @@ func isNonRetryableRefreshErr(err error) bool {
+ 	if IsRefreshOutcomeUnknown(err) {
+ 		return true
+ 	}
+-	if refreshdiagnostic.Reason(err) != "" { return true }
++	if refreshdiagnostic.Reason(err) != "" {
++		return true
++	}
+ 	raw := strings.ToLower(err.Error())
+ 	for _, token := range []string{
+ 		"refresh_token_reused",
+diff --git a/internal/kvstore/backup_restore_test.go b/internal/kvstore/backup_restore_test.go
+new file mode 100644
+index 00000000..bf5ad5cb
+--- /dev/null
++++ b/internal/kvstore/backup_restore_test.go
+@@ -0,0 +1,54 @@
++package kvstore
++
++import (
++	"bytes"
++	"context"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestBoltStoreStoppedBackupRestoresValuesAndExpiry(t *testing.T) {
++	ctx := context.Background()
++	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
++	path := filepath.Join(t.TempDir(), "auth", "kv.db")
++	store, err := OpenBoltStore(path, WithNowFunc(func() time.Time { return now }), WithSweepInterval(0))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer store.Close()
++	payload := []byte{0, 1, 255, 10}
++	if _, err := store.KVSet(ctx, "persistent", payload, KVSetOptions{}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := store.KVSet(ctx, "expiring", []byte("temporary"), KVSetOptions{EX: time.Minute}); err != nil {
++		t.Fatal(err)
++	}
++	if err := store.Close(); err != nil {
++		t.Fatal(err)
++	}
++	backup, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	restoredPath := filepath.Join(t.TempDir(), "kv.db")
++	if err := os.WriteFile(restoredPath, backup, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	restored, err := OpenBoltStore(restoredPath, WithNowFunc(func() time.Time { return now }), WithSweepInterval(0))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer restored.Close()
++	if got, found, err := restored.KVGet(ctx, "persistent"); err != nil || !found || !bytes.Equal(got, payload) {
++		t.Fatalf("restored binary value = %v, %t, %v", got, found, err)
++	}
++	if got, found, err := restored.KVGet(ctx, "expiring"); err != nil || !found || string(got) != "temporary" {
++		t.Fatalf("restored unexpired value = %q, %t, %v", got, found, err)
++	}
++	now = now.Add(2 * time.Minute)
++	if _, found, err := restored.KVGet(ctx, "expiring"); err != nil || found {
++		t.Fatalf("restored expiry was extended: found=%t err=%v", found, err)
++	}
++}
+diff --git a/internal/runtime/executor/codex_executor_claude_output_budget_test.go b/internal/runtime/executor/codex_executor_claude_output_budget_test.go
+index 6afbf4f4..cf6e6716 100644
+--- a/internal/runtime/executor/codex_executor_claude_output_budget_test.go
++++ b/internal/runtime/executor/codex_executor_claude_output_budget_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"io"
+ 	"net/http"
+ 	"net/http/httptest"
++	"strings"
+ 	"testing"
+ 
+ 	"github.com/MoeForge/moego/ojson"
+@@ -17,7 +18,7 @@ import (
+ 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+ )
+ 
+-func TestCodexClaudeModelSelectionMinimumOutputBudget(t *testing.T) {
++func TestCodexClaudeSmallOutputBudgetPreservesProviderRejection(t *testing.T) {
+ 	for _, stream := range []bool{false, true} {
+ 		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+ 			requests := make(chan []byte, 1)
+@@ -46,23 +47,27 @@ func TestCodexClaudeModelSelectionMinimumOutputBudget(t *testing.T) {
+ 				Payload: []byte(`{"model":"gpt-5.6-sol","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"Hi","cache_control":{"type":"ephemeral"}}]}]}`),
+ 			}
+ 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: stream}
++			var executionError error
+ 			if stream {
+ 				result, errStream := executor.ExecuteStream(context.Background(), codexOAuthTestAuth(server.URL), req, opts)
+-				if errStream != nil {
+-					t.Fatalf("ExecuteStream: %v", errStream)
+-				}
+-				for chunk := range result.Chunks {
+-					if chunk.Err != nil {
+-						t.Fatalf("stream chunk: %v", chunk.Err)
++				executionError = errStream
++				if errStream == nil {
++					for chunk := range result.Chunks {
++						if chunk.Err != nil {
++							executionError = chunk.Err
++						}
+ 					}
+ 				}
+-			} else if _, errExecute := executor.Execute(context.Background(), codexOAuthTestAuth(server.URL), req, opts); errExecute != nil {
+-				t.Fatalf("Execute: %v", errExecute)
++			} else {
++				_, executionError = executor.Execute(context.Background(), codexOAuthTestAuth(server.URL), req, opts)
++			}
++			if executionError == nil || !strings.Contains(executionError.Error(), "max_output_tokens") {
++				t.Fatalf("provider rejection lost: %v", executionError)
+ 			}
+ 
+ 			body := <-requests
+-			if got := ojson.GetBytes(body, "max_output_tokens").Int(); got != 16 {
+-				t.Fatalf("upstream max_output_tokens = %d, want 16; body=%s", got, body)
++			if got := ojson.GetBytes(body, "max_output_tokens").Int(); got != 1 {
++				t.Fatalf("upstream max_output_tokens = %d, want 1; body=%s", got, body)
+ 			}
+ 		})
+ 	}
+@@ -71,7 +76,7 @@ func TestCodexClaudeModelSelectionMinimumOutputBudget(t *testing.T) {
+ func TestCodexClaudeOutputBudgetBoundariesAndPayloadRules(t *testing.T) {
+ 	modelRule := []config.PayloadModelRule{{Name: "gpt-5.6-sol", Protocol: "codex"}}
+ 	matchedRule := []config.PayloadModelRule{{
+-		Name: "gpt-5.6-sol", Protocol: "codex", Match: []map[string]any{{"max_output_tokens": 16}},
++		Name: "gpt-5.6-sol", Protocol: "codex", Match: []map[string]any{{"max_output_tokens": 1}},
+ 	}}
+ 	cases := []struct {
+ 		name    string
+@@ -80,28 +85,28 @@ func TestCodexClaudeOutputBudgetBoundariesAndPayloadRules(t *testing.T) {
+ 		payload config.PayloadConfig
+ 		want    string
+ 	}{
+-		{name: "one", field: `,"max_tokens":1`, want: "16"},
+-		{name: "fifteen", field: `,"max_tokens":15`, want: "16"},
++		{name: "one", field: `,"max_tokens":1`, want: "1"},
++		{name: "fifteen", field: `,"max_tokens":15`, want: "15"},
+ 		{name: "sixteen", field: `,"max_tokens":16`, want: "16"},
+ 		{name: "above minimum", field: `,"max_tokens":17`, want: "17"},
+ 		{name: "normal budget", field: `,"max_tokens":1024`, want: "1024"},
+ 		{name: "absent"},
+-		{name: "fallback field", field: `,"max_output_tokens":1`, want: "16"},
++		{name: "fallback field", field: `,"max_output_tokens":1`, want: "1"},
+ 		{name: "zero remains invalid", field: `,"max_tokens":0`, want: "0"},
+ 		{name: "negative remains invalid", field: `,"max_tokens":-1`, want: "-1"},
+ 		// The Claude translator truncates 1.5 to the integer 1 before the executor
+ 		// sees it, so the translated payload carries a sub-minimum integer budget.
+-		{name: "fractional input truncated by translator", field: `,"max_tokens":1.5`, want: "16"},
++		{name: "fractional input truncated by translator", field: `,"max_tokens":1.5`, want: "1"},
+ 		{name: "non-numeric input", field: `,"max_tokens":"1"`},
+ 		{
+-			name: "override matches normalized value", field: `,"max_tokens":1`, want: "8",
++			name: "override matches original value", field: `,"max_tokens":1`, want: "8",
+ 			payload: config.PayloadConfig{Override: []config.PayloadRule{{Models: matchedRule, Params: map[string]any{"max_output_tokens": 8}}}},
+ 		},
+ 		{
+ 			name: "final filter wins", field: `,"max_tokens":1`,
+ 			payload: config.PayloadConfig{Filter: []config.PayloadFilterRule{{Models: modelRule, Params: []string{"max_output_tokens"}}}},
+ 		},
+-		{name: "native responses normalized", field: `,"max_output_tokens":1`, from: sdktranslator.FormatOpenAIResponse, want: "16"},
++		{name: "native responses ceiling preserved", field: `,"max_output_tokens":1`, from: sdktranslator.FormatOpenAIResponse, want: "1"},
+ 	}
+ 	for _, tc := range cases {
+ 		for _, useWebsocket := range []bool{false, true} {
+diff --git a/internal/runtime/executor/codex_executor_compact_test.go b/internal/runtime/executor/codex_executor_compact_test.go
+index 526e2aee..7a6f3b42 100644
+--- a/internal/runtime/executor/codex_executor_compact_test.go
++++ b/internal/runtime/executor/codex_executor_compact_test.go
+@@ -158,7 +158,7 @@ func TestCodexExecutorCompactUseSIWCAppliesSIWCRulesBeforePayloadFinalizer(t *te
+ 			t.Fatalf("field %q should be omitted in SIWC compact body: %s", omitted, gotBody)
+ 		}
+ 	}
+-	if cap := gjson.GetBytes(gotBody, "max_output_tokens").Int(); cap != 512 {
++	if cap := ojson.GetBytes(gotBody, "max_output_tokens").Int(); cap != 512 {
+ 		t.Fatalf("compact output ceiling = %d, want 512", cap)
+ 	}
+ 	// PayloadFinalizer runs last and can override temperature after built-in SIWC stripping.
+diff --git a/internal/runtime/executor/codex_executor_execute.go b/internal/runtime/executor/codex_executor_execute.go
+index c7889a31..1b60ff53 100644
+--- a/internal/runtime/executor/codex_executor_execute.go
++++ b/internal/runtime/executor/codex_executor_execute.go
+@@ -148,7 +148,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
+ 	}
+ 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
+ 	doc := ojson.NewDoc(body)
+-	normalizeCodexOutputBudgetDoc(doc)
+ 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+ 
+ 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
+diff --git a/internal/runtime/executor/codex_executor_output_budget_issue7304_test.go b/internal/runtime/executor/codex_executor_output_budget_issue7304_test.go
+index 855d0dcd..e19bbc8d 100644
+--- a/internal/runtime/executor/codex_executor_output_budget_issue7304_test.go
++++ b/internal/runtime/executor/codex_executor_output_budget_issue7304_test.go
+@@ -124,13 +124,12 @@ func TestCodexVerifyInferenceMinimumOutputBudget_Issue7304(t *testing.T) {
+ 	}
+ }
+ 
+-// Issue 7304: small positive integer budgets from every Codex source format must be
+-// normalized to the upstream minimum before user payload rules; invalid budgets
+-// (0, negative, fractional, non-numeric) stay untouched and no budget is injected.
++// Preserve every caller ceiling even when the provider rejects it. Operator rules
++// remain final, and absent limits are never injected.
+ func TestCodexSmallOutputBudgetsAllSourceFormats_Issue7304(t *testing.T) {
+ 	modelRule := []config.PayloadModelRule{{Name: "gpt-5.6-sol", Protocol: "codex"}}
+ 	matchedRule := []config.PayloadModelRule{{
+-		Name: "gpt-5.6-sol", Protocol: "codex", Match: []map[string]any{{"max_output_tokens": 16}},
++		Name: "gpt-5.6-sol", Protocol: "codex", Match: []map[string]any{{"max_output_tokens": 1}},
+ 	}}
+ 
+ 	cases := []struct {
+@@ -140,27 +139,27 @@ func TestCodexSmallOutputBudgetsAllSourceFormats_Issue7304(t *testing.T) {
+ 		want    string
+ 		rules   config.PayloadConfig
+ 	}{
+-		{name: "responses max_output_tokens 1", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":1,"input":"Hi"}`, want: "16"},
+-		{name: "responses max_output_tokens 15", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":15,"input":"Hi"}`, want: "16"},
+-		{name: "responses legacy max_completion_tokens 1", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_completion_tokens":1,"input":"Hi"}`, want: "16"},
+-		{name: "responses legacy max_tokens 1", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_tokens":1,"input":"Hi"}`, want: "16"},
++		{name: "responses max_output_tokens 1", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":1,"input":"Hi"}`, want: "1"},
++		{name: "responses max_output_tokens 15", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":15,"input":"Hi"}`, want: "15"},
++		{name: "responses legacy max_completion_tokens 1", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_completion_tokens":1,"input":"Hi"}`, want: "1"},
++		{name: "responses legacy max_tokens 1", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_tokens":1,"input":"Hi"}`, want: "1"},
+ 		{name: "responses 16 unchanged", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":16,"input":"Hi"}`, want: "16"},
+ 		{name: "responses 1024 unchanged", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":1024,"input":"Hi"}`, want: "1024"},
+ 		{name: "responses zero untouched", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":0,"input":"Hi"}`, want: "0"},
+ 		{name: "responses negative untouched", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":-5,"input":"Hi"}`, want: "-5"},
+ 		{name: "responses fractional untouched", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":1.5,"input":"Hi"}`, want: "1.5"},
+-		{name: "responses integral float normalized", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":15.0,"input":"Hi"}`, want: "16"},
+-		{name: "responses scientific integral normalized", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":1e1,"input":"Hi"}`, want: "16"},
++		{name: "responses integral float unchanged", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":15.0,"input":"Hi"}`, want: "15.0"},
++		{name: "responses scientific integral unchanged", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":1e1,"input":"Hi"}`, want: "1e1"},
+ 		{name: "responses string untouched", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","max_output_tokens":"1","input":"Hi"}`, want: `"1"`},
+ 		{name: "responses absent", from: sdktranslator.FormatOpenAIResponse, payload: `{"model":"gpt-5.6-sol","input":"Hi"}`},
+-		{name: "chat max_tokens 1", from: sdktranslator.FormatOpenAI, payload: `{"model":"gpt-5.6-sol","max_tokens":1,"messages":[{"role":"user","content":"Hi"}]}`, want: "16"},
+-		{name: "chat max_completion_tokens 1", from: sdktranslator.FormatOpenAI, payload: `{"model":"gpt-5.6-sol","max_completion_tokens":1,"messages":[{"role":"user","content":"Hi"}]}`, want: "16"},
+-		{name: "chat max_output_tokens 1", from: sdktranslator.FormatOpenAI, payload: `{"model":"gpt-5.6-sol","max_output_tokens":1,"messages":[{"role":"user","content":"Hi"}]}`, want: "16"},
+-		{name: "claude max_tokens 1", from: sdktranslator.FormatClaude, payload: `{"model":"gpt-5.6-sol","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}`, want: "16"},
+-		{name: "gemini maxOutputTokens 1", from: sdktranslator.FormatGemini, payload: `{"model":"gpt-5.6-sol","contents":[{"role":"user","parts":[{"text":"Hi"}]}],"generationConfig":{"maxOutputTokens":1}}`, want: "16"},
+-		{name: "gemini top-level max_tokens 1", from: sdktranslator.FormatGemini, payload: `{"model":"gpt-5.6-sol","contents":[{"role":"user","parts":[{"text":"Hi"}]}],"max_tokens":1}`, want: "16"},
+-		{name: "interactions max_output_tokens 1", from: sdktranslator.FormatInteractions, payload: `{"model":"gpt-5.6-sol","input":"Hi","max_output_tokens":1}`, want: "16"},
+-		{name: "interactions generation_config 1", from: sdktranslator.FormatInteractions, payload: `{"model":"gpt-5.6-sol","input":"Hi","generation_config":{"max_output_tokens":1}}`, want: "16"},
++		{name: "chat max_tokens 1", from: sdktranslator.FormatOpenAI, payload: `{"model":"gpt-5.6-sol","max_tokens":1,"messages":[{"role":"user","content":"Hi"}]}`, want: "1"},
++		{name: "chat max_completion_tokens 1", from: sdktranslator.FormatOpenAI, payload: `{"model":"gpt-5.6-sol","max_completion_tokens":1,"messages":[{"role":"user","content":"Hi"}]}`, want: "1"},
++		{name: "chat max_output_tokens 1", from: sdktranslator.FormatOpenAI, payload: `{"model":"gpt-5.6-sol","max_output_tokens":1,"messages":[{"role":"user","content":"Hi"}]}`, want: "1"},
++		{name: "claude max_tokens 1", from: sdktranslator.FormatClaude, payload: `{"model":"gpt-5.6-sol","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}`, want: "1"},
++		{name: "gemini maxOutputTokens 1", from: sdktranslator.FormatGemini, payload: `{"model":"gpt-5.6-sol","contents":[{"role":"user","parts":[{"text":"Hi"}]}],"generationConfig":{"maxOutputTokens":1}}`, want: "1"},
++		{name: "gemini top-level max_tokens 1", from: sdktranslator.FormatGemini, payload: `{"model":"gpt-5.6-sol","contents":[{"role":"user","parts":[{"text":"Hi"}]}],"max_tokens":1}`, want: "1"},
++		{name: "interactions max_output_tokens 1", from: sdktranslator.FormatInteractions, payload: `{"model":"gpt-5.6-sol","input":"Hi","max_output_tokens":1}`, want: "1"},
++		{name: "interactions generation_config 1", from: sdktranslator.FormatInteractions, payload: `{"model":"gpt-5.6-sol","input":"Hi","generation_config":{"max_output_tokens":1}}`, want: "1"},
+ 		{
+ 			name: "responses payload override still final", from: sdktranslator.FormatOpenAIResponse,
+ 			payload: `{"model":"gpt-5.6-sol","max_output_tokens":1,"input":"Hi"}`, want: "8",
+@@ -190,7 +189,7 @@ func TestCodexSmallOutputBudgetsAllSourceFormats_Issue7304(t *testing.T) {
+ 
+ 					// wantAccept mirrors the simplified upstream model above: any
+ 					// numeric budget below 16 is rejected (the simulator does not
+-					// distinguish integer from fractional), so accepts cover normalized,
++					// distinguish integer from fractional), so accepts cover large,
+ 					// valid, absent, and non-numeric values. Accepted requests must
+ 					// succeed; rejected ones must surface a budget error.
+ 					wantAccept := true
+diff --git a/internal/runtime/executor/codex_executor_request.go b/internal/runtime/executor/codex_executor_request.go
+index 04f62ba9..d9574ba6 100644
+--- a/internal/runtime/executor/codex_executor_request.go
++++ b/internal/runtime/executor/codex_executor_request.go
+@@ -5,7 +5,6 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"io"
+-	"math"
+ 	"net/http"
+ 	neturl "net/url"
+ 	"runtime"
+@@ -68,31 +67,6 @@ func translateCodexRequestPairWithUpdateIntentContext(ctx context.Context, from,
+ 	return originalTranslated, body, changed, err
+ }
+ 
+-// codexMinOutputTokens is the smallest integer max_output_tokens value the ChatGPT
+-// Codex backend accepts; smaller integers are rejected with invalid_request_error.
+-const codexMinOutputTokens = 16
+-
+-// normalizeCodexOutputBudgetDoc raises small positive integer output budgets to the
+-// Codex minimum. It judges the translated payload (max_output_tokens) rather than the
+-// client payload so every source format and budget field (max_tokens,
+-// max_completion_tokens, generation_config, ...) is covered uniformly. Budgets that
+-// are missing, non-numeric, non-integral, or <= 0 are left untouched for the upstream
+-// to reject. This runs before user payload rules so overrides and filters stay final.
+-func normalizeCodexOutputBudgetDoc(doc *ojson.Doc) {
+-	if doc == nil {
+-		return
+-	}
+-	translated := doc.Get("max_output_tokens")
+-	if translated.Type != ojson.Number {
+-		return
+-	}
+-	tokens, errFloat := strconv.ParseFloat(translated.Raw, 64)
+-	if errFloat != nil || tokens < 1 || tokens >= codexMinOutputTokens || tokens != math.Trunc(tokens) {
+-		return
+-	}
+-	_ = doc.Set("max_output_tokens", codexMinOutputTokens)
+-}
+-
+ // PrepareRequest injects Codex credentials into the outgoing HTTP request.
+ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+ 	if req == nil {
+diff --git a/internal/runtime/executor/codex_executor_stream.go b/internal/runtime/executor/codex_executor_stream.go
+index ab31e8af..89cdb9e9 100644
+--- a/internal/runtime/executor/codex_executor_stream.go
++++ b/internal/runtime/executor/codex_executor_stream.go
+@@ -71,7 +71,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
+ 	}
+ 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
+ 	doc := ojson.NewDoc(body)
+-	normalizeCodexOutputBudgetDoc(doc)
+ 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+ 
+ 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
+diff --git a/internal/runtime/executor/codex_websockets_execute.go b/internal/runtime/executor/codex_websockets_execute.go
+index cfd179dc..f2e44fe5 100644
+--- a/internal/runtime/executor/codex_websockets_execute.go
++++ b/internal/runtime/executor/codex_websockets_execute.go
+@@ -69,7 +69,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
+ 	}
+ 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
+ 	doc := ojson.NewDoc(body)
+-	normalizeCodexOutputBudgetDoc(doc)
+ 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+ 
+ 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
+diff --git a/internal/runtime/executor/codex_websockets_stream.go b/internal/runtime/executor/codex_websockets_stream.go
+index c9b16c0b..bdcfbf38 100644
+--- a/internal/runtime/executor/codex_websockets_stream.go
++++ b/internal/runtime/executor/codex_websockets_stream.go
+@@ -923,7 +923,6 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
+ 	}
+ 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
+ 	doc := ojson.NewDoc(body)
+-	normalizeCodexOutputBudgetDoc(doc)
+ 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+ 
+ 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
+diff --git a/internal/runtime/executor/helps/codex_terminal_incomplete.go b/internal/runtime/executor/helps/codex_terminal_incomplete.go
+index 51ae7ff2..eff611ab 100644
+--- a/internal/runtime/executor/helps/codex_terminal_incomplete.go
++++ b/internal/runtime/executor/helps/codex_terminal_incomplete.go
+@@ -36,7 +36,7 @@ func IsCodexTerminalEmptyIncomplete(eventData []byte, outputItemsCount int, sawO
+ 		return false
+ 	}
+ 	// An explicit generation cap is a valid incomplete receipt, even with no output.
+-	if gjson.GetBytes(eventData, "response.incomplete_details.reason").String() == "max_output_tokens" {
++	if ojson.GetBytes(eventData, "response.incomplete_details.reason").String() == "max_output_tokens" {
+ 		return false
+ 	}
+ 	// If any non-empty text delta, reasoning delta, or tool argument delta was emitted, content was produced.
+diff --git a/internal/translator/codex/openai/responses/codex_openai-responses_request_test.go b/internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
+index e25d62d5..a95790cb 100644
+--- a/internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
++++ b/internal/translator/codex/openai/responses/codex_openai-responses_request_test.go
+@@ -27,13 +27,13 @@ func TestConvertOpenAIResponsesRequestToCodexMaxOutputTokens(t *testing.T) {
+ 		{"zero output limit takes precedence", `{"max_output_tokens":0,"max_completion_tokens":2048,"max_tokens":1024}`, "0"},
+ 		{"null output limit uses completion fallback", `{"max_output_tokens":null,"max_completion_tokens":2048,"max_tokens":1024}`, "2048"},
+ 		{"null output limit uses max_tokens fallback", `{"max_output_tokens":null,"max_tokens":1024}`, "1024"},
+-		{"invalid completion limit skipped", `{"max_completion_tokens":"2048","max_tokens":1024}`, "1024"},
+-		{"null completion limit skipped", `{"max_completion_tokens":null,"max_tokens":1024}`, "1024"},
++		{"invalid completion limit preserved", `{"max_completion_tokens":"2048","max_tokens":1024}`, `"2048"`},
++		{"null completion limit preserved", `{"max_completion_tokens":null,"max_tokens":1024}`, "null"},
+ 		{"zero completion limit takes precedence", `{"max_completion_tokens":0,"max_tokens":1024}`, "0"},
+ 		{"non-numeric output limit preserved", `{"max_output_tokens":"4096","max_completion_tokens":2048}`, `"4096"`},
+-		{"non-numeric legacy limits stripped", `{"max_completion_tokens":true,"max_tokens":{}}`, ""},
+-		{"null legacy limits stripped", `{"max_completion_tokens":null,"max_tokens":null}`, ""},
+-		{"null output limit without numeric fallback preserved", `{"max_output_tokens":null,"max_tokens":"1024"}`, "null"},
++		{"non-numeric legacy limit preserved", `{"max_completion_tokens":true,"max_tokens":{}}`, "true"},
++		{"null legacy limit preserved", `{"max_completion_tokens":null,"max_tokens":null}`, "null"},
++		{"null output uses raw legacy fallback", `{"max_output_tokens":null,"max_tokens":"1024"}`, `"1024"`},
+ 	}
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
+index f19efb10..3eb998a3 100644
+--- a/sdk/api/handlers/openai/openai_responses_handlers.go
++++ b/sdk/api/handlers/openai/openai_responses_handlers.go
+@@ -1348,8 +1348,9 @@ func sanitizeResponsesStreamErrorNode(val any) any {
+ 
+ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) string {
+ 	if body := responsesFailureBody(errMsg); len(body) > 0 {
+-		errorOnly, _ := sjson.DeleteBytes(body, "response")
+-		return string(errorOnly)
++		errorOnly := ojson.NewDoc(body)
++		_ = errorOnly.Delete("response")
++		return string(errorOnly.Bytes())
+ 	}
+ 	text := http.StatusText(status)
+ 	if errMsg != nil && errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket.go b/sdk/api/handlers/openai/openai_responses_websocket.go
+index 2ab5f4e1..5798131f 100644
+--- a/sdk/api/handlers/openai/openai_responses_websocket.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket.go
+@@ -783,11 +783,13 @@ requestLoop:
+ 		codexRoute := !isPluginExecutorRoute && (providerRoute == "codex" ||
+ 			(!routeOverridesModelResolution && codexModel))
+ 		switchCodexHTTP := codexRoute && !codexHTTPOnly.Load() && len(payload) >= responsesWebsocketCodexHTTPThreshold &&
+-			gjson.ValidBytes(payload) && gjson.GetBytes(payload, "type").String() == wsRequestTypeCreate &&
++			ojson.ValidBytes(payload) && ojson.GetBytes(payload, "type").String() == wsRequestTypeCreate &&
+ 			!responsesWebsocketRequestRequiresCurrentUpstream(payload)
+ 		forceCodexHTTP := codexRoute && (codexHTTPOnly.Load() || switchCodexHTTP)
+ 		if switchCodexHTTP && explicitRequestModelName == "" && requestModelName != "" {
+-			payload, _ = sjson.SetBytes(payload, "model", requestModelName)
++			requestDoc := ojson.NewDoc(payload)
++			_ = requestDoc.Set("model", requestModelName)
++			payload = requestDoc.Bytes()
+ 		}
+ 		if forceCodexHTTP {
+ 			useUpstreamWebsocketPassthrough = false
+@@ -1363,6 +1365,6 @@ func writeResponsesWebsocketPreviousResponseNotFound(writer *responsesWebsocketW
+ 
+ // A bound continuation must not migrate its upstream response IDs to another account.
+ func writeResponsesWebsocketQuotaPolicyExcluded(writer *responsesWebsocketWriter, timeline websocketTimelineAppender, request []byte) error {
+-	payload, _ := json.Marshal(map[string]any{"type": "error", "status": 503, "error": map[string]string{"type": "server_error", "code": "quota_policy_excluded", "message": "Account excluded by quota policy. Reconnect with full context to select an eligible account.", "event_id": gjson.GetBytes(request, "event_id").String()}})
++	payload, _ := json.Marshal(map[string]any{"type": "error", "status": 503, "error": map[string]string{"type": "server_error", "code": "quota_policy_excluded", "message": "Account excluded by quota policy. Reconnect with full context to select an eligible account.", "event_id": ojson.GetBytes(request, "event_id").String()}})
+ 	return writeResponsesWebsocketPayload(writer, timeline, payload, time.Now())
+ }
+diff --git a/sdk/cliproxy/auth/selector.go b/sdk/cliproxy/auth/selector.go
+index 2baa9077..fc01680f 100644
+--- a/sdk/cliproxy/auth/selector.go
++++ b/sdk/cliproxy/auth/selector.go
+@@ -1409,12 +1409,12 @@ type SessionAffinitySelector struct {
+ 	rebalanceMu        sync.Mutex
+ 	rebalanceEpoch     uint64
+ 	authRebalanceEpoch map[string]uint64
+-	fallback          Selector
+-	cache             *SessionCache
+-	matcher           *cliproxysession.MerklePrefixMatcher
+-	subagentAffinity  bool
+-	rebindOnQuotaOnly bool
+-	rebindOnNever     bool
++	fallback           Selector
++	cache              *SessionCache
++	matcher            *cliproxysession.MerklePrefixMatcher
++	subagentAffinity   bool
++	rebindOnQuotaOnly  bool
++	rebindOnNever      bool
+ }
+ 
+ const (

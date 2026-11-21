@@ -35,6 +35,33 @@ index 36211932..1ec3c9da 100644
  		if serveAPIGet(router, "/api/v1/quota/performance/account?"+query).Code != 400 {
  			t.Fatal("invalid query accepted")
  		}
+diff --git a/internal/api/test/provider_stats_test.go b/internal/api/test/provider_stats_test.go
+index 7ea956ef..abb60186 100644
+--- a/internal/api/test/provider_stats_test.go
++++ b/internal/api/test/provider_stats_test.go
+@@ -39,7 +39,7 @@ func TestProviderStatsRoutesValidateFiltersAndStayAdminOnly(t *testing.T) {
+ 	viewer := &http.Cookie{Name: standardSessionCookieName, Value: viewerToken}
+ 	readToken, _, _ := sessions.CreateReadOnlyWithSourceAndMetadata(auth.SessionSourceStandard, auth.SessionClientMetadata{})
+ 	readOnly := &http.Cookie{Name: standardSessionCookieName, Value: readToken}
+-	for _, path := range []string{"/api/v1/quota/providers", "/api/v1/quota/providers/codex/stats?days=7", "/api/v1/quota/providers/codex/performance?days=14&metric=tps&model=a&mode=fast"} {
++	for _, path := range []string{"/api/v1/quota/providers", "/api/v1/quota/providers/codex/stats?days=7", "/api/v1/quota/providers/codex/performance?days=14&metric=tps&model=a&mode=fast&mode=ultrafast"} {
+ 		if response := serveAPIGet(router, path, admin); response.Code != 200 {
+ 			t.Fatalf("%s: %d %s", path, response.Code, response.Body.String())
+ 		}
+@@ -47,9 +47,12 @@ func TestProviderStatsRoutesValidateFiltersAndStayAdminOnly(t *testing.T) {
+ 			t.Fatal("provider aggregate escaped admin boundary")
+ 		}
+ 	}
+-	if provider.request.Provider != "codex" || provider.request.AuthIndex != "" || provider.request.Days != 14 || provider.request.Metric != "tps" || provider.request.Mode != "fast" {
++	if provider.request.Provider != "codex" || provider.request.AuthIndex != "" || provider.request.Days != 14 || provider.request.Metric != "tps" {
+ 		t.Fatal(provider.request)
+ 	}
++	if len(provider.request.Modes) != 2 || provider.request.Modes[0] != "fast" || provider.request.Modes[1] != "ultrafast" {
++		t.Fatalf("mode filters lost: %v", provider.request.Modes)
++	}
+ 	for _, query := range []string{"days=1", "days=bad", "mode=bad", "metric=bad"} {
+ 		if serveAPIGet(router, "/api/v1/quota/providers/codex/stats?"+query, admin).Code != 400 {
+ 			t.Fatal(query)
 diff --git a/internal/repository/account_performance.go b/internal/repository/account_performance.go
 index fbf4d6e1..4e025c1a 100644
 --- a/internal/repository/account_performance.go

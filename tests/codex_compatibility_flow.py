@@ -31,6 +31,7 @@ def mock():
 
     def response(body, transport):
         counts[transport] += 1
+        assert body["service_tier"] == "ultrafast"
         assert body["max_output_tokens"] == 64
         assert "max_completion_tokens" not in body
         assert body["context_management"] == CONTEXT_MANAGEMENT
@@ -66,7 +67,7 @@ def mock():
             ]
         return {"type": "response.completed", "response": {
             "id": f"resp_{transport}_{counts[transport]}", "model": "gpt-6.1-sol",
-            "status": "completed", "output": output, "usage": USAGE,
+            "status": "completed", "service_tier": "ultrafast", "output": output, "usage": USAGE,
         }}
 
     async def responses(request):
@@ -139,6 +140,7 @@ def main():
 
             def fields(model="compat-test", lite=False):
                 return {"model": model, "instructions": "Synthetic compatibility check.",
+                        "service_tier": "ultrafast",
                         "input": [{"type": "configuration_update", "reasoning": {"effort": "low"}},
                                   {"role": "user", "content": [{"type": "input_text", "text": "synthetic", "prompt_cache_breakpoint": {"mode": "explicit"}}]}],
                         "max_completion_tokens": 64, "context_management": CONTEXT_MANAGEMENT,
@@ -149,6 +151,7 @@ def main():
                         **({"client_metadata": {"ws_request_header_x_openai_internal_codex_responses_lite": "true"}} if lite else {})}
 
             def verify(response):
+                assert response["service_tier"] == "ultrafast"
                 assert response["usage"] == USAGE
                 if any(item.get("type") == "function_call" for item in response["output"]):
                     assert response["output"][0]["encrypted_content"] == ENCRYPTED_REASONING
@@ -195,7 +198,7 @@ def main():
                 except ConnectionClosed:
                     pass
             assert stats() == {"http": 7, "websocket": 6, "fallback_handshake": 1}
-            print("Codex compatibility flow passed: HTTP/SSE/WS, controls, opaque items, phases, usage, incremental tools, compaction reset and no automatic handshake retry.")
+            print("Codex compatibility flow passed: HTTP/SSE/WS, Ultrafast forwarding, controls, opaque items, phases, usage, incremental tools, compaction reset and no automatic handshake retry.")
         except Exception:
             for name in (cpa, upstream):
                 log = docker("logs", "--tail", "25", name, check=False)[-5000:]

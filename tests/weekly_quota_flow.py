@@ -36,13 +36,21 @@ for cycle_id,start,end,percentages in [(9001,reset-timedelta(days=7),reset,[80,2
 # Independent account with no quota cycles: performance is stored request metadata.
 c.execute("INSERT INTO usage_identities (id,name,auth_type,identity,type,provider,is_deleted) VALUES (9101,'Synthetic performance',1,'synthetic-performance-auth','codex','codex',0)")
 event_id = 2000000
-for model, mode, small_count, large_count, small_ms, large_ms in [('performance-a','default',50,5,5000,100000),('performance-b','default',5,50,2000,80000),('performance-a','priority',10,10,1000,8000)]:
+for model, mode, small_count, large_count, small_ms, large_ms in [
+    ('performance-a', 'default', 50, 5, 5000, 100000),
+    ('performance-b', 'default', 5, 50, 2000, 80000),
+    ('performance-a', 'priority', 10, 10, 1000, 8000),
+    ('performance-a', 'ultrafast', 10, 10, 500, 4000),
+]:
     for input_tokens, count, latency in [(1000, small_count, small_ms),(40000, large_count, large_ms)]:
         for i in range(count):
             event_id += 1
             table = 'usage_events_archive' if i % 2 else 'usage_events'
-            c.execute('INSERT INTO '+table+' (id,event_key,api_group_key,provider,auth_type,auth_index,model,upstream_service_tier,timestamp,input_tokens,output_tokens,total_tokens,failed,generate,stream,latency_ms,ttft_ms,reasoning_effort,executor_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                      (event_id,'synthetic-performance-'+str(event_id),'synthetic-private-client-key','codex','oauth','synthetic-performance-auth',model,mode,stamp(now-timedelta(hours=1)),input_tokens,100,input_tokens+100,0,1,1,latency,300,'low','codex-websocket'))
+            # Current records prioritize the effective outgoing tier. Older archive
+            # rows still identify Ultrafast through the legacy outgoing tier.
+            effective, outgoing = ('ultrafast', 'priority') if mode == 'ultrafast' and i % 2 == 0 else ('', mode)
+            c.execute('INSERT INTO '+table+' (id,event_key,api_group_key,provider,auth_type,auth_index,model,effective_service_tier,upstream_service_tier,timestamp,input_tokens,output_tokens,total_tokens,failed,generate,stream,latency_ms,ttft_ms,reasoning_effort,executor_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                      (event_id,'synthetic-performance-'+str(event_id),'synthetic-private-client-key','codex','oauth','synthetic-performance-auth',model,effective,outgoing,stamp(now-timedelta(hours=1)),input_tokens,100,input_tokens+100,0,1,1,latency,300,'low','codex-websocket'))
 # v2 stores request costs. Explicitly seed the same known one-dollar events;
 # unmatched performance models remain honestly unpriced.
 for table in ('usage_events', 'usage_events_archive'):
@@ -140,7 +148,7 @@ def main():
             assert request(url + '?remaining_days=bad', opener=opener)[0] == 400
             performance_url = prefix + '/read-only/accounts/9101/performance?days=14&metric=latency'
             assert request(performance_url)[0] == 401
-            status, performance_body = request(performance_url, opener=opener)
+            status, performance_body = request(performance_url + '&mode=normal&mode=fast', opener=opener)
             assert status == 200, (status, performance_body)
             performance = json.loads(performance_body)
             assert performance['comparison_groups'] == 3 and performance['common_cells'] == 2
@@ -150,6 +158,15 @@ def main():
             assert groups[('performance-b', 'normal')]['matched']['median'] == 2
             assert groups[('performance-a', 'fast')]['matched']['samples'] == 20
             assert sum(g['requests'] for g in performance['groups']) == 130
+            status, speed_body = request(performance_url + '&model=performance-a&mode=fast&mode=ultrafast', opener=opener)
+            assert status == 200, (status, speed_body)
+            speed_report = json.loads(speed_body)
+            assert speed_report['comparison_groups'] == 2 and speed_report['common_cells'] == 2
+            speed_groups = {group['mode']: group for group in speed_report['groups']}
+            assert set(speed_groups) == {'fast', 'ultrafast'}
+            assert speed_groups['fast']['raw']['median'] == 1
+            assert speed_groups['ultrafast']['raw']['median'] == 0.5
+            assert speed_groups['ultrafast']['matched']['samples'] == 20
             for hidden in (password, readonly, management, 'synthetic-performance-auth', 'synthetic-private-client-key'):
                 assert hidden.encode() not in performance_body
             for metric in ('ttft', 'tps', 'phase'):

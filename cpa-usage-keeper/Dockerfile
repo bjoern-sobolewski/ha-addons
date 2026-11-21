@@ -50,6 +50,9 @@ RUN git apply --check /tmp/upstream-event-capacity.patch && git apply /tmp/upstr
 COPY patches/upstream-stream-compatibility.patch /tmp/upstream-stream-compatibility.patch
 RUN git apply --check /tmp/upstream-stream-compatibility.patch && git apply /tmp/upstream-stream-compatibility.patch
 
+COPY patches/response-speed-modes.patch /tmp/response-speed-modes.patch
+RUN git apply --check /tmp/response-speed-modes.patch && git apply /tmp/response-speed-modes.patch
+
 FROM node:24-alpine AS web-builder
 WORKDIR /src/web
 COPY --from=source /src/web/package*.json ./
@@ -67,7 +70,7 @@ COPY --from=source /src/internal/ ./internal/
 COPY --from=source /src/web/static.go ./web/static.go
 COPY --from=web-builder /src/web/dist ./web/dist
 RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=tmpfs,target=/tmp GIN_MODE=release go test ./internal/...
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=2.1.0-ha.12" -o /out/cpa-usage-keeper ./cmd/server/main.go
+RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 go build -ldflags="-s -w -X cpa-usage-keeper/internal/version.Version=2.1.0-ha.13" -o /out/cpa-usage-keeper ./cmd/server/main.go
 
 FROM ghcr.io/willxup/cpa-usage-keeper:2.1.0@sha256:c071c6326e95601988e011ef38f0fe4cfd2bd50dcebf18848cd10cc1a01edb84
 USER root
@@ -78,7 +81,7 @@ COPY run.sh bootstrap.py nginx.conf viewer-locations.conf /opt/ha/
 RUN chmod 755 /opt/ha/run.sh
 ENV WORK_DIR=/data TZ=Europe/Berlin
 EXPOSE 8082
-ARG BUILD_VERSION=0.2.11
+ARG BUILD_VERSION=0.2.12
 LABEL io.hass.name="CPA Usage Keeper" io.hass.type="addon" io.hass.arch="aarch64|amd64" io.hass.version="${BUILD_VERSION}"
 ENTRYPOINT ["/opt/ha/run.sh"]
 CMD []

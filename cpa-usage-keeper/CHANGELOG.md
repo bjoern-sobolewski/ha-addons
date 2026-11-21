@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.12
+
+- Give Ultrafast requested its own series in Response speed, including retained request history.
+- Select any combination of Normal, Fast requested, Ultrafast requested and Mode not captured in the checkbox picker. Workload matching uses the selected modes.
+
 ## 0.2.11
 
 - Update to Keeper 2.1.0 with the upstream Argon Ultra Lite quota and live-event capacity fixes.

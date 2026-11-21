@@ -1,0 +1,593 @@
+diff --git a/internal/api/account_performance.go b/internal/api/account_performance.go
+index 1ef33929..0060a8ee 100644
+--- a/internal/api/account_performance.go
++++ b/internal/api/account_performance.go
+@@ -29,7 +29,15 @@ func performanceRequest(c *gin.Context, authIndex, provider string) (repository.
+ 		days = n
+ 	}
+ 	metric := c.DefaultQuery("metric", "latency")
+-	q := repository.PerformanceQuery{AuthIndex: authIndex, Provider: provider, Days: days, Metric: metric, Models: c.QueryArray("model"), Mode: c.Query("mode"), Context: c.Query("context"), Output: c.Query("output"), Effort: c.Query("effort")}
++	modes := c.QueryArray("mode")
++	if len(modes) == 1 && modes[0] == "" {
++		modes = nil
++	}
++	q := repository.PerformanceQuery{
++		AuthIndex: authIndex, Provider: provider, Days: days, Metric: metric,
++		Models: c.QueryArray("model"), Modes: modes,
++		Context: c.Query("context"), Output: c.Query("output"), Effort: c.Query("effort"),
++	}
+ 	return q, repository.ValidatePerformanceQuery(q)
+ }
+ func serveAccountPerformance(c *gin.Context, provider QuotaProvider, authIndex string) {
+diff --git a/internal/api/test/account_performance_test.go b/internal/api/test/account_performance_test.go
+index 36211932..1ec3c9da 100644
+--- a/internal/api/test/account_performance_test.go
++++ b/internal/api/test/account_performance_test.go
+@@ -32,7 +32,10 @@ func TestPerformanceAdminValidationAndErrors(t *testing.T) {
+ 	if response.Code != 200 || provider.request.AuthIndex != "account" || provider.request.Days != 14 || len(provider.request.Models) != 2 || provider.request.Metric != "ttft" || provider.request.Context != "small" {
+ 		t.Fatalf("bad forwarding: %d %+v", response.Code, provider.request)
+ 	}
+-	for _, query := range []string{"days=1", "days=bad", "metric=bad", "mode=bad", "context=bad"} {
++	if len(provider.request.Modes) != 1 || provider.request.Modes[0] != "fast" {
++		t.Fatalf("single mode filter lost: %v", provider.request.Modes)
++	}
++	for _, query := range []string{"days=1", "days=bad", "metric=bad", "mode=bad", "mode=fast&mode=bad", "mode=fast&mode=", "context=bad"} {
+ 		if serveAPIGet(router, "/api/v1/quota/performance/account?"+query).Code != 400 {
+ 			t.Fatal("invalid query accepted")
+ 		}
+diff --git a/internal/repository/account_performance.go b/internal/repository/account_performance.go
+index fbf4d6e1..4e025c1a 100644
+--- a/internal/repository/account_performance.go
++++ b/internal/repository/account_performance.go
+@@ -16,13 +16,13 @@ import (
+ 
+ // Performance contains aggregate timings only, never keys, identities or raw requests.
+ type PerformanceQuery struct {
+-	AuthIndex                     string
+-	Provider                      string
+-	Days                          int
+-	Metric                        string
+-	Models                        []string
+-	Mode, Context, Output, Effort string
+-	Now                           time.Time
++	AuthIndex               string
++	Provider                string
++	Days                    int
++	Metric                  string
++	Models, Modes           []string
++	Context, Output, Effort string
++	Now                     time.Time
+ }
+ type PerformanceStats struct {
+ 	Samples int      `json:"samples"`
+@@ -85,12 +85,17 @@ func ValidatePerformanceQuery(q PerformanceQuery) error {
+ 	if !oneOf(q.Metric, "latency", "ttft", "tps", "phase") {
+ 		return fmt.Errorf("invalid metric")
+ 	}
+-	if !oneOf(q.Mode, "", "normal", "fast", "unknown") || !oneOf(q.Context, "", "small", "medium", "large", "huge") || !oneOf(q.Output, "", "short", "medium", "long", "huge") {
++	if !oneOf(q.Context, "", "small", "medium", "large", "huge") || !oneOf(q.Output, "", "short", "medium", "long", "huge") {
+ 		return fmt.Errorf("invalid workload filter")
+ 	}
+-	if len(q.Models) > 20 || len(q.Effort) > 100 {
++	if len(q.Models) > 20 || len(q.Modes) > 4 || len(q.Effort) > 100 {
+ 		return fmt.Errorf("too many filters")
+ 	}
++	for _, mode := range q.Modes {
++		if !oneOf(mode, "normal", "fast", "ultrafast", "unknown") {
++			return fmt.Errorf("invalid performance mode")
++		}
++	}
+ 	for _, model := range q.Models {
+ 		if len(model) > 200 || strings.TrimSpace(model) == "" {
+ 			return fmt.Errorf("invalid model")
+@@ -106,6 +111,14 @@ func oneOf(value string, options ...string) bool {
+ 	}
+ 	return false
+ }
++
++func performanceRequestedMode(tier string) string {
++	if strings.EqualFold(strings.TrimSpace(tier), "ultrafast") {
++		return "ultrafast"
++	}
++	return quotaRequestedMode(tier)
++}
++
+ func performanceSize(value int64, limits []int64, names []string) string {
+ 	for i, limit := range limits {
+ 		if value < limit {
+@@ -220,8 +233,11 @@ func BuildAccountPerformance(ctx context.Context, db *gorm.DB, q PerformanceQuer
+ 		if len(q.Models) > 0 && !oneOf(e.Model, q.Models...) {
+ 			continue
+ 		}
+-		mode := quotaRequestedMode(e.UpstreamServiceTier)
+-		if q.Mode != "" && mode != q.Mode || q.Context != "" && cell.context != q.Context || q.Output != "" && cell.output != q.Output || q.Effort != "" && cell.effort != q.Effort {
++		mode := performanceRequestedMode(e.UpstreamServiceTier)
++		if len(q.Modes) > 0 && !oneOf(mode, q.Modes...) {
++			continue
++		}
++		if q.Context != "" && cell.context != q.Context || q.Output != "" && cell.output != q.Output || q.Effort != "" && cell.effort != q.Effort {
+ 			continue
+ 		}
+ 		key := [2]string{e.Model, mode}
+diff --git a/internal/repository/test/account_performance_test.go b/internal/repository/test/account_performance_test.go
+index d476fc6c..fd92afaa 100644
+--- a/internal/repository/test/account_performance_test.go
++++ b/internal/repository/test/account_performance_test.go
+@@ -182,7 +182,7 @@ func TestPerformanceUnknownModesSparseAndEffortMismatch(t *testing.T) {
+ 	}
+ }
+ func TestPerformanceValidation(t *testing.T) {
+-	for _, q := range []repository.PerformanceQuery{{Days: 30, Metric: "latency"}, {AuthIndex: "a", Days: 1, Metric: "latency"}, {AuthIndex: "a", Days: 30, Metric: "guess"}, {AuthIndex: "a", Days: 30, Metric: "latency", Mode: "confirmed-fast"}} {
++	for _, q := range []repository.PerformanceQuery{{Days: 30, Metric: "latency"}, {AuthIndex: "a", Days: 1, Metric: "latency"}, {AuthIndex: "a", Days: 30, Metric: "guess"}, {AuthIndex: "a", Days: 30, Metric: "latency", Modes: []string{"confirmed-fast"}}} {
+ 		if repository.ValidatePerformanceQuery(q) == nil {
+ 			t.Fatal("invalid filters accepted")
+ 		}
+diff --git a/web/src/components/usage/credentials/AnalyticsModelPicker.tsx b/web/src/components/usage/credentials/AnalyticsModelPicker.tsx
+index 328f762a..9adb6215 100644
+--- a/web/src/components/usage/credentials/AnalyticsModelPicker.tsx
++++ b/web/src/components/usage/credentials/AnalyticsModelPicker.tsx
+@@ -1,35 +1,25 @@
+-import { useEffect, useRef } from 'react'
+ import { useTranslation } from 'react-i18next'
++import { AnalyticsPicker } from './AnalyticsPicker'
+ import { analyticsModelColor, selectedAnalyticsModels, type AnalyticsModel, type ModelSelection } from './analyticsModels'
+ import styles from './WeeklyQuotaValuePanel.module.scss'
+ 
+ export function AnalyticsModelPicker({ models, selection, onChange }: { models: AnalyticsModel[]; selection: ModelSelection; onChange: (selection: ModelSelection) => void }) {
+   const { t, i18n } = useTranslation()
+-  const ref = useRef<HTMLDetailsElement>(null)
+   const selected = selectedAnalyticsModels(selection, models)
+-  useEffect(() => {
+-    const close = (event: PointerEvent) => { if (!ref.current?.contains(event.target as Node)) ref.current?.removeAttribute('open') }
+-    document.addEventListener('pointerdown', close)
+-    return () => document.removeEventListener('pointerdown', close)
+-  }, [])
+-  return <details ref={ref} className={styles.modelDropdown} onKeyDown={event => {
+-    if (event.key === 'Escape') { ref.current?.removeAttribute('open'); ref.current?.querySelector('summary')?.focus(); event.stopPropagation() }
+-  }}>
+-    <summary aria-label={t('analytics.models', 'Models')}>{t('analytics.models', 'Models')} · {selection === 'top' ? t('analytics.top_short', 'Top 2') : `${selected.length} ${t('analytics.selected', 'selected')}`}</summary>
+-    <div className={styles.modelMenu}>
+-      <div className={styles.pickerActions}>
++  return <AnalyticsPicker
++    label={t('analytics.models', 'Models')}
++    summary={selection === 'top' ? t('analytics.top_short', 'Top 2') : `${selected.length} ${t('analytics.selected', 'selected')}`}
++    actions={<>
+         <button type="button" aria-pressed={selection === 'top'} onClick={() => onChange('top')}>{t('analytics.top', 'Top 2 by requests')}</button>
+         <button type="button" aria-pressed={selection === 'all'} onClick={() => onChange('all')}>{t('analytics.all', 'Show all')}</button>
+         <button type="button" onClick={() => onChange([])}>{t('analytics.clear', 'Clear')}</button>
+-      </div>
+-      <div className={styles.modelOptions} role="group" aria-label={t('analytics.models', 'Models')}>
+-        {models.map(item => <label key={item.model} className={styles.modelOption}>
+-          <input type="checkbox" aria-label={item.model || 'Unnamed model'} checked={selected.includes(item.model)} onChange={() => onChange(selected.includes(item.model) ? selected.filter(value => value !== item.model) : [...selected, item.model])} />
+-          <span className={styles.swatch} style={{ backgroundColor: analyticsModelColor(item.model, models) }} />
+-          <span>{item.model || '—'}</span><small>{new Intl.NumberFormat(i18n.language, { notation: 'compact', maximumFractionDigits: 1 }).format(item.requests)}</small>
+-        </label>)}
+-      </div>
+-      <p className={styles.meta}>{t('analytics.ranking_note', 'Ranked by recorded requests in this period.')}</p>
+-    </div>
+-  </details>
++    </>}
++    footer={<p className={styles.meta}>{t('analytics.ranking_note', 'Ranked by recorded requests in this period.')}</p>}
++  >
++    {models.map(item => <label key={item.model} className={styles.modelOption}>
++      <input type="checkbox" aria-label={item.model || 'Unnamed model'} checked={selected.includes(item.model)} onChange={() => onChange(selected.includes(item.model) ? selected.filter(value => value !== item.model) : [...selected, item.model])} />
++      <span className={styles.swatch} style={{ backgroundColor: analyticsModelColor(item.model, models) }} />
++      <span>{item.model || '—'}</span><small>{new Intl.NumberFormat(i18n.language, { notation: 'compact', maximumFractionDigits: 1 }).format(item.requests)}</small>
++    </label>)}
++  </AnalyticsPicker>
+ }
+diff --git a/web/src/components/usage/credentials/AnalyticsPicker.tsx b/web/src/components/usage/credentials/AnalyticsPicker.tsx
+new file mode 100644
+index 00000000..76d3b1a5
+--- /dev/null
++++ b/web/src/components/usage/credentials/AnalyticsPicker.tsx
+@@ -0,0 +1,38 @@
++import { useEffect, useRef, type ReactNode } from 'react'
++import styles from './WeeklyQuotaValuePanel.module.scss'
++
++interface AnalyticsPickerProps {
++  label: string
++  summary: string
++  actions: ReactNode
++  children: ReactNode
++  footer?: ReactNode
++  menuClassName?: string
++}
++
++export function AnalyticsPicker({ label, summary, actions, children, footer, menuClassName }: AnalyticsPickerProps) {
++  const details = useRef<HTMLDetailsElement>(null)
++  const trigger = useRef<HTMLElement>(null)
++  useEffect(() => {
++    const close = (event: PointerEvent) => {
++      if (details.current && !details.current.contains(event.target as Node)) details.current.open = false
++    }
++    document.addEventListener('pointerdown', close)
++    return () => document.removeEventListener('pointerdown', close)
++  }, [])
++
++  return <details ref={details} className={styles.modelDropdown} onKeyDown={event => {
++    if (event.key === 'Escape' && details.current?.open) {
++      details.current.open = false
++      trigger.current?.focus()
++      event.stopPropagation()
++    }
++  }}>
++    <summary ref={trigger} aria-label={label}>{label} · {summary}</summary>
++    <div className={menuClassName ? `${styles.modelMenu} ${menuClassName}` : styles.modelMenu}>
++      <div className={styles.pickerActions}>{actions}</div>
++      <div className={styles.modelOptions} role="group" aria-label={label}>{children}</div>
++      {footer}
++    </div>
++  </details>
++}
+diff --git a/web/src/components/usage/credentials/PerformancePanel.tsx b/web/src/components/usage/credentials/PerformancePanel.tsx
+index a9f4fe91..6db0e897 100644
+--- a/web/src/components/usage/credentials/PerformancePanel.tsx
++++ b/web/src/components/usage/credentials/PerformancePanel.tsx
+@@ -6,20 +6,30 @@ import { Chart } from '@/components/usage/charts/UsageChart'
+ import type { ChartData, ChartOptions } from 'chart.js'
+ import '@/lib/chartjs'
+ import { ApiError, fetchAccountPerformance } from '@/lib/api'
+-import type { PerformanceReport, PerformanceStats } from '@/lib/types'
++import type { PerformanceMode, PerformanceReport, PerformanceStats } from '@/lib/types'
+ import { Button } from '@/components/ui/Button'
+ import { useThemeStore } from '@/stores'
+ import { buildUsageChartTooltipStyle, getUsageChartTheme } from '@/utils/usage/chartConfig'
+ import { AnalyticsModelPicker } from './AnalyticsModelPicker'
+-import { analyticsModeSelected, analyticsModelColor, rankAnalyticsModels, selectedAnalyticsModels, type AnalyticsModel, type ModelSelection } from './analyticsModels'
++import { AnalyticsPicker } from './AnalyticsPicker'
++import { analyticsModelColor, rankAnalyticsModels, selectedAnalyticsModels, type AnalyticsModel, type ModelSelection } from './analyticsModels'
+ import styles from './WeeklyQuotaValuePanel.module.scss'
+ 
++const capturedModes: readonly PerformanceMode[] = ['normal', 'fast', 'ultrafast']
++const allModes: readonly PerformanceMode[] = [...capturedModes, 'unknown']
++const modeDash: Record<PerformanceMode, number[]> = {
++  normal: [],
++  fast: [7, 3],
++  ultrafast: [8, 3, 2, 3],
++  unknown: [2, 4],
++}
++
+ export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAuthRequired }: { authIndex: string; provider?: string; readOnlyAccountId?: string; onAuthRequired?: () => void }) {
+   const { t, i18n } = useTranslation()
+   const isDark = useThemeStore(state => state.resolvedTheme) === 'dark'
+   const [days, setDays] = useState('7')
+   const [metric, setMetric] = useState('tps')
+-  const [mode, setMode] = useState('captured')
++  const [modes, setModes] = useState(capturedModes)
+   const [context, setContext] = useState('')
+   const [output, setOutput] = useState('')
+   const [effort, setEffort] = useState('')
+@@ -32,12 +42,13 @@ export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAut
+   const models = discovering ? [] : catalog!.models
+   const selectedModels = selectedAnalyticsModels(selection, models)
+   const requestModels = discovering || selection === 'all' ? [] : selectedModels
+-  const noSelection = !discovering && models.length > 0 && !selectedModels.length
++  const noModelsSelected = !discovering && models.length > 0 && !selectedModels.length
++  const noSelection = noModelsSelected || modes.length === 0
+   const [basis, setBasis] = useState<'raw' | 'matched'>('raw')
+   const [tail, setTail] = useState(false)
+   const [revision, setRevision] = useState(0)
+   const [result, setResult] = useState<{ key: string; report?: PerformanceReport; error?: boolean }>()
+-  const requestKey = JSON.stringify([accountKey, days, metric, mode, context, output, effort, requestModels, discovering, revision])
++  const requestKey = JSON.stringify([accountKey, days, metric, modes, context, output, effort, requestModels, discovering, revision])
+   const loading = !noSelection && result?.key !== requestKey
+   const report = loading || noSelection ? undefined : result?.report
+   useEffect(() => {
+@@ -45,8 +56,8 @@ export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAut
+     // Discover request totals without workload filters before asking the server to
+     // match the selected models. Merely hiding lines would leave the wrong mix.
+     const query = discovering
+-      ? { provider, readOnlyAccountId, days, metric: 'latency', mode: '', context: '', output: '', effort: '', models: [] }
+-      : { provider, readOnlyAccountId, days, metric, mode: mode === 'captured' ? '' : mode, context, output, effort, models: requestModels }
++      ? { provider, readOnlyAccountId, days, metric: 'latency', modes: [], context: '', output: '', effort: '', models: [] }
++      : { provider, readOnlyAccountId, days, metric, modes, context, output, effort, models: requestModels }
+     return startLiveRefresh(async (signal) => { await fetchAccountPerformance(authIndex, query, signal)
+       .then(report => {
+         if (signal.aborted) return
+@@ -65,8 +76,15 @@ export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAut
+   const speed = metric === 'tps' || metric === 'phase'
+   const unit = speed ? 'tokens/s' : 's'
+   const format = (value: number | null | undefined) => value == null ? '—' : `${new Intl.NumberFormat(i18n.language, { maximumFractionDigits: 2 }).format(value)} ${unit}`
+-  const modeName = (value: string) => value === 'fast' ? t('weekly_quota.fast', 'Fast requested') : value === 'normal' ? t('weekly_quota.normal', 'Normal') : t('weekly_quota.unknown', 'Mode not captured')
+-  const groups = (report?.groups ?? []).filter(group => selectedModels.includes(group.model) && analyticsModeSelected(group.mode, mode))
++  const modeNames: Record<PerformanceMode, string> = {
++    normal: t('performance_modes.normal'),
++    fast: t('usage_stats.speed_mode_requested', { mode: t('usage_stats.speed_mode_fast') }),
++    ultrafast: t('usage_stats.speed_mode_requested', { mode: t('usage_stats.speed_mode_ultrafast') }),
++    unknown: t('performance_modes.unknown'),
++  }
++  const allSelected = modes.length === allModes.length
++  const capturedSelected = modes.length === capturedModes.length && !modes.includes('unknown')
++  const groups = (report?.groups ?? []).filter(group => selectedModels.includes(group.model) && modes.includes(group.mode))
+     .sort((a, b) => selectedModels.indexOf(a.model) - selectedModels.indexOf(b.model) || a.mode.localeCompare(b.mode))
+   const statValue = (stats: PerformanceStats) => tail ? speed ? stats.p10 : stats.p90 : stats.median
+   const chartGroups = groups.filter(group => group.days.some(point => statValue(point[basis]) != null))
+@@ -75,7 +93,7 @@ export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAut
+     labels: dates.map(day => new Date(`${day}T00:00:00Z`).toLocaleDateString(browserDateLocale(), { month: 'short', day: 'numeric', timeZone: 'UTC' })),
+     datasets: chartGroups.map(group => {
+       const color = analyticsModelColor(group.model, models)
+-      return { label: `${group.model} · ${modeName(group.mode)}`, data: group.days.map(point => statValue(point[basis])), borderColor: color, backgroundColor: color, borderDash: group.mode === 'fast' ? [7, 3] : group.mode === 'unknown' ? [2, 4] : [], borderWidth: 2, pointRadius: 3, spanGaps: false, tension: 0 }
++      return { label: `${group.model} · ${modeNames[group.mode]}`, data: group.days.map(point => statValue(point[basis])), borderColor: color, backgroundColor: color, borderDash: modeDash[group.mode], borderWidth: 2, pointRadius: 3, spanGaps: false, tension: 0 }
+     }),
+   }
+   const theme = getUsageChartTheme(isDark)
+@@ -97,14 +115,28 @@ export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAut
+     {!discovering && <AnalyticsModelPicker models={models} selection={selection} onChange={value => setSelectionState({ account: accountKey, value })} />}
+       {select(t('performance.period', 'Period'), days, setDays, [['7', '7 days'], ['14', '14 days'], ['30', '30 days'], ['90', '90 days']])}
+       {select(t('analytics.speed_measure', 'Response speed over time'), metric, setMetric, [['tps', t('analytics.total_tps', 'Total request time — tokens/s')], ['phase', t('analytics.phase_tps', 'Streaming phase — tokens/s (approx.)')], ['ttft', t('performance.ttft', 'First token (recorded)')], ['latency', t('performance.completion', 'Time to completion')]])}
+-      {select(t('weekly_trends.mode', 'Mode'), mode, setMode, [['captured', t('analytics.captured', 'Normal + Fast')], ['', t('analytics.all_modes', 'All, including uncaptured')], ['normal', modeName('normal')], ['fast', modeName('fast')], ['unknown', modeName('unknown')]])}
++      <AnalyticsPicker
++        label={t('performance_modes.label')}
++        summary={capturedSelected ? t('performance_modes.captured') : t('performance_modes.selected', { count: modes.length })}
++        menuClassName={styles.modeMenu}
++        actions={<>
++          <button type="button" aria-pressed={capturedSelected} onClick={() => setModes(capturedModes)}>{t('performance_modes.captured')}</button>
++          <button type="button" aria-pressed={allSelected} onClick={() => setModes(allModes)}>{t('performance_modes.all')}</button>
++          <button type="button" onClick={() => setModes([])}>{t('performance_modes.clear')}</button>
++        </>}
++      >
++        {allModes.map(mode => <label key={mode} className={styles.modelOption}>
++          <input type="checkbox" checked={modes.includes(mode)} onChange={() => setModes(allModes.filter(value => value === mode ? !modes.includes(value) : modes.includes(value)))} />
++          <span>{modeNames[mode]}</span>
++        </label>)}
++      </AnalyticsPicker>
+     </div>
+     <details className={styles.method}><summary>{t('analytics.workload_filters', 'Refine workload')}</summary><div className={styles.filters}>
+       {select(t('performance.context', 'Input size'), context, setContext, [['', all], ['small', '< 8k tokens'], ['medium', '8k–32k tokens'], ['large', '32k–128k tokens'], ['huge', '128k+ tokens']])}
+       {select(t('performance.output', 'Total output size'), output, setOutput, [['', all], ['short', '< 256 tokens'], ['medium', '256–1,024 tokens'], ['long', '1,024–4,096 tokens'], ['huge', '4,096+ tokens']])}
+       {select(t('performance.effort', 'Reasoning effort'), effort, setEffort, [['', all], ...(discovering ? [] : catalog!.efforts).map(value => [value, value] as [string, string])])}
+     </div></details>
+-    {noSelection && <p role="status" className={styles.empty}>{t('analytics.choose', 'Select a model to show its data, or restore Top 2.')}</p>}
++    {noSelection && <p role="status" className={styles.empty}>{modes.length === 0 ? t('performance_modes.choose') : t('analytics.choose', 'Select a model to show its data, or restore Top 2.')}</p>}
+     {loading && <p role="status" className={styles.empty}>{t('common.loading', 'Loading…')}</p>}
+     {!loading && result?.error && !noSelection && <p role="alert" className={styles.empty}>{t('performance.error', 'Unable to load performance. Use Refresh to retry.')}</p>}
+     {report && <>
+@@ -114,13 +146,12 @@ export function PerformancePanel({ authIndex, provider, readOnlyAccountId, onAut
+           {select(t('performance.basis', 'Comparison'), basis, value => setBasis(value as 'raw' | 'matched'), [['raw', t('performance.raw', 'Actual workload')], ['matched', t('performance.matched', 'Same workload mix')]])}
+           {select(t('performance.percentile', 'Percentile'), tail ? 'tail' : 'median', value => setTail(value === 'tail'), [['median', t('performance.typical', 'Typical — median')], ['tail', speed ? 'Slow tail — p10' : 'Slow tail — p90']])}
+         </div>
+-        <div className={styles.modeKey}><span><i />Normal</span><span><i className={styles.fast} />Fast requested</span>{(mode === '' || mode === 'unknown') && <span><i className={styles.unknown} />Mode not captured</span>}</div>
+         {data.datasets.length ? <div className={styles.chart}><Chart type="line" data={data} options={chartOptions} role="img" aria-label={t('analytics.response_speed_chart', 'Response speed over time')} /></div> : <p role="status" className={styles.empty}>{t('performance.no_chart', 'Not enough supported daily samples for this comparison. Try Actual workload or a longer period.')}</p>}
+         <p className={styles.note}>{t('analytics.performance_chart_note', 'Colors identify models; line styles identify modes. Missing daily samples stay gaps. Select fewer models if the comparison has insufficient overlap.')}</p>
+       </section>
+       <div className={styles.sectionHeading}><h4>{t('analytics.comparison_table', 'Model comparison')}</h4><span className={styles.meta}>{t('analytics.median_tail', 'Median / slow tail')} ({speed ? 'p10' : 'p90'})</span></div>
+       <div className={styles.scroll}><table><thead><tr><th>{t('performance.group', 'Model / mode')}</th><th>{t('performance.raw', 'Actual workload')}</th><th>{t('performance.matched', 'Same workload mix')}</th><th>{t('performance.coverage', 'Matched coverage')}</th></tr></thead><tbody>{groups.map(group => <tr key={JSON.stringify([group.model, group.mode])}>
+-        <td><strong><span className={styles.swatch} style={{ backgroundColor: analyticsModelColor(group.model, models) }} /> {group.model}</strong><small>{modeName(group.mode)}</small><small>{group.requests} {t('weekly_quota.requests', 'requests')} · {group.failed} {t('performance.failed', 'failed')}</small></td>
++        <td><strong><span className={styles.swatch} style={{ backgroundColor: analyticsModelColor(group.model, models) }} /> {group.model}</strong><small>{modeNames[group.mode]}</small><small>{group.requests} {t('weekly_quota.requests', 'requests')} · {group.failed} {t('performance.failed', 'failed')}</small></td>
+         <td><strong>{format(group.raw.median)}</strong><small>{speed ? 'p10' : 'p90'}: {format(speed ? group.raw.p10 : group.raw.p90)}</small><small>{group.raw.samples} {t('performance.samples', 'timed requests')}</small></td>
+         <td><strong>{group.matched.median == null ? t('performance.insufficient', 'Insufficient overlap') : format(group.matched.median)}</strong>{group.matched.median != null && <small>{speed ? 'p10' : 'p90'}: {format(speed ? group.matched.p10 : group.matched.p90)}</small>}</td>
+         <td><strong>{new Intl.NumberFormat(i18n.language, { style: 'percent', maximumFractionDigits: 1 }).format(group.coverage)}</strong><small>{group.matched.samples} / {group.raw.samples}</small></td>
+diff --git a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
+index 8c5eeefc..6a63655d 100644
+--- a/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
++++ b/web/src/components/usage/credentials/WeeklyQuotaValuePanel.module.scss
+@@ -40,3 +40,5 @@
+ .modelMenu { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; width: min(360px, calc(100vw - 64px)); padding: 12px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-primary); box-shadow: 0 8px 28px #0003; display: flex; flex-direction: column; gap: 10px; }
+ .modelOptions { max-height: 260px; overflow-y: auto; }
+ .modelOptions .modelOption { display: flex; flex-direction: row; align-items: center; gap: 8px; padding: 8px 4px; cursor: pointer; color: var(--text-primary); small { margin-left: auto; color: var(--text-secondary); } input { margin: 0; } }
++.modeMenu { width: max-content; max-width: min(300px, calc(100vw - 64px)); }
++@media (min-width: 850px) { .modeMenu { left: auto; right: 0; } }
+diff --git a/web/src/components/usage/credentials/analyticsModels.ts b/web/src/components/usage/credentials/analyticsModels.ts
+index 5f938c32..df1dda67 100644
+--- a/web/src/components/usage/credentials/analyticsModels.ts
++++ b/web/src/components/usage/credentials/analyticsModels.ts
+@@ -20,7 +20,3 @@ export function analyticsModelColor(model: string, models: AnalyticsModel[]): st
+   const names = models.map(item => item.model).sort()
+   return USAGE_CHART_COMPOSITION_COLORS[Math.max(0, names.indexOf(model)) % USAGE_CHART_COMPOSITION_COLORS.length].base
+ }
+-
+-export function analyticsModeSelected(mode: string, filter: string): boolean {
+-  return filter === 'captured' ? mode === 'normal' || mode === 'fast' : !filter || mode === filter
+-}
+diff --git a/web/src/components/usage/test/PerformancePanel.test.tsx b/web/src/components/usage/test/PerformancePanel.test.tsx
+index 8ef174fe..f51e91e7 100644
+--- a/web/src/components/usage/test/PerformancePanel.test.tsx
++++ b/web/src/components/usage/test/PerformancePanel.test.tsx
+@@ -8,7 +8,11 @@ import { ApiError } from '@/lib/api'
+ import type { PerformanceReport, PerformanceStats } from '@/lib/types'
+ import { PerformancePanel } from '../credentials/PerformancePanel'
+ const mocks = vi.hoisted(() => ({ fetch: vi.fn(), charts: new Map<string, ChartData<'line', Array<number | null>, string>>() }))
+-vi.mock('@/lib/api', async original => ({ ...await original<typeof import('@/lib/api')>(), fetchAccountPerformance: (...args: unknown[]) => mocks.fetch(...args) }))
++vi.mock('@/lib/api', async original => ({
++  ...await original<typeof import('@/lib/api')>(),
++  apiFetch: async () => new Response(null, { status: 503 }),
++  fetchAccountPerformance: (...args: unknown[]) => mocks.fetch(...args),
++}))
+ vi.mock('react-chartjs-2', () => ({ Chart: (props: { data: ChartData<'line', Array<number | null>, string>; 'aria-label': string }) => { mocks.charts.set(props['aria-label'], props.data); return <div role="img" aria-label={props['aria-label']} /> } }))
+ const stats = (median: number | null = 2): PerformanceStats => ({ samples: median == null ? 0 : 20, median, p90: median == null ? null : 5, p10: median == null ? null : 1 })
+ const fixture = (): PerformanceReport => ({ generated_at: '2026-10-09T12:00:00Z', range_start: '2026-10-08T12:00:00Z', metric: 'latency', models: ['a', 'b'], efforts: ['low', 'unknown'], min_samples: 20, min_cell_samples: 5, min_daily_samples: 20, min_daily_cell_samples: 3, common_cells: 1, comparison_groups: 2, groups: [
+@@ -20,6 +24,10 @@ beforeEach(async () => { globalThis.IS_REACT_ACT_ENVIRONMENT = true; await i18n.
+ afterEach(async () => { await act(async () => root.unmount()); element.remove() })
+ const render = async (props: Parameters<typeof PerformancePanel>[0] = { authIndex: 'account' }) => { await act(async () => root.render(<PerformancePanel {...props} />)) }
+ const change = async (label: string, value: string) => { const select = element.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!; await act(async () => { select.value = value; select.dispatchEvent(new Event('change', { bubbles: true })) }) }
++const modePicker = () => element.querySelector('summary[aria-label="Mode"]')!.closest('details')!
++const modeCheckbox = (label: string) => [...modePicker().querySelectorAll('label')]
++  .find(option => option.textContent === label)!.querySelector('input')!
++const modeAction = (label: string) => [...modePicker().querySelectorAll('button')].find(button => button.textContent === label)!
+ it('shows separate actual/matched percentiles, coverage, failures and fixed-mix gaps', async () => {
+   await render()
+   expect(element.textContent).toContain('Time to completion')
+@@ -40,14 +48,44 @@ it('shows separate actual/matched percentiles, coverage, failures and fixed-mix
+ })
+ it('uses p10 for slow throughput and forwards model, period and workload filters', async () => {
+   await render()
+-  await change('Response speed over time', 'tps'); await change('Period', '14'); await change('Input size', 'large'); await change('Total output size', 'long'); await change('Reasoning effort', 'low'); await change('Mode', 'fast')
+-  const checkboxes = [...element.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+-  await act(async () => checkboxes[0].click())
+-  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ metric: 'tps', days: '14', context: 'large', output: 'long', effort: 'low', mode: 'fast', models: ['b'] })
++  await change('Response speed over time', 'tps'); await change('Period', '14'); await change('Input size', 'large'); await change('Total output size', 'long'); await change('Reasoning effort', 'low')
++  await act(async () => {
++    element.querySelector<HTMLInputElement>('input[aria-label="a"]')!.click()
++    modeCheckbox('Normal').click()
++  })
++  expect(mocks.fetch.mock.lastCall?.[1]).toMatchObject({ metric: 'tps', days: '14', context: 'large', output: 'long', effort: 'low', modes: ['fast', 'ultrafast'], models: ['b'] })
+   await change('Comparison', 'raw'); await change('Percentile', 'tail')
+   expect(mocks.charts.get('Response speed over time')!.datasets[0].data).toEqual([1, 1])
+   expect(element.textContent).toContain('Higher is faster')
+ })
++it('selects captured modes by default and supports Ultrafast, all modes and an empty selection', async () => {
++  const report = fixture()
++  report.groups.push(
++    { ...report.groups[1], mode: 'ultrafast' },
++    { ...report.groups[1], mode: 'unknown' },
++  )
++  mocks.fetch.mockResolvedValue(report)
++  await render()
++  expect(mocks.fetch.mock.calls[0][1].modes).toEqual([])
++  expect(mocks.fetch.mock.lastCall?.[1].modes).toEqual(['normal', 'fast', 'ultrafast'])
++  expect(modeCheckbox('Ultrafast requested').checked).toBe(true)
++  expect(modeCheckbox('Mode not captured').checked).toBe(false)
++  const datasets = () => mocks.charts.get('Response speed over time')!.datasets
++  const ultrafast = datasets().find(dataset => dataset.label === 'b · Ultrafast requested')
++  expect(ultrafast?.borderDash).toEqual([8, 3, 2, 3])
++  expect(datasets().some(dataset => dataset.label === 'b · Mode not captured')).toBe(false)
++
++  await act(async () => modeAction('Show all').click())
++  expect(mocks.fetch.mock.lastCall?.[1].modes).toEqual(['normal', 'fast', 'ultrafast', 'unknown'])
++  const calls = mocks.fetch.mock.calls.length
++  await act(async () => modeAction('Clear').click())
++  expect(mocks.fetch).toHaveBeenCalledTimes(calls)
++  expect(element.querySelector('[role="img"]')).toBeNull()
++  expect(element.textContent).toContain('Select a mode to show response speeds.')
++  await act(async () => modeCheckbox('Ultrafast requested').click())
++  expect(mocks.fetch.mock.lastCall?.[1].modes).toEqual(['ultrafast'])
++  expect(datasets().map(dataset => dataset.label)).toEqual(['b · Ultrafast requested'])
++})
+ it('preserves insufficient overlap without zero speeds or fabricated lines', async () => {
+   const report = fixture(); report.comparison_groups = 0; report.common_cells = 0
+   report.groups.forEach(group => { group.matched = stats(null); group.coverage = 0; group.days.forEach(day => { day.matched = stats(null) }) })
+@@ -89,7 +127,8 @@ it('defaults to two models ranked across modes, supports extra models and an emp
+   await act(async () => element.querySelector<HTMLInputElement>('input[aria-label="f"]')!.click())
+   expect(mocks.fetch.mock.lastCall?.[1].models).toEqual(['a','b','f'])
+   const count = mocks.fetch.mock.calls.length
+-  await act(async () => [...element.querySelectorAll('button')].find(button => button.textContent === 'Clear')!.click())
++  const models = element.querySelector('summary[aria-label="Models"]')!.closest('details')!
++  await act(async () => [...models.querySelectorAll('button')].find(button => button.textContent === 'Clear')!.click())
+   expect(mocks.fetch).toHaveBeenCalledTimes(count)
+   expect(element.querySelector('[role="img"]')).toBeNull()
+   await act(async () => [...element.querySelectorAll('button')].find(button => button.textContent === 'Top 2 by requests')!.click())
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index 3cfab1f4..50e3f142 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -20,6 +20,11 @@ const getInitialLanguage = (): SupportedLanguage => {
+ const resources = {
+   en: {
+     translation: {
++      performance_modes: {
++        label: 'Mode', normal: 'Normal', unknown: 'Mode not captured',
++        captured: 'Captured modes', all: 'Show all', clear: 'Clear',
++        selected: '{{count}} selected', choose: 'Select a mode to show response speeds.',
++      },
+       account_errors: {"keeper": "Keeper app", "cpa": "CPA proxy", "provider": "Upstream provider", "unconfirmed": "Source unconfirmed", "connection": "No confirmed server result was received. Check the connection and refresh before retrying.", "reset_retry": "Refresh quota and reset credits first. If the result is uncertain, retry this same attempt; do not start a new reset.", "reset_unknown": "The reset result could not be confirmed. A credit may have been consumed.", "reset_not_limited": "The account is not currently limited; no reset was applied.", "reset_cooldown": "The provider requires waiting before another reset.", "reset_ineligible": "This account or selected reset credit is not eligible.", "reset_unavailable": "No usable reset credit is currently available.", "reset_rate_limited": "The provider is rate limiting requests. Wait before retrying.", "reset_auth_error": "The provider rejected the account authentication. Reconnect the account.", "reset_status_unavailable": "Reset eligibility could not be checked."},
+       usage_graph: {peak: 'Peak {{count}} / 10m'},
+       live: { live: 'Live', connecting: 'Connecting…', reconnecting: 'Reconnecting…', paused: 'Paused while hidden' },
+@@ -1152,6 +1157,11 @@ const resources = {
+   },
+   zh: {
+     translation: {
++      performance_modes: {
++        label: '模式', normal: '标准', unknown: '未记录模式',
++        captured: '已记录的模式', all: '显示全部', clear: '清除',
++        selected: '已选 {{count}} 项', choose: '选择模式以查看响应速度。',
++      },
+       account_errors: {"keeper": "Keeper app", "cpa": "CPA proxy", "provider": "Upstream provider", "unconfirmed": "Source unconfirmed", "connection": "No confirmed server result was received. Check the connection and refresh before retrying.", "reset_retry": "Refresh quota and reset credits first. If the result is uncertain, retry this same attempt; do not start a new reset.", "reset_unknown": "The reset result could not be confirmed. A credit may have been consumed.", "reset_not_limited": "The account is not currently limited; no reset was applied.", "reset_cooldown": "The provider requires waiting before another reset.", "reset_ineligible": "This account or selected reset credit is not eligible.", "reset_unavailable": "No usable reset credit is currently available.", "reset_rate_limited": "The provider is rate limiting requests. Wait before retrying.", "reset_auth_error": "The provider rejected the account authentication. Reconnect the account.", "reset_status_unavailable": "Reset eligibility could not be checked."},
+       usage_graph: {peak: '峰值 {{count}} / 10分钟'},
+       live: { live: '实时', connecting: '正在连接…', reconnecting: '正在重新连接…', paused: '页面隐藏时暂停' },
+@@ -2284,6 +2294,11 @@ const resources = {
+   },
+   'zh-TW': {
+     translation: {
++      performance_modes: {
++        label: '模式', normal: '標準', unknown: '未記錄模式',
++        captured: '已記錄的模式', all: '顯示全部', clear: '清除',
++        selected: '已選 {{count}} 項', choose: '選擇模式以查看回應速度。',
++      },
+       account_errors: {"keeper": "Keeper app", "cpa": "CPA proxy", "provider": "Upstream provider", "unconfirmed": "Source unconfirmed", "connection": "No confirmed server result was received. Check the connection and refresh before retrying.", "reset_retry": "Refresh quota and reset credits first. If the result is uncertain, retry this same attempt; do not start a new reset.", "reset_unknown": "The reset result could not be confirmed. A credit may have been consumed.", "reset_not_limited": "The account is not currently limited; no reset was applied.", "reset_cooldown": "The provider requires waiting before another reset.", "reset_ineligible": "This account or selected reset credit is not eligible.", "reset_unavailable": "No usable reset credit is currently available.", "reset_rate_limited": "The provider is rate limiting requests. Wait before retrying.", "reset_auth_error": "The provider rejected the account authentication. Reconnect the account.", "reset_status_unavailable": "Reset eligibility could not be checked."},
+       usage_graph: {peak: '峰值 {{count}} / 10分鐘'},
+       live: { live: '即時', connecting: '正在連線…', reconnecting: '正在重新連線…', paused: '頁面隱藏時暫停' },
+diff --git a/web/src/lib/api.ts b/web/src/lib/api.ts
+index 3d3c12e3..34d7d038 100644
+--- a/web/src/lib/api.ts
++++ b/web/src/lib/api.ts
+@@ -2,6 +2,7 @@ import { createResetRequestId } from '@/utils/resetRequestId'
+ import { type AnalysisLatencyDiagnostics, type AnalysisResponse, type CredentialsManagementResponse, type AuthManagedSessionsResponse, type AuthSessionResponse, type CodexQuotaHistoryResponse, type CpaApiKeyDisplayItem, type CpaApiKeyOptionsResponse, type CpaApiKeySettingsResponse, type CpaApiKeysResponse, type ErrorEventsResponse, type OverviewRealtimeBlock, type OverviewRealtimeWindow, type PricingSyncSource, type QuotaAutoRefreshSettings, type StatusResponse, type UpdateCheckResponse, type UsageActivityRequest, type UsageActivityResponse, type UsageEventModelFilterOptionsResponse, type UsageEventRequestLogResponse, type UsageEventSourceFilterOptionsResponse, type UsageRangeRequest, type UsageIdentitiesPageResponse, type UsageIdentitiesResponse, type UsageEventsResponse, type UsageIdentity, type UsageIdentityAuthType, type UsageOverviewComparisons, type UsageOverviewResponse, type UsageQuotaCacheResponse, type UsageQuotaInspectionStatusResponse, type UsageQuotaRefreshResponse, type UsageQuotaRefreshTaskResponse, type UsageQuotaResetCreditsResponse, type UsageQuotaResetResponse, type VersionResponse } from './types'
+ import type { DeletePricingModelResponse, ModelPricingConfig, PricingErrorResponse, PricingFieldError, PricingModelOptionsResponse, PricingModelsResponse, PricingRecalculationOptions, PricingRecalculationTask, PricingSyncApplyRequest, PricingSyncApplyResponse, PricingSyncFetchResponse, SavePricingModelResponse, StartPricingRecalculationRequest, StartPricingRecalculationResponse } from './types'
+ import { isCPAMCEmbed } from '@/embed/cpamcEmbed'
++import type { PerformanceMode } from './types'
+ import { resolveUsageRequestRange } from '@/utils/usage/rangeQuery'
+ 
+ export interface ViewerQuotaRow {
+@@ -1262,11 +1263,12 @@ export async function fetchReadOnlyReport<T>(path: string, params = new URLSearc
+  if(!response.ok) await parseApiError(response,'Unable to load reporting data');return response.json();
+ }
+ 
+-export interface AccountPerformanceOptions { provider?: string; readOnlyAccountId?: string; days: string; metric: string; models: string[]; mode: string; context: string; output: string; effort: string }
++export interface AccountPerformanceOptions { provider?: string; readOnlyAccountId?: string; days: string; metric: string; models: string[]; modes: readonly PerformanceMode[]; context: string; output: string; effort: string }
+ export async function fetchAccountPerformance(authIndex: string, options: AccountPerformanceOptions, signal?: AbortSignal): Promise<import('./types').PerformanceReport> {
+   const params = new URLSearchParams({ days: options.days, metric: options.metric })
+   for (const model of options.models) params.append('model', model)
+-  for (const key of ['mode', 'context', 'output', 'effort'] as const) if (options[key]) params.set(key, options[key])
++  for (const mode of options.modes) params.append('mode', mode)
++  for (const key of ['context', 'output', 'effort'] as const) if (options[key]) params.set(key, options[key])
+   const path = options.provider ? `/quota/providers/${encodeURIComponent(options.provider)}/performance` : options.readOnlyAccountId ? `/read-only/accounts/${encodeURIComponent(options.readOnlyAccountId)}/performance` : `/quota/performance/${encodeURIComponent(authIndex)}`
+   const response = await apiFetch(`${apiPath(path)}?${params}`, { signal, cache: 'no-store' })
+   if (!response.ok) await parseApiError(response, `Failed to load performance: ${response.status}`)
+diff --git a/web/src/lib/test/api.test.ts b/web/src/lib/test/api.test.ts
+index 2e5b926f..08256a62 100644
+--- a/web/src/lib/test/api.test.ts
++++ b/web/src/lib/test/api.test.ts
+@@ -981,14 +981,16 @@ it('routes performance by server-resolved account and preserves repeated model f
+   vi.stubGlobal('window', { __APP_BASE_PATH__: '/keeper' });
+   const fetchMock = mockJSON({});
+   const signal = new AbortController().signal;
+-  const options = { days: '30', metric: 'latency', models: ['a', 'b'], mode: 'fast', context: 'large', output: 'long', effort: 'low' };
++  const options = { days: '30', metric: 'latency', models: ['a', 'b'], modes: ['fast', 'ultrafast'] as const, context: 'large', output: 'long', effort: 'low' };
+   await fetchAccountPerformance('private/account', options, signal);
+   await fetchAccountPerformance('private/account', { ...options, readOnlyAccountId: '3' }, signal);
+   const adminURL = new URL(String(fetchMock.mock.calls[0][0]), 'http://localhost');
+   const readOnlyURL = new URL(String(fetchMock.mock.calls[1][0]), 'http://localhost');
+   expect(adminURL.pathname).toBe('/keeper/api/v1/quota/performance/private%2Faccount');
+   expect(adminURL.searchParams.getAll('model')).toEqual(['a', 'b']);
++  expect(adminURL.searchParams.getAll('mode')).toEqual(['fast', 'ultrafast']);
+   expect(readOnlyURL.pathname).toBe('/keeper/api/v1/read-only/accounts/3/performance');
++  expect(readOnlyURL.searchParams.getAll('mode')).toEqual(['fast', 'ultrafast']);
+   expect(readOnlyURL.toString()).not.toContain('private');
+   expect(fetchMock.mock.calls[1][1]).toMatchObject({ signal, credentials: 'include' });
+ });
+diff --git a/web/src/lib/test/providerStats.test.ts b/web/src/lib/test/providerStats.test.ts
+index 85cd9828..d9fa91ef 100644
+--- a/web/src/lib/test/providerStats.test.ts
++++ b/web/src/lib/test/providerStats.test.ts
+@@ -5,7 +5,7 @@ it('routes provider reports separately from account and read-only reports', asyn
+  vi.stubGlobal('window', { __APP_BASE_PATH__: '/keeper/' })
+  const fetchMock=vi.spyOn(globalThis,'fetch').mockImplementation(async () => Response.json({providers:['codex']}))
+  const signal=new AbortController().signal
+- const options={days:'14',metric:'tps',models:['a','b'],mode:'fast',context:'large',output:'long',effort:'low'}
++ const options={days:'14',metric:'tps',models:['a','b'],modes:['fast','ultrafast'] as const,context:'large',output:'long',effort:'low'}
+  expect(await fetchStatsProviders(signal)).toEqual(['codex'])
+  await fetchProviderStats('codex','30',signal)
+  await fetchAccountPerformance('',{...options,provider:'codex'},signal)
+@@ -15,6 +15,7 @@ it('routes provider reports separately from account and read-only reports', asyn
+  const urls=fetchMock.mock.calls.map(([url])=>new URL(String(url),'http://localhost'))
+  expect(urls.map(url=>url.pathname)).toEqual(['/keeper/api/v1/quota/providers','/keeper/api/v1/quota/providers/codex/stats','/keeper/api/v1/quota/providers/codex/performance','/keeper/api/v1/quota/performance/private-account','/keeper/api/v1/read-only/accounts/3/performance','/keeper/api/v1/read-only/accounts/3/weekly-quota'])
+  expect(urls[2].searchParams.getAll('model')).toEqual(['a','b'])
++ expect(urls[2].searchParams.getAll('mode')).toEqual(['fast','ultrafast'])
+  expect(urls[2].searchParams.get('context')).toBe('large')
+  expect(urls[2].searchParams.get('days')).toBe('14')
+  expect(fetchMock.mock.calls[2][1]).toMatchObject({credentials:'include',cache:'no-store',signal})
+diff --git a/web/src/lib/types.ts b/web/src/lib/types.ts
+index 8f924270..7a633387 100644
+--- a/web/src/lib/types.ts
++++ b/web/src/lib/types.ts
+@@ -1122,7 +1122,8 @@ export interface WeeklyTrendPoint {
+ 
+ export interface PerformanceStats { samples: number; median: number | null; p90: number | null; p10: number | null }
+ export interface PerformanceDay { day: string; raw: PerformanceStats; matched: PerformanceStats }
+-export interface PerformanceGroup { model: string; mode: string; requests: number; failed: number; raw: PerformanceStats; matched: PerformanceStats; coverage: number; days: PerformanceDay[] }
++export type PerformanceMode = 'normal' | 'fast' | 'ultrafast' | 'unknown'
++export interface PerformanceGroup { model: string; mode: PerformanceMode; requests: number; failed: number; raw: PerformanceStats; matched: PerformanceStats; coverage: number; days: PerformanceDay[] }
+ export interface PerformanceReport { generated_at: string; range_start: string; metric: string; models: string[]; efforts: string[]; groups: PerformanceGroup[]; common_cells: number; comparison_groups: number; min_samples: number; min_cell_samples: number; min_daily_samples: number; min_daily_cell_samples: number }
+ 
+ export interface ProviderUsageTotals {

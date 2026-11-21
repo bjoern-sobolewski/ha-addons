@@ -102,7 +102,8 @@ def main():
             assert status == 200 and b'data:' in response and b'[DONE]' in response
             print('PASS: API authentication, private management, path isolation, model call and SSE stream', flush=True)
 
-            eventually(lambda: request(keeper + '/healthz')[0] == 200)
+            # The startup shell serves liveness before the authenticated API is ready.
+            eventually(lambda: request(keeper + '/readyz')[0] == 200)
             assert request(keeper + '/api/v1/usage/overview')[0] == 401
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
             status, response = request(keeper + '/api/v1/auth/login', headers={'X-CPA-Usage-Keeper-Request': 'fetch'}, body={'password': password}, opener=opener)
@@ -121,7 +122,7 @@ def main():
             docker('restart', names['keeper'])
             keeper = endpoint(names['keeper'], 8080)
             viewer_gateway = endpoint(names['keeper'], 8082)
-            eventually(lambda: request(keeper + '/healthz')[0] == 200)
+            eventually(lambda: request(keeper + '/readyz')[0] == 200)
             assert int(docker('exec', names['keeper'], 'python3', '-c', query)) >= count
             page_status, page = request(viewer_gateway + viewer_path + '/')
             assert page_status == 200 and b'window.__KEEPER_VIEWER_ONLY__ = true' in page and json.dumps(viewer_path).encode() in page
@@ -336,7 +337,7 @@ def main():
             # Docker can reassign ephemeral host ports when restarting containers.
             api = endpoint(names['cpa'], 8080)
             keeper = endpoint(names['keeper'], 8080)
-            eventually(lambda: request(api + '/v1/models', rotated_auth)[0] == 200 and request(keeper + '/healthz')[0] == 200)
+            eventually(lambda: request(api + '/v1/models', rotated_auth)[0] == 200 and request(keeper + '/readyz')[0] == 200)
             assert request(api + '/v1/models', auth)[0] == 401
             private = endpoint(names['cpa'], 8317)
             assert json.loads(request(private + '/v8/management/config/access/api-keys', management_auth)[1]) == [rotated_key]
@@ -359,7 +360,7 @@ def main():
             docker('restart', names['keeper'])
             keeper = endpoint(names['keeper'], 8080)
             viewer_gateway = endpoint(names['keeper'], 8082)
-            eventually(lambda: request(keeper + '/healthz')[0] == 200)
+            eventually(lambda: request(keeper + '/readyz')[0] == 200)
             assert request(viewer_gateway + viewer_path + '/api/v1/read-only/overview', opener=read_only_opener)[0] == 401
             assert request(keeper + '/api/v1/usage/overview?range=30d', opener=opener)[0] == 200
             assert request(viewer_gateway + viewer_path + '/api/v1/auth/read-only-login', headers=alias_headers, body={'password':read_only_password}, opener=read_only_opener)[0] == 401

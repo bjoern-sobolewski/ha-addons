@@ -60,7 +60,7 @@ c.commit()
 
 # Synthetic CPA with privacy, account quota, and credit redemption. Metadata
 # endpoints stay unavailable so the fixture keeps its seeded identities.
-CPA_FIXTURE = r'''
+POLICY_SERVER = r'''
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json, time, uuid
 from urllib.parse import parse_qs, urlsplit
@@ -80,7 +80,9 @@ class Handler(BaseHTTPRequestHandler):
         if route.path == '/v8/management/keeper-email-privacy':
             return self.respond(200, {'version': 1, 'entries': []})
         if route.path == '/v8/management/quota/reset-options':
-            auth_index = parse_qs(route.query)['auth_index'][0]
+            auth_index = parse_qs(route.query).get('auth_index', [''])[0]
+            if auth_index not in credits:
+                return self.respond(404, {})
             return self.respond(200, {'provider': 'codex', 'credits': {'available_count': credits[auth_index]}})
         if route.path == '/test-redemptions':
             return self.respond(200, redemptions)
@@ -90,6 +92,8 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if self.path == '/v8/management/requests/api-call':
             auth_index = payload['authIndex']
+            if auth_index not in credits:
+                return self.respond(404, {})
             used_percent = 0 if auth_index in redemptions else 100
             body = {'rate_limit': {'secondary_window': {'used_percent': used_percent,
                     'limit_window_seconds': 604800, 'reset_at': int(time.time()) + 3600}},
@@ -134,7 +138,7 @@ def main():
             lan = 'http://' + docker('port', name, '8080/tcp').splitlines()[0]
             gateway = 'http://' + docker('port', name, '8082/tcp').splitlines()[0]
             eventually(lambda: request(lan + '/healthz')[0] == 200)
-            docker('exec', '-d', name, 'python3', '-c', CPA_FIXTURE)
+            docker('exec', '-d', name, 'python3', '-c', POLICY_SERVER)
             eventually(lambda: 'version' in docker('exec', name, 'python3', '-c', 'import urllib.request;print(urllib.request.urlopen("http://127.0.0.1:9001/v8/management/keeper-email-privacy").read().decode())'))
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
             prefix = gateway + '/weekly-test/api/v1'

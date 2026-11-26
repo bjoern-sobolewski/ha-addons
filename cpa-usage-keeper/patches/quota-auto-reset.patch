@@ -143,10 +143,10 @@ index 6ecc754e..4c9f0c20 100644
  		&QuotaPercentSegment{},
 diff --git a/internal/quota/auto_reset.go b/internal/quota/auto_reset.go
 new file mode 100644
-index 00000000..1c47fab2
+index 00000000..c014d025
 --- /dev/null
 +++ b/internal/quota/auto_reset.go
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,344 @@
 +package quota
 +
 +import (
@@ -199,9 +199,7 @@ index 00000000..1c47fab2
 +		return state, ErrValidation
 +	}
 +
-+	db := s.autoResetDB(ctx)
-+	err := db.Where("auth_index = ?", authIndex).Take(&state).Error
-+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
++	if err := s.autoResetDB(ctx).Where("auth_index = ?", authIndex).Limit(1).Find(&state).Error; err != nil {
 +		return state, err
 +	}
 +	if state.Revision != revision || state.Status == autoResetRunning {
@@ -222,6 +220,7 @@ index 00000000..1c47fab2
 +		AuthIndex: authIndex, IdentityID: identity.ID, AccountID: optionalAccountID(identity.AccountID),
 +		RequestID: newAutoResetRequestID(), Revision: revision + 1, Status: autoResetArmed,
 +	}
++	db := s.autoResetDB(ctx)
 +	var write *gorm.DB
 +	if revision == 0 {
 +		write = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&next)

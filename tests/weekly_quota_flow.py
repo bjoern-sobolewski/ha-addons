@@ -88,7 +88,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        if self.path in ('/v0/management/api-call', '/v8/management/api-call'):
+        if self.path == '/v8/management/requests/api-call':
             auth_index = payload['authIndex']
             used_percent = 0 if auth_index in redemptions else 100
             body = {'rate_limit': {'secondary_window': {'used_percent': used_percent,

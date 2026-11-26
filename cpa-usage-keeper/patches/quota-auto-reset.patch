@@ -99,6 +99,52 @@ index 77ff24c6..051da11a 100644
  	if a.QuotaAutoRefresh != nil {
  		a.startBackgroundTask(func() {
  			// quota 自动刷新和手动刷新共用队列，但作为独立后台任务跟随 App 生命周期启动和停止。
+diff --git a/internal/app/maintained_lifecycle_test.go b/internal/app/maintained_lifecycle_test.go
+index 3c259fa0..518c36eb 100644
+--- a/internal/app/maintained_lifecycle_test.go
++++ b/internal/app/maintained_lifecycle_test.go
+@@ -26,14 +26,17 @@ func (q *maintainedQuotaContext) WaitRefreshTasks()                      {}
+ func (q *maintainedQuotaContext) StartAutoRefresh(context.Context) error { return nil }
+ func TestMaintainedReadyRunnersFollowLifecycle(t *testing.T) {
+ 	makeRunner := func() *maintainedRunner { return &maintainedRunner{make(chan context.Context, 1), make(chan struct{})} }
+-	rank, local, traffic := makeRunner(), makeRunner(), makeRunner()
++	rank, local, traffic, autoReset := makeRunner(), makeRunner(), makeRunner(), makeRunner()
+ 	quota := &maintainedQuotaContext{}
+ 	a := &App{QuotaService: quota}
+-	a.installReadyApp(&App{Ranking: rank, LocalRanking: local, QuotaTrafficSync: traffic, QuotaService: quota})
++	a.installReadyApp(&App{
++		Ranking: rank, LocalRanking: local, QuotaTrafficSync: traffic, QuotaService: quota,
++		QuotaAutoReset: func(ctx context.Context) { _ = autoReset.Run(ctx) },
++	})
+ 	ctx := a.startBackgroundContext(context.Background())
+ 	a.startRankingBackgroundTasks(ctx)
+ 	a.startQuotaBackgroundTasks(ctx)
+-	for _, r := range []*maintainedRunner{rank, local, traffic} {
++	for _, r := range []*maintainedRunner{rank, local, traffic, autoReset} {
+ 		select {
+ 		case got := <-r.started:
+ 			if got != ctx {
+@@ -47,7 +50,7 @@ func TestMaintainedReadyRunnersFollowLifecycle(t *testing.T) {
+ 		t.Fatal("traffic started without quota runtime context")
+ 	}
+ 	a.stopBackgroundTasks()
+-	for _, r := range []*maintainedRunner{rank, local, traffic} {
++	for _, r := range []*maintainedRunner{rank, local, traffic, autoReset} {
+ 		select {
+ 		case <-r.done:
+ 		default:
+diff --git a/internal/app/startup_pipeline.go b/internal/app/startup_pipeline.go
+index bcf32783..ff7c8a3d 100644
+--- a/internal/app/startup_pipeline.go
++++ b/internal/app/startup_pipeline.go
+@@ -103,6 +103,7 @@ func (a *App) installReadyApp(ready *App) {
+ 	a.PluginAPIKeys = ready.PluginAPIKeys
+ 	a.Ranking, a.LocalRanking = ready.Ranking, ready.LocalRanking
+ 	a.QuotaTrafficSync = ready.QuotaTrafficSync
++	a.QuotaAutoReset = ready.QuotaAutoReset
+ 	a.Maintenance = ready.Maintenance
+ 	a.MetadataSync, a.QuotaService, a.QuotaAutoRefresh = ready.MetadataSync, ready.QuotaService, ready.QuotaAutoRefresh
+ 	a.BackupMaintenance, a.RecentUsageCache = ready.BackupMaintenance, ready.RecentUsageCache
 diff --git a/internal/entities/all.go b/internal/entities/all.go
 index fd3d24a1..b198ee20 100644
 --- a/internal/entities/all.go

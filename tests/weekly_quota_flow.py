@@ -246,7 +246,10 @@ def verify_auto_reset(lan, viewer_prefix, container, password, readonly):
         return {item['auth_index']: item['status'] for item in items}
 
     expected = {'synthetic-weekly-auth': 'reset', 'synthetic-performance-auth': 'no_credit'}
-    eventually(lambda: outcomes() == expected)
+    try:
+        eventually(lambda: outcomes() == expected)
+    except AssertionError as error:
+        raise AssertionError(f'Expected auto-reset outcomes {expected}, got {outcomes()}') from error
     assert request(url + '/synthetic-weekly-auth', headers, activation, admin, method='PUT')[0] == 409
     redemptions = json.loads(docker('exec', container, 'python3', '-c',
                                     'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:9001/test-redemptions").read().decode())'))

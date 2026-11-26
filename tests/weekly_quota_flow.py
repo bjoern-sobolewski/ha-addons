@@ -58,19 +58,54 @@ for table in ('usage_events', 'usage_events_archive'):
 c.commit()
 '''
 
-# Local-only CPA privacy feed: metadata endpoints remain unavailable so this
-# offline-history fixture keeps its seeded identities. Data APIs still require
-# an authoritative visibility decision; a CPA outage is covered by email_privacy.
-POLICY_SERVER = r'''
+# Synthetic CPA with privacy, account quota, and credit redemption. Metadata
+# endpoints stay unavailable so the fixture keeps its seeded identities.
+CPA_FIXTURE = r'''
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import json, time, uuid
+from urllib.parse import parse_qs, urlsplit
+
+credits = {'synthetic-weekly-auth': 1, 'synthetic-performance-auth': 0}
+redemptions = {}
+
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        policy = self.path == '/v8/management/keeper-email-privacy'
-        self.send_response(200 if policy else 404)
+    def respond(self, status, payload):
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
-        self.wfile.write(b'{"version":1,"entries":[]}' if policy else b'{}')
+        self.wfile.write(json.dumps(payload).encode())
+
+    def do_GET(self):
+        route = urlsplit(self.path)
+        if route.path == '/v8/management/keeper-email-privacy':
+            return self.respond(200, {'version': 1, 'entries': []})
+        if route.path == '/v8/management/quota/reset-options':
+            auth_index = parse_qs(route.query)['auth_index'][0]
+            return self.respond(200, {'provider': 'codex', 'credits': {'available_count': credits[auth_index]}})
+        if route.path == '/test-redemptions':
+            return self.respond(200, redemptions)
+        self.respond(404, {})
+
+    def do_POST(self):
+        payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if self.path in ('/v0/management/api-call', '/v8/management/api-call'):
+            auth_index = payload['authIndex']
+            used_percent = 0 if auth_index in redemptions else 100
+            body = {'rate_limit': {'secondary_window': {'used_percent': used_percent,
+                    'limit_window_seconds': 604800, 'reset_at': int(time.time()) + 3600}},
+                    'rate_limit_reset_credits': {'available_count': credits[auth_index]}}
+            return self.respond(200, {'status_code': 200, 'body': json.dumps(body)})
+        if self.path == '/v8/management/quota/reset':
+            auth_index = payload['auth_index']
+            assert payload['provider'] == 'codex' and uuid.UUID(payload['request_id']).version == 4
+            assert credits[auth_index] == 1 and auth_index not in redemptions
+            redemptions[auth_index] = payload['request_id']
+            credits[auth_index] -= 1
+            return self.respond(200, {'code': 'reset', 'windowsReset': 1})
+        self.respond(404, {})
+
     def log_message(self, *args): pass
+
 HTTPServer(('127.0.0.1', 9001), Handler).serve_forever()
 '''
 
@@ -99,7 +134,7 @@ def main():
             lan = 'http://' + docker('port', name, '8080/tcp').splitlines()[0]
             gateway = 'http://' + docker('port', name, '8082/tcp').splitlines()[0]
             eventually(lambda: request(lan + '/healthz')[0] == 200)
-            docker('exec', '-d', name, 'python3', '-c', POLICY_SERVER)
+            docker('exec', '-d', name, 'python3', '-c', CPA_FIXTURE)
             eventually(lambda: 'version' in docker('exec', name, 'python3', '-c', 'import urllib.request;print(urllib.request.urlopen("http://127.0.0.1:9001/v8/management/keeper-email-privacy").read().decode())'))
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
             prefix = gateway + '/weekly-test/api/v1'
@@ -176,9 +211,48 @@ def main():
             assert request(prefix + '/quota/performance/synthetic-performance-auth', opener=opener)[0] == 404
             assert request(performance_url, opener=opener, method='DELETE')[0] in (403, 404, 405)
             print('PASS: packaged weekly value and raw/matched performance, archived timings, metric filters, gateway and read-only isolation')
+            verify_auto_reset(lan, prefix, name, password, readonly)
         finally:
             docker('rm', '-f', name, check=False)
             docker('volume', 'rm', volume, check=False)
+
+
+def verify_auto_reset(lan, viewer_prefix, container, password, readonly):
+    headers = {'X-CPA-Usage-Keeper-Request': 'fetch'}
+    admin = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    viewer = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    url = lan + '/api/v1/quota/auto-resets'
+    assert request(lan + '/api/v1/auth/login', headers, {'password': password}, admin)[0] == 204
+    assert request(lan + '/api/v1/auth/read-only-login', headers, {'password': readonly}, viewer)[0] == 204
+    assert request(url)[0] == 401
+    assert request(url, opener=viewer)[0] == 403
+    assert request(viewer_prefix + '/quota/auto-resets', headers, opener=admin)[0] == 404
+    assert request(url, opener=admin) == (200, b'{"items":[]}')
+
+    activation = {'armed': True, 'revision': 0}
+    for auth_index in ('synthetic-weekly-auth', 'synthetic-performance-auth'):
+        endpoint = url + '/' + auth_index
+        assert request(endpoint, headers, activation, viewer, method='PUT')[0] == 403
+        assert request(viewer_prefix + '/quota/auto-resets/' + auth_index, headers, activation, admin, method='PUT')[0] == 404
+        status, payload = request(endpoint, headers, activation, admin, method='PUT')
+        assert status == 200, (status, payload)
+        assert json.loads(payload) == {'auth_index': auth_index, 'revision': 1, 'status': 'armed'}
+
+    def outcomes():
+        status, body = request(url, opener=admin)
+        assert status == 200, status
+        items = json.loads(body)['items']
+        assert all(set(item) == {'auth_index', 'revision', 'status'} for item in items)
+        return {item['auth_index']: item['status'] for item in items}
+
+    expected = {'synthetic-weekly-auth': 'reset', 'synthetic-performance-auth': 'no_credit'}
+    eventually(lambda: outcomes() == expected)
+    assert request(url + '/synthetic-weekly-auth', headers, activation, admin, method='PUT')[0] == 409
+    redemptions = json.loads(docker('exec', container, 'python3', '-c',
+                                    'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:9001/test-redemptions").read().decode())'))
+    assert set(redemptions) == {'synthetic-weekly-auth'}
+    print('PASS: packaged Keeper auto-reset redeemed one synthetic credit, disarmed without a credit, and enforced admin and gateway boundaries')
+
 
 
 if __name__ == '__main__':

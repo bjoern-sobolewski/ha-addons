@@ -1,0 +1,1062 @@
+diff --git a/internal/api/quota.go b/internal/api/quota.go
+index 35e0e2a0..e6658b29 100644
+--- a/internal/api/quota.go
++++ b/internal/api/quota.go
+@@ -22,6 +22,9 @@ const quotaResetCreditsErrorFailed = "quota_reset_credits_failed"
+ 
+ func registerQuotaRoutes(router gin.IRoutes, provider QuotaProvider) {
+ 	registerAccountPerformanceRoutes(router, provider)
++	if autoReset, ok := provider.(quotaAutoResetProvider); ok {
++		registerQuotaAutoResetRoutes(router, autoReset)
++	}
+ 	router.DELETE("/quota/history/:auth_index/cycles/:cycle_id", func(c *gin.Context) {
+ 		if provider == nil {
+ 			writeInternalError(c, "quota provider is not configured", nil)
+diff --git a/internal/api/quota_auto_reset.go b/internal/api/quota_auto_reset.go
+new file mode 100644
+index 00000000..1ca55b14
+--- /dev/null
++++ b/internal/api/quota_auto_reset.go
+@@ -0,0 +1,51 @@
++package api
++
++import (
++	"context"
++	"errors"
++	"net/http"
++
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/quota"
++	"github.com/gin-gonic/gin"
++)
++
++type quotaAutoResetProvider interface {
++	ListAutoResets(context.Context) ([]entities.QuotaAutoReset, error)
++	SetAutoReset(context.Context, string, int64, bool) (entities.QuotaAutoReset, error)
++}
++
++func registerQuotaAutoResetRoutes(router gin.IRoutes, provider quotaAutoResetProvider) {
++	router.GET("/quota/auto-resets", func(c *gin.Context) {
++		states, err := provider.ListAutoResets(c.Request.Context())
++		if err != nil {
++			writeInternalError(c, "quota auto-reset status unavailable", err)
++			return
++		}
++		c.JSON(http.StatusOK, gin.H{"items": states})
++	})
++	router.PUT("/quota/auto-resets/:auth_index", func(c *gin.Context) {
++		var request struct {
++			Armed    *bool  `json:"armed" binding:"required"`
++			Revision *int64 `json:"revision" binding:"required"`
++		}
++		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1024)
++		if err := c.ShouldBindJSON(&request); err != nil {
++			c.JSON(http.StatusBadRequest, gin.H{"error": "armed and revision are required"})
++			return
++		}
++		state, err := provider.SetAutoReset(c.Request.Context(), c.Param("auth_index"), *request.Revision, *request.Armed)
++		switch {
++		case errors.Is(err, quota.ErrValidation), errors.Is(err, quota.ErrUnsupportedType):
++			c.JSON(http.StatusBadRequest, gin.H{"error": "auto-reset requires an enabled Codex credential"})
++		case errors.Is(err, quota.ErrNotFound):
++			c.JSON(http.StatusNotFound, gin.H{"error": "credential not found"})
++		case errors.Is(err, quota.ErrAutoResetConflict):
++			c.JSON(http.StatusConflict, gin.H{"error": "auto-reset state changed"})
++		case err != nil:
++			writeInternalError(c, "quota auto-reset could not be saved", err)
++		default:
++			c.JSON(http.StatusOK, state)
++		}
++	})
++}
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 77ff24c6..051da11a 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -83,6 +83,7 @@ type App struct {
+ 	QuotaService      QuotaRunner
+ 	QuotaAutoRefresh  QuotaRunner
+ 	QuotaTrafficSync  Runner
++	QuotaAutoReset    func(context.Context)
+ 	BackupMaintenance *DatabaseBackupRunner
+ 	RecentUsageCache  *repository.UsageRecentEventCache
+ 	CostReadGate      *service.CostReadGate
+@@ -295,6 +296,7 @@ func buildReadyApp(cfg config.Config, db, readDB *gorm.DB, logCloser io.Closer,
+ 		QuotaService:      quotaService,
+ 		QuotaAutoRefresh:  quotaService,
+ 		QuotaTrafficSync:  quota.NewTrafficQuotaSyncRunner(quotaService, cpaClient),
++		QuotaAutoReset:    quotaService.RunAutoReset,
+ 		BackupMaintenance: backupMaintenance,
+ 		RecentUsageCache:  recentUsageCache,
+ 		CostReadGate:      costReadGate,
+@@ -559,6 +561,9 @@ func (a *App) startQuotaBackgroundTasks(ctx context.Context) {
+ 			}
+ 		})
+ 	}
++	if a.QuotaAutoReset != nil {
++		a.startBackgroundTask(func() { a.QuotaAutoReset(ctx) })
++	}
+ 	if a.QuotaAutoRefresh != nil {
+ 		a.startBackgroundTask(func() {
+ 			// quota 自动刷新和手动刷新共用队列，但作为独立后台任务跟随 App 生命周期启动和停止。
+diff --git a/internal/entities/all.go b/internal/entities/all.go
+index fd3d24a1..b198ee20 100644
+--- a/internal/entities/all.go
++++ b/internal/entities/all.go
+@@ -24,6 +24,7 @@ func All() []any {
+ 		&UsageLatencyStat{},
+ 		&AuthSession{},
+ 		&AppSetting{},
++		&QuotaAutoReset{},
+ 		// 通用额度周期必须先于百分比子表注册，确保全新数据库创建真实外键。
+ 		&QuotaCycle{},
+ 		&QuotaPercentSegment{},
+diff --git a/internal/entities/quota_auto_reset.go b/internal/entities/quota_auto_reset.go
+new file mode 100644
+index 00000000..240ad763
+--- /dev/null
++++ b/internal/entities/quota_auto_reset.go
+@@ -0,0 +1,12 @@
++package entities
++
++// QuotaAutoReset stores one activation and its latest outcome per CPA credential.
++type QuotaAutoReset struct {
++	AuthIndex             string `gorm:"primaryKey;size:191" json:"auth_index"`
++	IdentityID            int64  `json:"-"`
++	AccountID             string `gorm:"size:191" json:"-"`
++	RequestID             string `gorm:"size:36" json:"-"`
++	Revision              int64  `gorm:"not null" json:"revision"`
++	Status                string `gorm:"not null;size:32;index" json:"status"`
++	LastCheckedAtUnixNano int64  `json:"-"`
++}
+diff --git a/internal/entities/test/entities_test.go b/internal/entities/test/entities_test.go
+index 6ecc754e..4c9f0c20 100644
+--- a/internal/entities/test/entities_test.go
++++ b/internal/entities/test/entities_test.go
+@@ -36,6 +36,7 @@ func TestAllIncludesCoreModels(t *testing.T) {
+ 		&UsageLatencyStat{},
+ 		&AuthSession{},
+ 		&AppSetting{},
++		&QuotaAutoReset{},
+ 		// 通用额度历史按父周期、子百分比状态段顺序注册，确保全新数据库创建真实外键。
+ 		&QuotaCycle{},
+ 		&QuotaPercentSegment{},
+diff --git a/internal/quota/auto_reset.go b/internal/quota/auto_reset.go
+new file mode 100644
+index 00000000..1c47fab2
+--- /dev/null
++++ b/internal/quota/auto_reset.go
+@@ -0,0 +1,345 @@
++package quota
++
++import (
++	"context"
++	"crypto/rand"
++	"errors"
++	"fmt"
++	"math"
++	"strings"
++	"time"
++
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/repository"
++	"cpa-usage-keeper/internal/timeutil"
++
++	"github.com/sirupsen/logrus"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++	"gorm.io/plugin/dbresolver"
++)
++
++const (
++	autoResetArmed          = "armed"
++	autoResetRunning        = "running"
++	autoResetCancelled      = "cancelled"
++	autoResetNoCredit       = "no_credit"
++	autoResetSucceeded      = "reset"
++	autoResetRecoveryFailed = "recovery_failed"
++	autoResetUnconfirmed    = "unconfirmed"
++	autoResetFailed         = "failed"
++	autoResetAccountChanged = "account_changed"
++
++	autoResetCheckInterval = 3 * time.Second
++	autoResetMaxQuotaAge   = 15 * time.Minute
++	autoResetTimeout       = 45 * time.Second
++)
++
++var ErrAutoResetConflict = errors.New("auto-reset state changed")
++
++func (s *Service) ListAutoResets(ctx context.Context) ([]entities.QuotaAutoReset, error) {
++	states := make([]entities.QuotaAutoReset, 0)
++	err := s.autoResetDB(ctx).Find(&states).Error
++	return states, err
++}
++
++func (s *Service) SetAutoReset(ctx context.Context, authIndex string, revision int64, armed bool) (entities.QuotaAutoReset, error) {
++	var state entities.QuotaAutoReset
++	authIndex = strings.TrimSpace(authIndex)
++	if authIndex == "" || len(authIndex) > 191 || revision < 0 {
++		return state, ErrValidation
++	}
++
++	db := s.autoResetDB(ctx)
++	err := db.Where("auth_index = ?", authIndex).Take(&state).Error
++	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
++		return state, err
++	}
++	if state.Revision != revision || state.Status == autoResetRunning {
++		return state, ErrAutoResetConflict
++	}
++	if armed == (state.Status == autoResetArmed) {
++		return state, ErrAutoResetConflict
++	}
++	if !armed {
++		return s.changeAutoResetStatus(ctx, state, autoResetCancelled)
++	}
++
++	identity, _, err := s.autoResetCredential(ctx, authIndex)
++	if err != nil {
++		return state, err
++	}
++	next := entities.QuotaAutoReset{
++		AuthIndex: authIndex, IdentityID: identity.ID, AccountID: optionalAccountID(identity.AccountID),
++		RequestID: newAutoResetRequestID(), Revision: revision + 1, Status: autoResetArmed,
++	}
++	var write *gorm.DB
++	if revision == 0 {
++		write = db.Clauses(clause.OnConflict{DoNothing: true}).Create(&next)
++	} else {
++		write = autoResetVersion(db, state).Select("identity_id", "account_id", "request_id", "revision", "status", "last_checked_at_unix_nano").Updates(&next)
++	}
++	if write.Error != nil {
++		return state, write.Error
++	}
++	if write.RowsAffected != 1 {
++		return state, ErrAutoResetConflict
++	}
++	s.Live.Publish("auto_reset")
++	return next, nil
++}
++
++func (s *Service) autoResetDB(ctx context.Context) *gorm.DB {
++	return s.db.WithContext(ctx).Clauses(dbresolver.Write).Model(&entities.QuotaAutoReset{})
++}
++
++func autoResetVersion(db *gorm.DB, state entities.QuotaAutoReset) *gorm.DB {
++	return db.Where("auth_index = ? AND revision = ?", state.AuthIndex, state.Revision)
++}
++
++func (s *Service) changeAutoResetStatus(ctx context.Context, state entities.QuotaAutoReset, status string) (entities.QuotaAutoReset, error) {
++	write := autoResetVersion(s.autoResetDB(ctx), state).Updates(map[string]any{
++		"status": status, "revision": state.Revision + 1,
++	})
++	if write.Error != nil {
++		return state, write.Error
++	}
++	if write.RowsAffected != 1 {
++		return state, ErrAutoResetConflict
++	}
++	state.Status = status
++	state.Revision++
++	s.Live.Publish("auto_reset")
++	return state, nil
++}
++
++func (s *Service) autoResetCredential(ctx context.Context, authIndex string) (entities.UsageIdentity, ProviderHandler, error) {
++	identity, err := repository.GetActiveCredentialUsageIdentityByAuthIndex(ctx, s.db.Clauses(dbresolver.Write), authIndex)
++	if errors.Is(err, gorm.ErrRecordNotFound) {
++		return identity, nil, ErrNotFound
++	}
++	if err != nil {
++		return identity, nil, err
++	}
++	provider, handler, ok := s.resolveQuotaHandlerForIdentity(identity)
++	if !ok || provider != "codex" || (identity.Disabled != nil && *identity.Disabled) {
++		return identity, nil, ErrUnsupportedType
++	}
++	return identity, handler, nil
++}
++
++func newAutoResetRequestID() string {
++	var bytes [16]byte
++	rand.Read(bytes[:])
++	bytes[6] = bytes[6]&0x0f | 0x40
++	bytes[8] = bytes[8]&0x3f | 0x80
++	return fmt.Sprintf("%x-%x-%x-%x-%x", bytes[:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:])
++}
++
++func (s *Service) RunAutoReset(ctx context.Context) {
++	ticker := time.NewTicker(autoResetCheckInterval)
++	defer ticker.Stop()
++	for ctx.Err() == nil {
++		s.checkActiveAutoResets(ctx)
++		select {
++		case <-ctx.Done():
++			return
++		case <-ticker.C:
++		}
++	}
++}
++
++func (s *Service) checkActiveAutoResets(ctx context.Context) {
++	var states []entities.QuotaAutoReset
++	if err := s.autoResetDB(ctx).Where("status IN ?", []string{autoResetArmed, autoResetRunning}).Find(&states).Error; err != nil {
++		if ctx.Err() == nil {
++			logrus.WithError(err).Warn("could not read active quota auto-resets")
++		}
++		return
++	}
++	for _, state := range states {
++		if ctx.Err() != nil {
++			return
++		}
++		err := s.processAutoReset(ctx, state)
++		if err != nil && !errors.Is(err, ErrAutoResetConflict) && ctx.Err() == nil {
++			logrus.WithError(err).Warn("could not process a quota auto-reset")
++		}
++	}
++}
++
++func (s *Service) processAutoReset(ctx context.Context, state entities.QuotaAutoReset) error {
++	if state.Status == autoResetRunning {
++		// The worker handles one attempt at a time. A running row here was interrupted,
++		// and CPA may already have accepted its saved request ID.
++		_, err := s.changeAutoResetStatus(ctx, state, autoResetUnconfirmed)
++		return err
++	}
++	attemptCtx, cancel := context.WithTimeout(ctx, autoResetTimeout)
++	defer cancel()
++	return s.checkAutoReset(attemptCtx, state, time.Now())
++}
++
++func (s *Service) hasFreshExhaustedWeeklyQuota(state entities.QuotaAutoReset, now time.Time) bool {
++	s.refreshMu.Lock()
++	defer s.refreshMu.Unlock()
++	task := s.refreshTasks[state.AuthIndex]
++	if task == nil || task.Status != RefreshTaskStatusCompleted || task.Type != "codex" || task.Quota == nil {
++		return false
++	}
++
++	for _, row := range task.Quota.Quota {
++		if row.Scope != "window" || row.Window == nil || row.Window.Seconds == nil || *row.Window.Seconds != quotaWindowSevenDaySeconds ||
++			row.UsedPercent == nil || *row.UsedPercent < 100 || math.IsNaN(*row.UsedPercent) || math.IsInf(*row.UsedPercent, 0) ||
++			row.CapturedAt.IsZero() || row.CapturedAt.UnixNano() <= state.LastCheckedAtUnixNano || row.CapturedAt.After(now) || now.Sub(row.CapturedAt) > autoResetMaxQuotaAge {
++			continue
++		}
++		resetAt, err := timeutil.ParseStorageTime(row.ResetAt)
++		if row.ResetAt == "" && row.ResetAfterSeconds != nil && *row.ResetAfterSeconds > 0 && *row.ResetAfterSeconds <= quotaWindowSevenDaySeconds {
++			resetAt, err = row.CapturedAt.Add(time.Duration(*row.ResetAfterSeconds)*time.Second), nil
++		}
++		if err == nil && resetAt.After(now) {
++			return true
++		}
++	}
++	return false
++}
++
++func (s *Service) checkAutoReset(ctx context.Context, state entities.QuotaAutoReset, now time.Time) error {
++	identity, handler, err := s.autoResetCredential(ctx, state.AuthIndex)
++	if err != nil || !matchesAutoResetCredential(state, identity) {
++		return s.handleAutoResetCredentialChange(ctx, state, err)
++	}
++	if state.LastCheckedAtUnixNano != 0 && !s.hasFreshExhaustedWeeklyQuota(state, now) {
++		return nil
++	}
++	// Check and redeem under the same account lock used by Keeper's manual action.
++	if !s.beginReset(state.AuthIndex) {
++		return nil
++	}
++	defer s.finishReset(state.AuthIndex)
++
++	write := autoResetVersion(s.autoResetDB(ctx), state).Update("last_checked_at_unix_nano", now.UnixNano())
++	if write.Error != nil {
++		return write.Error
++	}
++	if write.RowsAffected != 1 {
++		return ErrAutoResetConflict
++	}
++
++	input := ProviderInput{Identity: identity, ResetRequestID: state.RequestID}
++	output, err := handler.Check(ctx, input)
++	if err != nil {
++		return nil
++	}
++	resetAt := exhaustedCodexWeeklyResetAt(state.AuthIndex, output, time.Now())
++	if resetAt.IsZero() {
++		return nil
++	}
++
++	lister, canList := handler.(ProviderResetCreditLister)
++	resetter, canReset := handler.(ProviderResetter)
++	if !canList || !canReset {
++		_, err = s.changeAutoResetStatus(ctx, state, autoResetFailed)
++		return err
++	}
++	credits, err := lister.ListResetCredits(ctx, input)
++	if err != nil {
++		_, err = s.changeAutoResetStatus(ctx, state, autoResetFailed)
++		return err
++	}
++	if !availableAutoResetCredit(credits, time.Now()) {
++		_, err = s.changeAutoResetStatus(ctx, state, autoResetNoCredit)
++		return err
++	}
++	current, _, err := s.autoResetCredential(ctx, state.AuthIndex)
++	if err != nil || !matchesAutoResetCredential(state, current) {
++		return s.handleAutoResetCredentialChange(ctx, state, err)
++	}
++	if !resetAt.After(time.Now()) {
++		return nil
++	}
++	input.Identity = current
++	// Settings can be cancelled during the checks. A compare-and-set claims the
++	// original activation before the only call that can spend a credit.
++	running, err := s.changeAutoResetStatus(ctx, state, autoResetRunning)
++	if err != nil {
++		return err
++	}
++	result, resetErr := resetter.Reset(ctx, input)
++	status := autoResetOutcome(result, resetErr)
++	// A deadline while calling CPA must still produce a durable terminal outcome.
++	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
++	defer cancel()
++	if _, err := s.changeAutoResetStatus(saveCtx, running, status); err != nil {
++		return err
++	}
++	if status == autoResetSucceeded || status == autoResetRecoveryFailed {
++		_, err = s.Refresh(ctx, RefreshRequest{AuthIndexes: []string{state.AuthIndex}, Source: RefreshSourceManual})
++	}
++	return err
++}
++
++func matchesAutoResetCredential(state entities.QuotaAutoReset, identity entities.UsageIdentity) bool {
++	return identity.ID == state.IdentityID && optionalAccountID(identity.AccountID) == state.AccountID
++}
++
++func (s *Service) handleAutoResetCredentialChange(ctx context.Context, state entities.QuotaAutoReset, lookupErr error) error {
++	if lookupErr != nil && !errors.Is(lookupErr, ErrNotFound) && !errors.Is(lookupErr, ErrUnsupportedType) {
++		return lookupErr
++	}
++	_, err := s.changeAutoResetStatus(ctx, state, autoResetAccountChanged)
++	return err
++}
++
++func exhaustedCodexWeeklyResetAt(authIndex string, output ProviderOutput, now time.Time) time.Time {
++	usage := codexUsagePayloadFromProviderOutput(output)
++	if usage == nil || usage.RateLimit == nil {
++		return time.Time{}
++	}
++	windows := []struct {
++		role   string
++		window *CodexUsageWindow
++	}{
++		{"primary", usage.RateLimit.PrimaryWindow},
++		{"secondary", usage.RateLimit.SecondaryWindow},
++	}
++	for _, candidate := range windows {
++		observation, valid := buildCodexMainQuotaObservation(authIndex, candidate.role, candidate.window, now)
++		// Use the raw value. History and the dashboard can round near-zero quotas.
++		if valid && observation.WindowSeconds == quotaWindowSevenDaySeconds && candidate.window.UsedPercent >= 100 && observation.ResetAt.After(now) {
++			return observation.ResetAt
++		}
++	}
++	return time.Time{}
++}
++
++func availableAutoResetCredit(options ProviderResetCreditsOutput, now time.Time) bool {
++	if options.AvailableCount != nil {
++		return *options.AvailableCount > 0
++	}
++	for _, credit := range options.Credits {
++		expiry, err := time.Parse(time.RFC3339Nano, credit.ExpiresAt)
++		if err == nil && expiry.After(now) {
++			return true
++		}
++	}
++	return false
++}
++
++func autoResetOutcome(result ProviderResetOutput, err error) string {
++	if err != nil {
++		return autoResetUnconfirmed
++	}
++	switch result.Code {
++	case "reset", "already_redeemed", "already_used":
++		if result.RecoveryFailed {
++			return autoResetRecoveryFailed
++		}
++		return autoResetSucceeded
++	case "unknown", "":
++		return autoResetUnconfirmed
++	default:
++		return autoResetFailed
++	}
++}
+diff --git a/internal/quota/auto_reset_test.go b/internal/quota/auto_reset_test.go
+new file mode 100644
+index 00000000..ea1f6b2d
+--- /dev/null
++++ b/internal/quota/auto_reset_test.go
+@@ -0,0 +1,198 @@
++package quota
++
++import (
++	"context"
++	"errors"
++	"slices"
++	"testing"
++	"time"
++
++	"cpa-usage-keeper/internal/entities"
++	"cpa-usage-keeper/internal/timeutil"
++	"gorm.io/gorm"
++)
++
++type autoResetProviderFixture struct {
++	used               float64
++	creditCount        int
++	resetIDs           []string
++	outcome            string
++	duringCreditLookup func()
++}
++
++func (f *autoResetProviderFixture) Check(context.Context, ProviderInput) (ProviderOutput, error) {
++	weekly := &CodexUsageWindow{
++		UsedPercent: f.used, HasUsedPercent: true,
++		LimitWindowSeconds: quotaWindowSevenDaySeconds, HasLimitWindowSeconds: true,
++		ResetAt: time.Now().Add(time.Hour).Unix(), HasResetAt: true,
++	}
++	return ProviderOutput{Provider: "codex", Result: CodexResult{
++		Usage: &CodexUsagePayload{RateLimit: &CodexRateLimitInfo{SecondaryWindow: weekly}},
++	}}, nil
++}
++
++func (f *autoResetProviderFixture) ListResetCredits(context.Context, ProviderInput) (ProviderResetCreditsOutput, error) {
++	if f.duringCreditLookup != nil {
++		f.duringCreditLookup()
++	}
++	return ProviderResetCreditsOutput{AvailableCount: &f.creditCount}, nil
++}
++
++func (f *autoResetProviderFixture) Reset(_ context.Context, input ProviderInput) (ProviderResetOutput, error) {
++	f.resetIDs = append(f.resetIDs, input.ResetRequestID)
++	return ProviderResetOutput{Code: f.outcome}, nil
++}
++
++func autoResetFixture(t *testing.T, provider *autoResetProviderFixture) (*Service, *gorm.DB, string) {
++	t.Helper()
++	service, db, _ := apiQuotaTestService(t)
++	service.registry = NewProviderRegistry(map[string]ProviderHandler{"codex": provider})
++	identity := entities.UsageIdentity{AuthType: entities.UsageIdentityAuthTypeCredential, Identity: "codex-fixture", Type: "codex", Provider: "codex"}
++	if err := db.Create(&identity).Error; err != nil {
++		t.Fatal(err)
++	}
++	return service, db, identity.Identity
++}
++
++func requireAutoResetStatus(t *testing.T, service *Service, status string) entities.QuotaAutoReset {
++	t.Helper()
++	items, err := service.ListAutoResets(context.Background())
++	if err != nil || len(items) != 1 || items[0].Status != status {
++		t.Fatalf("expected one %s activation, got %+v (%v)", status, items, err)
++	}
++	return items[0]
++}
++
++func setAutoResetQuotaCache(service *Service, authIndex string, used float64, captured, reset time.Time, duration int64, scope string) {
++	service.refreshMu.Lock()
++	defer service.refreshMu.Unlock()
++	service.refreshTasks[authIndex] = &RefreshTaskRecord{
++		AuthIndex: authIndex, Type: "codex", Status: RefreshTaskStatusCompleted,
++		Quota: &CheckResponse{Quota: []QuotaRow{{
++			Scope: scope, UsedPercent: &used, Window: &QuotaWindow{Seconds: &duration},
++			CapturedAt: captured, ResetAt: timeutil.FormatStorageTime(reset),
++		}}},
++	}
++}
++
++func TestAutoResetWaitsForWeeklyExhaustionAndRedeemsOnce(t *testing.T) {
++	ctx := context.Background()
++	provider := &autoResetProviderFixture{used: 99.9, creditCount: 2, outcome: "reset"}
++	service, _, authIndex := autoResetFixture(t, provider)
++	armed, err := service.SetAutoReset(ctx, authIndex, 0, true)
++	if err != nil || armed.Status != autoResetArmed || !claudeUUIDPattern.MatchString(armed.RequestID) {
++		t.Fatalf("arming failed: %+v (%v)", armed, err)
++	}
++	service.checkActiveAutoResets(ctx)
++	requireAutoResetStatus(t, service, autoResetArmed)
++	provider.used = 100
++	now := time.Now()
++	for _, fixture := range []struct {
++		scope    string
++		duration int64
++		observed time.Time
++		reset    time.Time
++	}{
++		{"window", quotaWindowFiveHourSeconds, now, now.Add(time.Hour)},
++		{"additional", quotaWindowSevenDaySeconds, now, now.Add(time.Hour)},
++		{"window", quotaWindowSevenDaySeconds, now.Add(-16 * time.Minute), now.Add(time.Hour)},
++		{"window", quotaWindowSevenDaySeconds, now, now.Add(-time.Second)},
++	} {
++		setAutoResetQuotaCache(service, authIndex, 100, fixture.observed, fixture.reset, fixture.duration, fixture.scope)
++		service.checkActiveAutoResets(ctx)
++		requireAutoResetStatus(t, service, autoResetArmed)
++	}
++	setAutoResetQuotaCache(service, authIndex, 100, now, now.Add(time.Hour), quotaWindowSevenDaySeconds, "window")
++	service.checkActiveAutoResets(ctx)
++	requireAutoResetStatus(t, service, autoResetSucceeded)
++	service.checkActiveAutoResets(ctx)
++	if !slices.Equal(provider.resetIDs, []string{armed.RequestID}) {
++		t.Fatalf("expected one redemption with the activation ID, got %v", provider.resetIDs)
++	}
++	if _, err := service.SetAutoReset(ctx, authIndex, 0, true); !errors.Is(err, ErrAutoResetConflict) {
++		t.Fatalf("stale arming request accepted: %v", err)
++	}
++}
++
++func TestAutoResetConsumesActivationWithoutCredit(t *testing.T) {
++	ctx := context.Background()
++	provider := &autoResetProviderFixture{used: 100}
++	service, _, authIndex := autoResetFixture(t, provider)
++	if _, err := service.SetAutoReset(ctx, authIndex, 0, true); err != nil {
++		t.Fatal(err)
++	}
++	service.checkActiveAutoResets(ctx)
++	none := requireAutoResetStatus(t, service, autoResetNoCredit)
++	provider.creditCount = 1
++	service.checkActiveAutoResets(ctx)
++	if len(provider.resetIDs) != 0 {
++		t.Fatalf("a later credit reactivated auto-reset: %v", provider.resetIDs)
++	}
++	armed, err := service.SetAutoReset(ctx, authIndex, none.Revision, true)
++	if err != nil || armed.RequestID == none.RequestID {
++		t.Fatalf("re-arm did not establish a new activation: %+v (%v)", armed, err)
++	}
++}
++
++func TestAutoResetCancelsDuringCheckAndSerializesWithManualReset(t *testing.T) {
++	ctx := context.Background()
++	provider := &autoResetProviderFixture{used: 100, creditCount: 1}
++	service, _, authIndex := autoResetFixture(t, provider)
++	armed, err := service.SetAutoReset(ctx, authIndex, 0, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	provider.duringCreditLookup = func() {
++		_, err := service.Reset(ctx, ResetRequest{AuthIndex: authIndex, RequestID: newAutoResetRequestID()})
++		if !errors.Is(err, ErrResetInProgress) {
++			t.Fatalf("manual reset was not serialized: %v", err)
++		}
++		if _, err := service.SetAutoReset(ctx, authIndex, armed.Revision, false); err != nil {
++			t.Fatalf("could not cancel during eligibility checks: %v", err)
++		}
++	}
++	service.checkActiveAutoResets(ctx)
++	requireAutoResetStatus(t, service, autoResetCancelled)
++	if len(provider.resetIDs) != 0 {
++		t.Fatal("cancelled activation redeemed a credit")
++	}
++}
++
++func TestAutoResetRecoveryDisarmsWithoutRedeeming(t *testing.T) {
++	ctx := context.Background()
++	provider := &autoResetProviderFixture{used: 100, creditCount: 1}
++	service, db, authIndex := autoResetFixture(t, provider)
++	armed, err := service.SetAutoReset(ctx, authIndex, 0, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := service.changeAutoResetStatus(ctx, armed, autoResetRunning); err != nil {
++		t.Fatal(err)
++	}
++	restarted := NewServiceWithRegistry(db, service.registry)
++	t.Cleanup(restarted.StopRefreshTasks)
++	restarted.checkActiveAutoResets(ctx)
++	interrupted := requireAutoResetStatus(t, restarted, autoResetUnconfirmed)
++	if interrupted.RequestID != armed.RequestID || len(provider.resetIDs) != 0 {
++		t.Fatal("recovery did not preserve the attempt without redeeming again")
++	}
++}
++
++func TestAutoResetProtectsReplacedCredentials(t *testing.T) {
++	ctx := context.Background()
++	provider := &autoResetProviderFixture{used: 100, creditCount: 1}
++	service, db, authIndex := autoResetFixture(t, provider)
++	if _, err := service.SetAutoReset(ctx, authIndex, 0, true); err != nil {
++		t.Fatal(err)
++	}
++	provider.duringCreditLookup = func() {
++		if err := db.Model(&entities.UsageIdentity{}).Where("identity = ?", authIndex).Update("account_id", "replaced").Error; err != nil {
++			t.Fatal(err)
++		}
++	}
++	service.checkActiveAutoResets(ctx)
++	requireAutoResetStatus(t, service, autoResetAccountChanged)
++	if len(provider.resetIDs) != 0 {
++		t.Fatal("credit redeemed for a replacement account")
++	}
++}
+diff --git a/internal/repository/migration/20261126_quota_auto_resets.go b/internal/repository/migration/20261126_quota_auto_resets.go
+new file mode 100644
+index 00000000..cebd67a6
+--- /dev/null
++++ b/internal/repository/migration/20261126_quota_auto_resets.go
+@@ -0,0 +1,13 @@
++package migration
++
++import (
++	"cpa-usage-keeper/internal/entities"
++	"gorm.io/gorm"
++)
++
++func createQuotaAutoResets(tx *gorm.DB) error {
++	if tx.Migrator().HasTable(&entities.QuotaAutoReset{}) {
++		return nil
++	}
++	return tx.Migrator().CreateTable(&entities.QuotaAutoReset{})
++}
+diff --git a/internal/repository/migration/migration.go b/internal/repository/migration/migration.go
+index 4e897f31..dc2e8064 100644
+--- a/internal/repository/migration/migration.go
++++ b/internal/repository/migration/migration.go
+@@ -328,6 +328,7 @@ func orderedMigrations() []databaseMigration {
+ 		{version: migrationAddUsageEventEffectiveServiceTier, run: addUsageEventEffectiveServiceTierMigration},
+ 		{version: migrationAddPluginAPIKeySources, run: addPluginAPIKeySourcesMigration},
+ 		{version: migrationAddPromptPreviews, run: addPromptPreviewsMigration},
++		{version: "20261126_quota_auto_resets", run: createQuotaAutoResets},
+ 	}
+ }
+ 
+diff --git a/internal/repository/migration/test/migration_test.go b/internal/repository/migration/test/migration_test.go
+index 9c1468c4..a2129707 100644
+--- a/internal/repository/migration/test/migration_test.go
++++ b/internal/repository/migration/test/migration_test.go
+@@ -104,6 +104,7 @@ func TestOrderedMigrationsPreservesExecutionOrder(t *testing.T) {
+ 		"20261023_usage_event_effective_service_tier",
+ 		"20261028_plugin_api_key_sources",
+ 		"20261108_prompt_previews",
++		"20261126_quota_auto_resets",
+ 	}
+ 	assertStringSlicesEqual(t, want, got)
+ }
+diff --git a/web/src/components/usage/credentials/CredentialSections.module.scss b/web/src/components/usage/credentials/CredentialSections.module.scss
+index 54394d3f..b0d01c3f 100644
+--- a/web/src/components/usage/credentials/CredentialSections.module.scss
++++ b/web/src/components/usage/credentials/CredentialSections.module.scss
+@@ -1563,6 +1563,15 @@ $credential-health-tooltip-border-width: 1px;
+   border-top: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+ }
+ 
++.credentialAutoReset {
++  display: flex;
++  align-items: baseline;
++  flex-wrap: wrap;
++  gap: 4px 8px;
++  color: var(--text-secondary);
++  font-size: 0.8rem;
++}
++
+ .credentialCardActions {
+   display: flex;
+   align-items: center;
+diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
+index f4065642..f3911cd3 100644
+--- a/web/src/components/usage/credentials/CredentialsSection.tsx
++++ b/web/src/components/usage/credentials/CredentialsSection.tsx
+@@ -24,6 +24,7 @@ import { CredentialSubscriptionBadge } from './CredentialSubscriptionBadge'
+ import { CredentialKimiSiteBadge, kimiCredentialSite } from './CredentialKimiSiteBadge'
+ import { CredentialCardGrid, CredentialCardShell, CredentialSectionShell, CredentialsPagination, MetricPill, RequestMetric, TonePercent, cacheReadRateTone, capitalize, credentialToneClassName, formatCredentialNumber, successRateTone } from './CredentialSectionShell'
+ import { QuotaPolicyPanel } from './QuotaPolicyPanel'
++import { QuotaAutoResetControl, useQuotaAutoResets } from './QuotaAutoResetControl'
+ import { CredentialPriorityEditor } from './CredentialPriorityEditor'
+ import { ProviderBrandIcon, providerBrandIconKey } from '@/components/ProviderBrandIcon'
+ import { CredentialStatusToggle } from './CredentialStatusToggle'
+@@ -139,8 +140,14 @@ interface CredentialsSectionProps {
+   onAfterInvalidAccountAction?: () => Promise<void>
+ }
+ 
++function credentialQuotaProvider(row: CredentialRow) {
++  const provider = row.identity.provider?.trim().toLowerCase() ?? ''
++  return QUOTA_PROVIDER_TYPES.has(provider) ? provider : row.identity.type?.trim().toLowerCase()
++}
++
+ export function CredentialsSection({ reportingOnly = false, rows, timeZone, total, page, totalPages, pageSize, activeOnly, sort, loading, quotaRefreshing, quotaRefreshError, quotaInspectionStatus, quotaInspectionLoading, quotaInspectionStarting, quotaInspectionError, onPageChange, onPageSizeChange, onActiveOnlyChange, onSortChange, onRefreshQuota, onRefreshQuotaForAuthIndex, onResetQuotaForAuthIndex, editFallbackRef, onEdit, onOpenDetails, statusPendingIdentityIds, onToggleStatus, onSavePriority, onRefreshInspectionStatus, onStartInspection, onAfterInvalidAccountAction }: CredentialsSectionProps) {
+   const { t } = useTranslation()
++  const autoResets = useQuotaAutoResets(!reportingOnly && rows.some(row => !row.identity.is_deleted && credentialQuotaProvider(row) === 'codex'))
+   const [inspectionOpen, setInspectionOpen] = useState(false)
+   const [providerStatsOpen, setProviderStatsOpen] = useState(false)
+   const [quotaUsageMode, setQuotaUsageMode] = useState<QuotaUsageMode>('current')
+@@ -254,8 +261,7 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+       <CredentialCardGrid>
+       {rows.map((row) => {
+         const rowRefreshing = isRowRefreshing(row)
+-        const normalizedProvider = row.identity.provider?.trim().toLowerCase() ?? ''
+-        const quotaProvider = QUOTA_PROVIDER_TYPES.has(normalizedProvider) ? normalizedProvider : row.identity.type?.trim().toLowerCase()
++        const quotaProvider = credentialQuotaProvider(row)
+         const isClaude = quotaProvider === 'claude'
+         const resetCredits = (isClaude ? row.claudeResetGrants?.availableCount : row.quotaResetCreditsAvailableCount) ?? 0
+         const canResetQuota = resetCredits > 0 && !row.identity.is_deleted && !rowRefreshing && !row.quotaResetting
+@@ -345,7 +351,25 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+               </>
+             )}
+             health={<CredentialHealthPanel variant="compact" showCompactMeta displayName={row.displayName} health={row.credentialHealth} lastUsedAt={row.identity.last_used_at} windowCacheReadRate={row.windowCacheReadRate} />}
+-            quota={<><CredentialQuotaPanel variant="compact" row={row} quotaUsageMode={quotaUsageMode} timeZone={timeZone} />{!reportingOnly && !row.identity.is_deleted && <QuotaPolicyPanel authIndex={row.identity.identity} provider={row.identity.type} />}</>}
++            quota={(
++              <>
++                <CredentialQuotaPanel variant="compact" row={row} quotaUsageMode={quotaUsageMode} timeZone={timeZone} />
++                {!reportingOnly && !row.identity.is_deleted && (
++                  <>
++                    <QuotaPolicyPanel authIndex={row.identity.identity} provider={row.identity.type} />
++                    {quotaProvider === 'codex' && (
++                      <QuotaAutoResetControl
++                        key={row.identity.identity}
++                        authIndex={row.identity.identity}
++                        displayName={row.displayName}
++                        disabled={row.identity.disabled === true}
++                        autoResets={autoResets}
++                      />
++                    )}
++                  </>
++                )}
++              </>
++            )}
+             actions={!reportingOnly && (
+               <>
+                   {onEdit && <CredentialEditButton identityId={row.identity.id} disabled={row.identity.is_deleted} onEdit={() => onEdit(row)} />}
+diff --git a/web/src/components/usage/credentials/QuotaAutoResetControl.tsx b/web/src/components/usage/credentials/QuotaAutoResetControl.tsx
+new file mode 100644
+index 00000000..64c3b6b2
+--- /dev/null
++++ b/web/src/components/usage/credentials/QuotaAutoResetControl.tsx
+@@ -0,0 +1,140 @@
++import { useCallback, useEffect, useState } from 'react'
++import { useTranslation } from 'react-i18next'
++import { Button } from '@/components/ui/Button'
++import { Modal } from '@/components/ui/Modal'
++import { accountActionError } from '@/lib/accountErrors'
++import { apiFetch, apiPath, parseApiError } from '@/lib/api'
++import { startLiveRefresh } from '@/lib/live'
++import styles from './CredentialSections.module.scss'
++
++type AutoResetStatus =
++  | 'armed'
++  | 'running'
++  | 'cancelled'
++  | 'no_credit'
++  | 'reset'
++  | 'recovery_failed'
++  | 'unconfirmed'
++  | 'failed'
++  | 'account_changed'
++
++interface AutoResetState {
++  auth_index: string
++  revision: number
++  status: AutoResetStatus
++}
++
++export function useQuotaAutoResets(enabled: boolean) {
++  const [states, setStates] = useState<Record<string, AutoResetState> | null>(null)
++  const [loadError, setLoadError] = useState(false)
++
++  const merge = useCallback((items: AutoResetState[]) => {
++    setStates(previous => {
++      const next = { ...previous }
++      for (const item of items) {
++        if ((next[item.auth_index]?.revision ?? 0) < item.revision) next[item.auth_index] = item
++      }
++      return next
++    })
++  }, [])
++
++  useEffect(() => {
++    if (!enabled) return
++    return startLiveRefresh(async signal => {
++      try {
++        const response = await apiFetch(apiPath('/quota/auto-resets'), { signal })
++        if (!response.ok) throw new Error('Quota auto-reset status unavailable')
++        const result = await response.json() as { items: AutoResetState[] }
++        if (signal.aborted) return
++        merge(result.items)
++        setLoadError(false)
++      } catch {
++        if (!signal.aborted) setLoadError(true)
++      }
++    }, ['auto_reset', 'clock'])
++  }, [enabled, merge])
++
++  const setArmed = async (authIndex: string, revision: number, armed: boolean) => {
++    const response = await apiFetch(apiPath(`/quota/auto-resets/${encodeURIComponent(authIndex)}`), {
++      method: 'PUT',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({ armed, revision }),
++    })
++    if (!response.ok) await parseApiError(response, 'Could not save auto-reset')
++    merge([await response.json() as AutoResetState])
++  }
++
++  return { states, loadError, setArmed }
++}
++
++interface AutoResetControlProps {
++  authIndex: string
++  displayName: string
++  disabled?: boolean
++  autoResets: ReturnType<typeof useQuotaAutoResets>
++}
++
++export function QuotaAutoResetControl({ authIndex, displayName, disabled, autoResets }: AutoResetControlProps) {
++  const { t } = useTranslation()
++  const [confirmRevision, setConfirmRevision] = useState<number | null>(null)
++  const [saving, setSaving] = useState(false)
++  const [error, setError] = useState('')
++  const state = autoResets.states?.[authIndex]
++  const revision = state?.revision ?? 0
++  const armed = state?.status === 'armed'
++  const running = state?.status === 'running'
++
++  const save = async (nextArmed: boolean, expectedRevision: number) => {
++    setSaving(true)
++    setError('')
++    try {
++      await autoResets.setArmed(authIndex, expectedRevision, nextArmed)
++      setConfirmRevision(null)
++    } catch (caught) {
++      setError(accountActionError(caught, t('usage_stats.credentials_auto_reset_save_failed')))
++    } finally {
++      setSaving(false)
++    }
++  }
++
++  return (
++    <div className={styles.credentialAutoReset}>
++      <Button
++        type="button"
++        size="sm"
++        variant="ghost"
++        disabled={saving || running || !autoResets.states || (!armed && disabled)}
++        onClick={() => {
++          if (armed) void save(false, revision)
++          else { setError(''); setConfirmRevision(revision) }
++        }}
++      >
++        {t(armed ? 'usage_stats.credentials_auto_reset_cancel' : 'usage_stats.credentials_auto_reset_button')}
++      </Button>
++      {state && <span role="status">{t(`usage_stats.credentials_auto_reset_${state.status}`)}</span>}
++      {!autoResets.states && autoResets.loadError && <span role="status">{t('usage_stats.credentials_auto_reset_load_failed')}</span>}
++      {error && confirmRevision === null && <span role="alert">{error}</span>}
++      <Modal
++        open={confirmRevision !== null}
++        title={t('usage_stats.credentials_auto_reset_button')}
++        onClose={() => setConfirmRevision(null)}
++        closeDisabled={saving}
++        footer={
++          <>
++            <Button variant="secondary" disabled={saving} onClick={() => setConfirmRevision(null)}>{t('common.cancel')}</Button>
++            <Button
++              loading={saving}
++              disabled={disabled || confirmRevision !== revision}
++              onClick={() => { if (confirmRevision !== null) void save(true, confirmRevision) }}
++            >
++              {t('usage_stats.credentials_auto_reset_arm')}
++            </Button>
++          </>
++        }
++      >
++        <p>{t('usage_stats.credentials_auto_reset_confirm', { name: displayName })}</p>
++        {error && <p role="alert">{error}</p>}
++      </Modal>
++    </div>
++  )
++}
+diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
+index 50e3f142..c172726e 100644
+--- a/web/src/i18n/index.ts
++++ b/web/src/i18n/index.ts
+@@ -733,6 +733,21 @@ const resources = {
+         credentials_quota_reset_message_suffix: 'reset credits are available.',
+         credentials_quota_reset_message_prompt: 'Consume 1 credit to reset now?',
+         credentials_quota_reset_confirm: 'Reset',
++        credentials_auto_reset_button: 'Auto-reset once',
++        credentials_auto_reset_cancel: 'Cancel auto-reset',
++        credentials_auto_reset_arm: 'Arm auto-reset',
++        credentials_auto_reset_confirm: 'Keeper will use one available reset when {{name}}’s weekly Codex quota reaches 0%. It may run immediately if the quota is already exhausted. Auto-reset switches off after the attempt or if no reset is available.',
++        credentials_auto_reset_armed: 'Armed for weekly quota',
++        credentials_auto_reset_running: 'Reset in progress',
++        credentials_auto_reset_cancelled: 'Auto-reset cancelled',
++        credentials_auto_reset_no_credit: 'No reset available',
++        credentials_auto_reset_reset: 'Weekly quota reset',
++        credentials_auto_reset_recovery_failed: 'Quota reset, but account recovery failed',
++        credentials_auto_reset_unconfirmed: 'Reset could not be confirmed',
++        credentials_auto_reset_failed: 'Auto-reset failed',
++        credentials_auto_reset_account_changed: 'Credential changed or was disabled',
++        credentials_auto_reset_load_failed: 'Auto-reset status unavailable',
++        credentials_auto_reset_save_failed: 'Could not save auto-reset. Reload to check its status.',
+         credentials_quota_reset_failed: 'Quota reset failed. Please try again later.',
+         credentials_quota_reset_recovery_failed: 'Quota was reset, but CPA account recovery failed. Recover the account in CPA; do not reset quota again.',
+         credentials_quota_reset_expiry_title: 'Manual reset expiry',
+@@ -1871,6 +1886,21 @@ const resources = {
+         credentials_quota_reset_message_suffix: '次可用重置次数。',
+         credentials_quota_reset_message_prompt: '是否消耗 1 次立即重置？',
+         credentials_quota_reset_confirm: '确认重置',
++        credentials_auto_reset_button: '自动重置一次',
++        credentials_auto_reset_cancel: '取消自动重置',
++        credentials_auto_reset_arm: '启用自动重置',
++        credentials_auto_reset_confirm: '当 {{name}} 的 Codex 每周额度降至 0% 时，Keeper 将使用一次可用的重置。若额度已耗尽，可能立即执行。尝试后或无可用重置时，自动重置将关闭。',
++        credentials_auto_reset_armed: '已启用，等待每周额度耗尽',
++        credentials_auto_reset_running: '正在重置',
++        credentials_auto_reset_cancelled: '已取消自动重置',
++        credentials_auto_reset_no_credit: '无可用重置',
++        credentials_auto_reset_reset: '每周额度已重置',
++        credentials_auto_reset_recovery_failed: '额度已重置，但账户恢复失败',
++        credentials_auto_reset_unconfirmed: '无法确认重置结果',
++        credentials_auto_reset_failed: '自动重置失败',
++        credentials_auto_reset_account_changed: '凭据已更改或停用',
++        credentials_auto_reset_load_failed: '无法获取自动重置状态',
++        credentials_auto_reset_save_failed: '无法保存自动重置。请重新加载以查看状态。',
+         credentials_quota_reset_failed: '重置限额失败，请稍后重试。',
+         credentials_quota_reset_recovery_failed: '限额已重置，但 CPA 账号恢复失败。请在 CPA 中恢复账号，勿重复重置限额。',
+         credentials_quota_reset_expiry_title: '主动重置过期时间',
+@@ -3008,6 +3038,21 @@ const resources = {
+         credentials_quota_reset_message_suffix: '次可用重置次數。',
+         credentials_quota_reset_message_prompt: '是否消耗 1 次立即重置？',
+         credentials_quota_reset_confirm: '確認重置',
++        credentials_auto_reset_button: '自動重置一次',
++        credentials_auto_reset_cancel: '取消自動重置',
++        credentials_auto_reset_arm: '啟用自動重置',
++        credentials_auto_reset_confirm: '當 {{name}} 的 Codex 每週額度降至 0% 時，Keeper 將使用一次可用的重置。若額度已耗盡，可能立即執行。嘗試後或無可用重置時，自動重置將關閉。',
++        credentials_auto_reset_armed: '已啟用，等待每週額度耗盡',
++        credentials_auto_reset_running: '正在重置',
++        credentials_auto_reset_cancelled: '已取消自動重置',
++        credentials_auto_reset_no_credit: '無可用重置',
++        credentials_auto_reset_reset: '每週額度已重置',
++        credentials_auto_reset_recovery_failed: '額度已重置，但帳戶恢復失敗',
++        credentials_auto_reset_unconfirmed: '無法確認重置結果',
++        credentials_auto_reset_failed: '自動重置失敗',
++        credentials_auto_reset_account_changed: '憑證已變更或停用',
++        credentials_auto_reset_load_failed: '無法取得自動重置狀態',
++        credentials_auto_reset_save_failed: '無法儲存自動重置。請重新載入以查看狀態。',
+         credentials_quota_reset_failed: '重置限額失敗，請稍後重試。',
+         credentials_quota_reset_recovery_failed: '限額已重置，但 CPA 帳號恢復失敗。請在 CPA 中恢復帳號，勿重複重置限額。',
+         credentials_quota_reset_expiry_title: '主動重置過期時間',
+diff --git a/web/src/lib/live.ts b/web/src/lib/live.ts
+index 345cba2e..ca7fdc80 100644
+--- a/web/src/lib/live.ts
++++ b/web/src/lib/live.ts
+@@ -1,6 +1,6 @@
+ import { apiFetch, apiPath } from './api';
+ 
+-export type LiveTopic = 'sync' | 'usage' | 'quota' | 'accounts' | 'clock' | 'rebalance' | 'routing';
++export type LiveTopic = 'sync' | 'usage' | 'quota' | 'accounts' | 'clock' | 'rebalance' | 'routing' | 'auto_reset';
+ export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'paused';
+ type Listener = (topics: LiveTopic[]) => void;
+ const listeners = new Set<Listener>();
+@@ -40,7 +40,7 @@ async function connect() {
+         if (!data) continue;
+         const payload = JSON.parse(data) as { topics?: unknown };
+         if (!Array.isArray(payload.topics)) continue;
+-        const topics = payload.topics.filter((topic): topic is LiveTopic => ['sync', 'usage', 'quota', 'accounts', 'clock', 'rebalance', 'routing'].includes(String(topic)));
++        const topics = payload.topics.filter((topic): topic is LiveTopic => ['sync', 'usage', 'quota', 'accounts', 'clock', 'rebalance', 'routing', 'auto_reset'].includes(String(topic)));
+         attempts = 0; setStatus('live'); listeners.forEach(listener => listener(topics));
+       }
+     }

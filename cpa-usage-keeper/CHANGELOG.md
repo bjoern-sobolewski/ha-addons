@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.13
+
+- Arm a single automatic reset per Codex account in Credentials when its weekly quota reaches 0%. The activation switches off after the attempt or when no reset is available.
+
 ## 0.2.12
 
 - Give Ultrafast requested its own series in Response speed, including retained request history.

@@ -784,19 +784,50 @@ index 9c1468c4..a2129707 100644
  	}
  	assertStringSlicesEqual(t, want, got)
  }
+diff --git a/web/src/components/usage/credentials/CredentialSectionShell.tsx b/web/src/components/usage/credentials/CredentialSectionShell.tsx
+index 9946f6c7..4be20b6f 100644
+--- a/web/src/components/usage/credentials/CredentialSectionShell.tsx
++++ b/web/src/components/usage/credentials/CredentialSectionShell.tsx
+@@ -25,6 +25,7 @@ interface CredentialCardShellProps {
+   metricsTitle?: string
+   health: ReactNode
+   quota?: ReactNode
++  leadingAction?: ReactNode
+   actions?: ReactNode
+ }
+ 
+@@ -50,7 +51,7 @@ export function CredentialCardGrid({ children }: { children: ReactNode }) {
+   return <div className={styles.credentialCardGrid}>{children}</div>
+ }
+ 
+-export function CredentialCardShell({ identityId, icon, title, badges, status, metrics, metricsTitle, health, quota, actions }: CredentialCardShellProps) {
++export function CredentialCardShell({ identityId, icon, title, badges, status, metrics, metricsTitle, health, quota, leadingAction, actions }: CredentialCardShellProps) {
+   // 两类身份共用卡片骨架；详情入口与编辑等操作独立，卡片留白不绑定点击。
+   return (
+     <article className={styles.credentialCard} data-credential-card="true" data-credential-identity={identityId}>
+@@ -66,6 +67,7 @@ export function CredentialCardShell({ identityId, icon, title, badges, status, m
+       {health}
+       {quota && <div className={styles.credentialCardQuota}>{quota}</div>}
+       <div className={styles.credentialCardFooter}>
++        {leadingAction}
+         <div className={styles.credentialCardActions}>
+           {actions}
+         </div>
 diff --git a/web/src/components/usage/credentials/CredentialSections.module.scss b/web/src/components/usage/credentials/CredentialSections.module.scss
-index 54394d3f..b0d01c3f 100644
+index 54394d3f..7eecc470 100644
 --- a/web/src/components/usage/credentials/CredentialSections.module.scss
 +++ b/web/src/components/usage/credentials/CredentialSections.module.scss
-@@ -1563,6 +1563,15 @@ $credential-health-tooltip-border-width: 1px;
+@@ -1563,6 +1563,17 @@ $credential-health-tooltip-border-width: 1px;
    border-top: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
  }
  
 +.credentialAutoReset {
 +  display: flex;
-+  align-items: baseline;
++  align-items: center;
 +  flex-wrap: wrap;
 +  gap: 4px 8px;
++  min-width: 0;
++  overflow-wrap: anywhere;
 +  color: var(--text-secondary);
 +  font-size: 0.8rem;
 +}
@@ -805,7 +836,7 @@ index 54394d3f..b0d01c3f 100644
    display: flex;
    align-items: center;
 diff --git a/web/src/components/usage/credentials/CredentialsSection.tsx b/web/src/components/usage/credentials/CredentialsSection.tsx
-index f4065642..f3911cd3 100644
+index f4065642..3a713995 100644
 --- a/web/src/components/usage/credentials/CredentialsSection.tsx
 +++ b/web/src/components/usage/credentials/CredentialsSection.tsx
 @@ -24,6 +24,7 @@ import { CredentialSubscriptionBadge } from './CredentialSubscriptionBadge'
@@ -841,7 +872,7 @@ index f4065642..f3911cd3 100644
          const isClaude = quotaProvider === 'claude'
          const resetCredits = (isClaude ? row.claudeResetGrants?.availableCount : row.quotaResetCreditsAvailableCount) ?? 0
          const canResetQuota = resetCredits > 0 && !row.identity.is_deleted && !rowRefreshing && !row.quotaResetting
-@@ -345,7 +351,25 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
+@@ -345,7 +351,21 @@ export function CredentialsSection({ reportingOnly = false, rows, timeZone, tota
                </>
              )}
              health={<CredentialHealthPanel variant="compact" showCompactMeta displayName={row.displayName} health={row.credentialHealth} lastUsedAt={row.identity.last_used_at} windowCacheReadRate={row.windowCacheReadRate} />}
@@ -849,21 +880,17 @@ index f4065642..f3911cd3 100644
 +            quota={(
 +              <>
 +                <CredentialQuotaPanel variant="compact" row={row} quotaUsageMode={quotaUsageMode} timeZone={timeZone} />
-+                {!reportingOnly && !row.identity.is_deleted && (
-+                  <>
-+                    <QuotaPolicyPanel authIndex={row.identity.identity} provider={row.identity.type} />
-+                    {quotaProvider === 'codex' && (
-+                      <QuotaAutoResetControl
-+                        key={row.identity.identity}
-+                        authIndex={row.identity.identity}
-+                        displayName={row.displayName}
-+                        disabled={row.identity.disabled === true}
-+                        autoResets={autoResets}
-+                      />
-+                    )}
-+                  </>
-+                )}
++                {!reportingOnly && !row.identity.is_deleted && <QuotaPolicyPanel authIndex={row.identity.identity} provider={row.identity.type} />}
 +              </>
++            )}
++            leadingAction={!reportingOnly && !row.identity.is_deleted && quotaProvider === 'codex' && (
++              <QuotaAutoResetControl
++                key={row.identity.identity}
++                authIndex={row.identity.identity}
++                displayName={row.displayName}
++                disabled={row.identity.disabled === true}
++                autoResets={autoResets}
++              />
 +            )}
              actions={!reportingOnly && (
                <>
@@ -1014,6 +1041,27 @@ index 00000000..64c3b6b2
 +    </div>
 +  )
 +}
+diff --git a/web/src/components/usage/credentials/test/CredentialDetailTriggers.test.tsx b/web/src/components/usage/credentials/test/CredentialDetailTriggers.test.tsx
+index c500ccf7..ad5ac2a1 100644
+--- a/web/src/components/usage/credentials/test/CredentialDetailTriggers.test.tsx
++++ b/web/src/components/usage/credentials/test/CredentialDetailTriggers.test.tsx
+@@ -105,7 +105,15 @@ describe('credential card detail triggers', () => {
+     await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+ 
+     if (authType === 1) {
+-      await act(async () => action(i18n.t('usage_stats.credentials_refresh_single', { name: identity.displayName })).click())
++      const refresh = action(i18n.t('usage_stats.credentials_refresh_single', { name: identity.displayName }))
++      const autoReset = Array.from(card.querySelectorAll('button')).find((button) =>
++        button.textContent === i18n.t('usage_stats.credentials_auto_reset_button'))
++      const footer = card.lastElementChild
++      expect(autoReset).toBeDefined()
++      expect(footer?.firstElementChild?.contains(autoReset!)).toBe(true)
++      expect(footer?.lastElementChild?.contains(refresh)).toBe(true)
++
++      await act(async () => refresh.click())
+       expect(onRefreshQuotaForAuthIndex).toHaveBeenCalledWith(identity.identity)
+       const reset = action(i18n.t('usage_stats.credentials_quota_reset_button', { count: '2' }))
+       await act(async () => reset.click())
 diff --git a/web/src/i18n/index.ts b/web/src/i18n/index.ts
 index 50e3f142..c172726e 100644
 --- a/web/src/i18n/index.ts

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.14
+
+- Move Auto-reset once to the left side of each Codex credential card’s bottom bar.
+
 ## 0.2.13
 
 - Arm a single automatic reset per Codex account in Credentials when its weekly quota reaches 0%. The activation switches off after the attempt or when no reset is available.
